@@ -15,6 +15,7 @@ jsoup = "1.18.3"
 datastore = "1.1.1"
 workRuntime = "2.10.0"
 coil = "2.7.0"
+libmpv = "1.0.0"
 
 [libraries]
 androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstaller", version = "1.4.1" }
@@ -40,6 +41,8 @@ androidx-room-compiler = { module = "androidx.room:room-compiler", version.ref =
 media3-exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = "media3" }
 media3-datasource-okhttp = { module = "androidx.media3:media3-datasource-okhttp", version.ref = "media3" }
 media3-database = { module = "androidx.media3:media3-database", version.ref = "media3" }
+# libmpv (Maven Central): menyediakan is.xyz.mpv.MPVLib + libmpv.so semua ABI, dipakai MPVLibBridge lewat refleksi.
+libmpv = { module = "dev.jdtech.mpv:libmpv", version.ref = "libmpv" }
 junit = { module = "junit:junit", version.ref = "junit" }
 # org.json asli untuk tes JVM engine: stub android.jar mengembalikan nilai kosong sehingga KrakenfilesExtractor tak bisa diuji.
 org-json = { module = "org.json:json", version = "20240303" }

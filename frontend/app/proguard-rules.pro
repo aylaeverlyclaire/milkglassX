@@ -5,3 +5,6 @@
 -keep,includedescriptorclasses class com.milkglass.app.**$$serializer { *; }
 -keepclassmembers class com.milkglass.app.** { *** Companion; }
 -keepclasseswithmembers class com.milkglass.app.** { kotlinx.serialization.KSerializer serializer(...); }
+
+# libmpv dipanggil lewat refleksi (MPVLibBridge) dan JNI
+-keep class is.xyz.mpv.** { *; }
