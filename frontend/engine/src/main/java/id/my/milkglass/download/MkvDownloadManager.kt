@@ -62,7 +62,7 @@ object MkvDownloadConcurrency {
 class MkvDownloadManager(
     private val context: Context
 ) {
-    private val workManager: WorkManager = WorkManager.getInstance(context)
+    private val workManager: WorkManager? = runCatching { WorkManager.getInstance(context.applicationContext) }.getOrNull()
 
     fun enqueueEpisodeDownload(req: MkvDownloadRequest): String {
         val uniqueName = "mkv_dl_${req.animeSlug}_ep_${req.episodeNumber}_${req.preferredQuality.label}"
@@ -86,13 +86,15 @@ class MkvDownloadManager(
             .addTag("milkglass_mkv_download")
             .build()
 
-        workManager.enqueueUniqueWork(uniqueName, ExistingWorkPolicy.KEEP, workRequest)
+        val wm = workManager ?: throw IllegalStateException("WorkManager belum terinisialisasi")
+        wm.enqueueUniqueWork(uniqueName, ExistingWorkPolicy.KEEP, workRequest)
         return uniqueName
     }
 
 
     fun observeDownload(uniqueName: String): Flow<MkvDownloadStatus> {
-        return workManager.getWorkInfosForUniqueWorkFlow(uniqueName).map { list ->
+        val wm = workManager ?: return kotlinx.coroutines.flow.flowOf(MkvDownloadStatus())
+        return wm.getWorkInfosForUniqueWorkFlow(uniqueName).map { list ->
             val info = list.firstOrNull() ?: return@map MkvDownloadStatus()
             MkvDownloadStatus(
                 isRunning = info.state == WorkInfo.State.ENQUEUED || info.state == WorkInfo.State.RUNNING,
@@ -105,7 +107,7 @@ class MkvDownloadManager(
     }
 
     fun cancelDownload(uniqueName: String) {
-        workManager.cancelUniqueWork(uniqueName)
+        workManager?.cancelUniqueWork(uniqueName)
     }
 
     fun getDownloadedFile(animeSlug: String, episodeNumber: Int, quality: MkvQuality): File {

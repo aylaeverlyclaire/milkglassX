@@ -184,6 +184,9 @@ class CloudflareDohDns(
         .build()
 
     override fun lookup(hostname: String): List<InetAddress> {
+        if (hostname == "127.0.0.1" || hostname == "localhost" || hostname == "1.1.1.1") {
+            return Dns.SYSTEM.lookup(hostname)
+        }
         val now = System.currentTimeMillis()
         cache[hostname]?.let { (expiresAt, addrs) ->
             if (expiresAt > now && addrs.isNotEmpty()) return addrs

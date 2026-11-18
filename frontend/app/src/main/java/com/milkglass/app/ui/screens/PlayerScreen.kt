@@ -3,7 +3,7 @@ package com.milkglass.app.ui.screens
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.view.SurfaceView
+import android.view.TextureView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -121,6 +121,12 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
     }
 
     
+    DisposableEffect(playerManager) {
+        onDispose {
+            playerManager.release()
+        }
+    }
+
     DisposableEffect(e, e.episode, playerManager) {
         val slug = StreamResolver.buildEpisodeSlug(e.anime.romaji, e.episode)
         fun startStream(qualityPref: String, resumeMs: Long) {
@@ -130,6 +136,10 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                 "480p" -> 480
                 else -> 0
             }
+            e.nativeStreamActive = false
+            e.nativeBuffering = true
+            e.nativeDurationSeconds = null
+            e.isPlaying = false
             playerManager.setMaxVideoResolution(maxH)
             playerManager.playStreamEpisode(
                 slug = slug,
@@ -156,35 +166,44 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
             e.onNativePlayPause = null
             e.onNativeRetry = null
             e.nativeStreamActive = false
-            playerManager.release()
+            playerManager.stopStreamSession()
         }
     }
 
     LaunchedEffect(nativeState) {
         when (nativeState) {
+            is PlayerState.Idle,
             is PlayerState.Buffering -> {
-                e.bufferTimer = 1.2
+                e.nativeBuffering = true
+                e.bufferTimer = 1.0
+                e.isPlaying = false
             }
             is PlayerState.Playing -> {
                 e.nativeStreamActive = true
+                e.nativeBuffering = false
                 e.bufferTimer = 0.0
                 e.isPlaying = true
             }
             is PlayerState.Paused -> {
                 e.nativeStreamActive = true
+                e.nativeBuffering = false
                 e.bufferTimer = 0.0
+                e.isPlaying = false
             }
             is PlayerState.Ended -> {
-                if (e.nativeStreamActive) {
+                e.nativeBuffering = false
+                e.bufferTimer = 0.0
+                e.isPlaying = false
+                if (e.nativeStreamActive && e.duration > 0) {
                     e.position = e.duration.toDouble()
                 }
             }
             is PlayerState.Error -> {
                 e.nativeStreamActive = false
+                e.nativeBuffering = false
                 e.isPlaying = false
                 e.bufferTimer = 0.0
             }
-            else -> Unit
         }
     }
 
@@ -196,6 +215,8 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
             while (true) {
                 delay(250)
                 if (e.nativeStreamActive) {
+                    val durMs = playerManager.getDuration()
+                    if (durMs > 0L) e.nativeDurationSeconds = (durMs / 1000L).toInt().coerceAtLeast(1)
                     val posMs = playerManager.getCurrentPosition()
                     if (posMs > 0L) e.syncFromNativePlayer(posMs)
                 }
@@ -230,9 +251,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                             Color(0xFFFFB4AB),
                             Modifier.weight(1f).padding(end = 12.dp)
                         )
-                        MilkButton("Coba Lagi", variant = ButtonVariant.Outlined, onClick = {
-                            e.onNativeRetry?.invoke()
-                        })
+                        MilkButton("Coba Lagi", onClick = { e.onNativeRetry?.invoke() }, variant = ButtonVariant.Outlined, small = true)
                     }
                 }
                 PlayerInfo(ctl, entry, Modifier.weight(1f))
@@ -288,8 +307,8 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
     
     val alpha by animateFloatAsState(if (e.faded) 0f else 1f, tween(if (e.faded) 200 else 120, easing = MilkEasing.Ease), label = "controls")
     val cutout = if (fullscreen) Modifier.windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)) else Modifier
-    val buffering = e.bufferTimer > 0 && !e.isOffline && e.adSecondsLeft <= 0
-    val bufferingActive = e.bufferTimer > 0 || e.isOffline
+    val buffering = e.nativeBuffering && !e.isOffline
+    val bufferingActive = e.nativeBuffering || e.isOffline
 
     Box(
         
@@ -318,20 +337,38 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
     ) {
         
         
-        PosterArt(ctl.posterSpec(a, true), Modifier.fillMaxSize())
-        
-        if (e.nativeStreamActive) {
+        val subLines by playerManager.subtitleLines.collectAsState()
+        if (!e.nativeStreamActive) {
+            Box(Modifier.fillMaxSize().background(Color.Black))
+        } else {
             AndroidView(
                 factory = { ctx ->
-                    SurfaceView(ctx).also { sv ->
-                        playerManager.player?.setVideoSurfaceView(sv)
+                    TextureView(ctx).also { tv ->
+                        playerManager.player?.setVideoTextureView(tv)
                     }
                 },
-                update = { sv ->
-                    playerManager.player?.setVideoSurfaceView(sv)
+                update = { tv ->
+                    playerManager.player?.setVideoTextureView(tv)
                 },
                 modifier = Modifier.fillMaxSize()
             )
+        }
+        if (e.nativeStreamActive && subLines.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 20.dp, vertical = if (fullscreen) 56.dp else 36.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.68f))
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                MilkText(
+                    subLines.joinToString("\n"),
+                    ty.style(if (fullscreen) 16f else 13f, 600, if (fullscreen) 22f else 18f)
+                        .copy(shadow = Shadow(Color.Black, androidx.compose.ui.geometry.Offset(0f, 1.5f), 4f)),
+                    Color.White
+                )
+            }
         }
         Box(
             Modifier.align(Alignment.TopCenter).fillMaxWidth().height(80.dp).graphicsLayer { this.alpha = alpha }
@@ -537,24 +574,34 @@ private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Mo
                     else -> "Unduh MKV ${targetQuality.label}"
                 }
                 MilkButton(
-                    btnLabel,
-                    variant = if (alreadyDownloaded || dlStatus.isSucceeded) ButtonVariant.Outlined else ButtonVariant.Primary,
-                    dimmed = dlStatus.isRunning || alreadyDownloaded,
+                    text = btnLabel,
                     onClick = {
-                        dlManager.enqueueEpisodeDownload(
-                            MkvDownloadRequest(
-                                animeSlug = animeSlug,
-                                animeTitle = a.romaji.ifBlank { a.title },
-                                episodeNumber = ep,
-                                preferredQuality = targetQuality
-                            )
-                        )
-                    }
+                        if (!dlStatus.isRunning && !alreadyDownloaded) {
+                            runCatching {
+                                dlManager.enqueueEpisodeDownload(
+                                    MkvDownloadRequest(
+                                        animeSlug = animeSlug,
+                                        animeTitle = a.romaji.ifBlank { a.title },
+                                        episodeNumber = ep,
+                                        preferredQuality = targetQuality
+                                    )
+                                )
+                            }.onFailure { err ->
+                                ctl.showToast(err.message ?: "Gagal memulai unduhan MKV")
+                            }
+                        }
+                    },
+                    variant = if (alreadyDownloaded || dlStatus.isSucceeded) ButtonVariant.Outlined else ButtonVariant.Primary,
+                    small = true,
+                    dimmed = dlStatus.isRunning || alreadyDownloaded
                 )
                 if (dlStatus.isRunning) {
-                    MilkButton("Batal", variant = ButtonVariant.Outlined, onClick = {
-                        dlManager.cancelDownload(workName)
-                    })
+                    MilkButton(
+                        text = "Batal",
+                        onClick = { runCatching { dlManager.cancelDownload(workName) } },
+                        variant = ButtonVariant.Outlined,
+                        small = true
+                    )
                 }
             }
         }

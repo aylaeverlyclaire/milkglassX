@@ -9,6 +9,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.text.CueGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.DatabaseProvider
@@ -101,6 +102,9 @@ class PlayerManager(
     private val _availableResolutions = MutableStateFlow<List<String>>(listOf("Auto", "1080p", "720p", "480p"))
     val availableResolutions: StateFlow<List<String>> = _availableResolutions.asStateFlow()
 
+    private val _subtitleLines = MutableStateFlow<List<String>>(emptyList())
+    val subtitleLines: StateFlow<List<String>> = _subtitleLines.asStateFlow()
+
     val player: ExoPlayer?
         get() = exoPlayer
 
@@ -121,6 +125,18 @@ class PlayerManager(
             if (exoPlayer?.playbackState == Player.STATE_READY) {
                 _playerState.value = if (isPlaying) PlayerState.Playing(true) else PlayerState.Paused
             }
+        }
+
+        override fun onCues(cueGroup: CueGroup) {
+            val cleaned = cueGroup.cues.mapNotNull { cue ->
+                cue.text?.toString()
+                    ?.replace(Regex("\\u007B[^\\u007D]*\\u007D"), "")
+                    ?.replace("\\N", "\n")
+                    ?.replace("\\n", "\n")
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+            }
+            _subtitleLines.value = cleaned
         }
 
         override fun onPlayerError(error: PlaybackException) {

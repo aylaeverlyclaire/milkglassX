@@ -11,6 +11,7 @@ import id.my.milkglass.source.MkvQuality
 import id.my.milkglass.source.OploverzSourceProvider
 import id.my.milkglass.source.OtakudesuSourceProvider
 import id.my.milkglass.source.SamehadakuSourceProvider
+import id.my.milkglass.source.ResolvedMkvMedia
 import id.my.milkglass.source.SourcePriority
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -117,22 +118,18 @@ class StreamResolver(
             }
             is CascadeResult.Success -> {
                 val chosen = outcome.selected
-                val host = chosen.directUrl.toHttpUrlOrNull()?.host
-                    ?: throw StreamResolutionException(FailureReason.NOT_FOUND, "URL direct MKV tidak valid")
-                PublicIpGuard.verifyPublicHost(clients.dns, host)
-
-                val headers = buildMap {
-                    put("User-Agent", clients.webViewUserAgent)
-                    if (!chosen.referer.isNullOrBlank()) put("Referer", chosen.referer)
+                val candidates = (listOf(chosen) + outcome.alternatives).filter { cand ->
+                    val h = cand.directUrl.toHttpUrlOrNull()?.host ?: return@filter false
+                    runCatching { PublicIpGuard.verifyPublicHost(clients.dns, h); true }.getOrDefault(false)
+                }
+                if (candidates.isEmpty()) {
+                    throw StreamResolutionException(FailureReason.NOT_FOUND, "Semua URL hoster ditolak oleh validasi IP publik")
                 }
 
-                val availableRes = (listOf(chosen) + outcome.alternatives)
-                    .map { it.quality.label }
-                    .distinct()
+                val availableRes = candidates.map { it.quality.label }.distinct()
 
                 startHttpRangeProxySession(
-                    directUrl = chosen.directUrl,
-                    upstreamHeaders = headers,
+                    candidates = candidates,
                     availableResolutions = availableRes.ifEmpty { listOf("1080p", "720p", "480p") },
                     activeResolution = chosen.quality.label,
                     resolvedSourceId = chosen.source.id,
@@ -144,8 +141,7 @@ class StreamResolver(
     }
 
     private fun startHttpRangeProxySession(
-        directUrl: String,
-        upstreamHeaders: Map<String, String>,
+        candidates: List<ResolvedMkvMedia>,
         availableResolutions: List<String>,
         activeResolution: String,
         resolvedSourceId: String,
@@ -162,7 +158,9 @@ class StreamResolver(
                 while (isActive && !server.isClosed) {
                     val clientSocket = runCatching { server.accept() }.getOrNull() ?: break
                     launch(Dispatchers.IO) {
-                        handleLocalProxyRequest(clientSocket, expectedPath, directUrl, upstreamHeaders)
+                        runCatching {
+                            handleLocalProxyRequest(clientSocket, expectedPath, candidates)
+                        }
                     }
                 }
             } finally {
@@ -187,8 +185,7 @@ class StreamResolver(
     private fun handleLocalProxyRequest(
         clientSocket: Socket,
         expectedPath: String,
-        directUrl: String,
-        upstreamHeaders: Map<String, String>
+        candidates: List<ResolvedMkvMedia>
     ) {
         clientSocket.use { socket ->
             val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
@@ -213,38 +210,60 @@ class StreamResolver(
                 }
             }
 
-            val reqBuilder = Request.Builder().url(directUrl)
-            upstreamHeaders.forEach { (k, v) -> reqBuilder.header(k, v) }
-            if (!rangeHeader.isNullOrBlank()) reqBuilder.header("Range", rangeHeader)
-            if (method == "HEAD") reqBuilder.head()
-
-            clients.mediaAndApiClient.newCall(reqBuilder.build()).execute().use { resp ->
-                val statusText = when (resp.code) {
-                    206 -> "Partial Content"
-                    200 -> "OK"
-                    else -> resp.message.ifBlank { "Error" }
+            for ((idx, candidate) in candidates.withIndex()) {
+                val isLast = idx == candidates.lastIndex
+                val reqBuilder = Request.Builder()
+                    .url(candidate.directUrl)
+                    .header("User-Agent", clients.webViewUserAgent)
+                if (!candidate.referer.isNullOrBlank()) {
+                    reqBuilder.header("Referer", candidate.referer)
                 }
-                val sb = StringBuilder()
-                sb.append("HTTP/1.1 ${resp.code} $statusText\r\n")
-                sb.append("Content-Type: ${resp.header("Content-Type") ?: "video/x-matroska"}\r\n")
-                sb.append("Accept-Ranges: bytes\r\n")
-                resp.header("Content-Length")?.let { sb.append("Content-Length: $it\r\n") }
-                resp.header("Content-Range")?.let { sb.append("Content-Range: $it\r\n") }
-                sb.append("Connection: close\r\n\r\n")
-                out.write(sb.toString().toByteArray())
+                if (!rangeHeader.isNullOrBlank()) {
+                    reqBuilder.header("Range", rangeHeader)
+                }
+                if (method == "HEAD") reqBuilder.head()
 
-                if (method != "HEAD") {
-                    resp.body?.byteStream()?.let { stream ->
-                        BufferedInputStream(stream, 65536).use { bis ->
-                            val buf = ByteArray(65536)
-                            while (true) {
-                                val read = bis.read(buf)
-                                if (read == -1) break
-                                out.write(buf, 0, read)
+                val handled = runCatching {
+                    clients.mediaAndApiClient.newCall(reqBuilder.build()).execute().use { resp ->
+                        val shouldFailover = !isLast && (resp.code == 403 || resp.code == 429 || resp.code >= 500)
+                        if (shouldFailover) return@use false
+
+                        val statusText = when (resp.code) {
+                            206 -> "Partial Content"
+                            200 -> "OK"
+                            else -> resp.message.ifBlank { "Error" }
+                        }
+                        val sb = StringBuilder()
+                        sb.append("HTTP/1.1 ${resp.code} $statusText\r\n")
+                        sb.append("Content-Type: ${resp.header("Content-Type") ?: "video/x-matroska"}\r\n")
+                        sb.append("Accept-Ranges: bytes\r\n")
+                        resp.header("Content-Length")?.let { sb.append("Content-Length: $it\r\n") }
+                        resp.header("Content-Range")?.let { sb.append("Content-Range: $it\r\n") }
+                        sb.append("Connection: close\r\n\r\n")
+                        out.write(sb.toString().toByteArray())
+
+                        if (method != "HEAD") {
+                            resp.body?.byteStream()?.let { stream ->
+                                BufferedInputStream(stream, 65536).use { bis ->
+                                    val buf = ByteArray(65536)
+                                    while (true) {
+                                        val read = bis.read(buf)
+                                        if (read == -1) break
+                                        out.write(buf, 0, read)
+                                    }
+                                }
                             }
                         }
+                        out.flush()
+                        true
                     }
-                }
+                }.getOrDefault(false)
+
+                if (handled) return
+            }
+
+            runCatching {
+                out.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                 out.flush()
             }
         }

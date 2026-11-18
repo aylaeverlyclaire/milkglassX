@@ -296,3 +296,22 @@ class MkvHosterExtractorRegistry(
         }.getOrNull()
     }
 }
+
+
+object JsUnpacker {
+    private val packedRegex = Regex(
+        """\u007D\s*\(\s*'((?:[^'\\]|\\.)*)',\s*(\d+),\s*(\d+),\s*'((?:[^'\\]|\\.)*)'\s*\.split"""
+    )
+
+    fun unpack(source: String): String? {
+        val match = packedRegex.find(source) ?: return null
+        val payload = match.groupValues[1].replace("\\'", "'")
+        val radix = match.groupValues[2].toIntOrNull() ?: return null
+        val keys = match.groupValues[4].split("|")
+        return Regex("""\b(\w+)\b""").replace(payload) { m ->
+            val word = m.groupValues[1]
+            val idx = word.toLongOrNull(radix)?.toInt()
+            if (idx != null && idx in keys.indices && keys[idx].isNotEmpty()) keys[idx] else word
+        }
+    }
+}

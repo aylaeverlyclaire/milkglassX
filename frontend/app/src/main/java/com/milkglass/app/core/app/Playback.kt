@@ -56,7 +56,7 @@ class PlayerEngine(
     startPosition: Double,
 ) {
     var position by mutableDoubleStateOf(startPosition)
-    var isPlaying by mutableStateOf(true)
+    var isPlaying by mutableStateOf(false)
     var speed = 1.0
     var adSecondsLeft by mutableDoubleStateOf(0.0)
     var noticeTimer by mutableDoubleStateOf(0.0)
@@ -71,7 +71,7 @@ class PlayerEngine(
     private val prompter = SkipPrompter()
     var hasEnded by mutableStateOf(false)
     var isFullscreen by mutableStateOf(false)
-    var bufferTimer by mutableDoubleStateOf(1.5)
+    var bufferTimer by mutableDoubleStateOf(0.0)
     var isOffline by mutableStateOf(false)
     
     var faded by mutableStateOf(false)
@@ -80,11 +80,13 @@ class PlayerEngine(
 
     
     var nativeStreamActive by mutableStateOf(false)
+    var nativeBuffering by mutableStateOf(true)
+    var nativeDurationSeconds by mutableStateOf<Int?>(null)
     var onNativeSeekMs: ((Long) -> Unit)? = null
     var onNativePlayPause: ((Boolean) -> Unit)? = null
     var onNativeRetry: (() -> Unit)? = null
 
-    val duration: Int get() = ctl.durationSeconds(anime)
+    val duration: Int get() = nativeDurationSeconds ?: 0
     val opening: IntRange get() = anime.openingRange[0]..anime.openingRange[1]
     val ending: Pair<Double, Double> get() = endingRange(anime, duration)
     val inOpening: Boolean get() = position >= anime.openingRange[0] && position < anime.openingRange[1]
@@ -100,6 +102,7 @@ class PlayerEngine(
         !ctl.online && ctl.persisted.downloads["${anime.id}.$episode"] != 100
 
     fun save() {
+        if (!nativeStreamActive || duration <= 0) return
         ctl.persisted = savePlayback(ctl.persisted, anime, episode, position, duration, ctl.now())
     }
 
@@ -126,7 +129,6 @@ class PlayerEngine(
         hasEnded = false
         noticeTimer = 0.0
         controlsTimer = 3.0
-        bufferTimer = .5
         onNativeSeekMs?.invoke((position * 1000.0).toLong())
         updateUi()
     }
@@ -137,12 +139,12 @@ class PlayerEngine(
         position = p.coerceIn(0.0, duration.toDouble())
         hasEnded = false
         noticeTimer = 0.0
-        bufferTimer = .8
         onNativeSeekMs?.invoke((position * 1000.0).toLong())
         updateUi()
     }
 
     fun togglePlayPause() {
+        if (!nativeStreamActive) return
         if (hasEnded) {
             position = 0.0
             hasEnded = false
@@ -231,7 +233,7 @@ class PlayerEngine(
         if (!ctl.online) ctl.showToast(ctl.tr.t("player.stillOffline"))
         else {
             isOffline = false
-            bufferTimer = 1.0
+            nativeBuffering = true
             onNativeRetry?.invoke()
             updateUi()
         }
@@ -255,8 +257,7 @@ class PlayerEngine(
             if (controlsTimer <= 0 && isPlaying && adSecondsLeft <= 0) setControls(false)
         }
         if (isPlayerOffline()) { isOffline = true; controlsTimer = 3.0; updateUi(); return }
-        if (isOffline) { isOffline = false; bufferTimer = 1.2 }
-        if (adSecondsLeft <= 0 && bufferTimer > 0) { bufferTimer -= d4; updateUi(); return }
+        if (isOffline) { isOffline = false }
         if (adSecondsLeft > 0) {
             adSecondsLeft -= d4
             if (adSecondsLeft <= 0) adSecondsLeft = 0.0
@@ -272,7 +273,7 @@ class PlayerEngine(
             updateUi(); return
         }
         if (!isPlaying || hasEnded) return
-        if (!nativeStreamActive) return
+        if (!nativeStreamActive || nativeBuffering || duration <= 0) return
         val st = skipTimes
         if (st != null) updateSkipPrompt(st, d4)
         else {
