@@ -614,9 +614,16 @@ class AppController(
     
     fun openAndPlay(id: Int) {
         val a = animeOf(id) ?: return
-        openDetail(id)
-        val targetEp = continueInfo(a)?.episode ?: 1
-        openEpisode(a, targetEp)
+        val info = continueInfo(a)
+        val ep = info?.episode ?: 1
+        // Langsung ke player (tanpa singgah di Detail) bila ada episode yang bisa diputar.
+        // Kalau tidak ada (menunggu episode baru / sudah tamat / belum tayang), tampilkan Detail.
+        if ((info == null || info.episode != null) && episodeAccess(a, ep) == Access.Ok) {
+            openPlayer(id, ep, null)
+        } else {
+            openDetail(id)
+            openEpisode(a, ep)
+        }
     }
 
     fun searchByGenre(g: String) { searchQuery = ""; submittedQuery = ""; searchGenre = g; searchVibe = "all"; searchFresh++; pushView(ViewEntry.Search) }

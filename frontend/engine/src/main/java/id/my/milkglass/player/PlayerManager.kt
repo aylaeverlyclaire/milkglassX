@@ -30,7 +30,11 @@ import id.my.milkglass.resolver.LocalStreamSession
 import id.my.milkglass.resolver.ResolvedStream
 import id.my.milkglass.resolver.StreamResolver
 import id.my.milkglass.resolver.StreamSourceDto
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -85,6 +89,10 @@ class PlayerManager(
 
     private val playerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var activeStreamSession: LocalStreamSession? = null
+    private var streamJob: Job? = null
+
+    /** Setelah release() manager ini mati total: tidak boleh membuat ExoPlayer/sesi baru (mencegah kebocoran & crash). */
+    @Volatile private var released = false
 
     private val _playerState = MutableStateFlow<PlayerState>(PlayerState.Idle)
     val playerState: StateFlow<PlayerState> = _playerState.asStateFlow()
@@ -121,7 +129,7 @@ class PlayerManager(
     }
 
     fun initialize() {
-        if (exoPlayer != null) return
+        if (released || exoPlayer != null) return
 
         val bandwidthMeter = DefaultBandwidthMeter.Builder(context).build()
         val videoTrackSelectionFactory = AdaptiveTrackSelection.Factory()
@@ -170,6 +178,7 @@ class PlayerManager(
         subtitleUrl: String? = null,
         startPositionMs: Long = 0L
     ) {
+        if (released) return
         if (exoPlayer == null) initialize()
 
         val playerInstance = exoPlayer ?: return
@@ -231,10 +240,12 @@ class PlayerManager(
         onReady: (localUrl: String) -> Unit = {},
         onError: (Throwable) -> Unit = {}
     ) {
+        if (released) return
         stopStreamSession()
+        streamJob?.cancel()
         _playerState.value = PlayerState.Buffering
 
-        playerScope.launch {
+        streamJob = playerScope.launch {
             try {
                 val session = resolver.resolveAndStartStream(
                     slug = slug,
@@ -244,6 +255,11 @@ class PlayerManager(
                     title = title.orEmpty(),
                     romajiTitle = romajiTitle.orEmpty()
                 )
+                if (released || !isActive) {
+                    // Pemutar sudah ditutup selagi stream di-resolve: tutup sesi lokal, jangan putar apa pun.
+                    session.closeSession()
+                    return@launch
+                }
                 activeStreamSession = session
                 _availableResolutions.value = listOf("Auto") + session.availableResolutions
 
@@ -271,7 +287,10 @@ class PlayerManager(
                     startPositionMs = startPositionMs
                 )
                 onReady(session.localHttpUrl)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Throwable) {
+                if (released) return@launch
                 val friendly = ErrorMapper.mapResolverError(e, context)
                 _playerState.value = PlayerState.Error(friendly)
                 onError(e)
@@ -347,6 +366,11 @@ class PlayerManager(
     }
 
     fun release() {
+        if (released) return
+        released = true
+        streamJob?.cancel()
+        streamJob = null
+        playerScope.cancel()
         stopStreamSession()
         exoPlayer?.removeListener(playerListener)
         exoPlayer?.release()
