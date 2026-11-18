@@ -241,8 +241,8 @@ class PlayerManager(
                     preferredRes = preferredResolution,
                     scope = playerScope,
                     anilistId = anilistId,
-                    title = title,
-                    romajiTitle = romajiTitle
+                    title = title.orEmpty(),
+                    romajiTitle = romajiTitle.orEmpty()
                 )
                 activeStreamSession = session
                 _availableResolutions.value = listOf("Auto") + session.availableResolutions
@@ -362,8 +362,6 @@ class PlayerManager(
         @Volatile
         private var databaseProviderInstance: DatabaseProvider? = null
 
-        @Volatile
-        
         fun getDatabaseProvider(context: Context): DatabaseProvider {
             return databaseProviderInstance ?: synchronized(this) {
                 databaseProviderInstance ?: StandaloneDatabaseProvider(context.applicationContext).also {

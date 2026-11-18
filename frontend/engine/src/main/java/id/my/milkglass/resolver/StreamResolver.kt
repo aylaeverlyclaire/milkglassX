@@ -256,6 +256,8 @@ class StreamResolver(
     }
 
     companion object {
+        const val DEFAULT_BACKEND_BASE_URL = "https://milkglass-backend.milkyliquid.workers.dev"
+
         fun buildEpisodeSlug(romajiOrTitle: String, episode: Int): String {
             val clean = romajiOrTitle.lowercase()
                 .replace(Regex("[^a-z0-9]+"), "-")
