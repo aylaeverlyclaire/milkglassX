@@ -1,0 +1,48 @@
+name: Sinkron katalog AniList
+
+# Dua jadwal, dua cakupan (lihat scripts/sync-catalog.mjs):
+#  - tiap 6 jam  : "ongoing" = 150 judul yang sedang tayang (jadwal, nomor episode berikutnya)
+#  - harian 03:47: "full"    = ongoing + 400 judul terpopuler sepanjang masa (~500 judul)
+# Tulis D1 per hari: ~4x150 + ~500 upsert, jauh di bawah batas gratis 100 ribu.
+# Catatan: GitHub menonaktifkan workflow terjadwal di repo publik bila 60 hari tanpa aktivitas repo
+# (docs.github.com, "Disabling and enabling a workflow"). Workflow catalog-freshness ikut mati bila itu terjadi,
+# jadi lakukan satu commit atau aktifkan ulang dari tab Actions sebelum 60 hari.
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "ongoing atau full"
+        default: "full"
+  schedule:
+    - cron: "17 */6 * * *"
+    - cron: "47 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-catalog
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Sinkron
+        env:
+          WORKER_URL: https://milkglass-backend.milkyliquid.workers.dev
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          SCOPE: ${{ github.event.inputs.scope || (github.event.schedule == '47 3 * * *' && 'full' || 'ongoing') }}
+        run: |
+          set +e
+          node frontend/scripts/sync-catalog.mjs > out.txt 2>&1; RC=$?
+          cat out.txt
+          MSG=$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' out.txt | head -c 3500)
+          echo "::notice title=sync::$MSG"
+          exit $RC
