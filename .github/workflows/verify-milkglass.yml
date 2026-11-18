@@ -40,7 +40,7 @@ jobs:
           ./gradlew :engine:compileDebugKotlin :app:compileDebugKotlin :engine:testDebugUnitTest --stacktrace > g.txt 2>&1; RC=$?
           tail -5 g.txt
           if [ $RC -ne 0 ]; then
-            MSG=$(grep -E '^e: |What went wrong|^> |Execution failed|FAILED|AssertionError|Caused by' g.txt | head -30 | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' | head -c 3500)
+            MSG=$(grep -vE '^> Task|^$|UP-TO-DATE|FROM-CACHE|NO-SOURCE|SKIPPED' g.txt | tail -35 | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' | head -c 3500)
             echo "::error title=gradle::$MSG"
           fi
           exit $RC
