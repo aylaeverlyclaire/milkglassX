@@ -2,6 +2,8 @@ const ANILIST_GRAPHQL_URL = 'https://graphql.anilist.co';
 const MIN_EPISODE_BYTES = 15 * 1024 * 1024;      
 const MAX_SINGLE_EP_BYTES = 3_950 * 1024 * 1024; 
 
+export type AniListMediaItem = AniListRawMedia;
+
 export interface AniListRawMedia {
   id: number;
   idMal?: number | null;
