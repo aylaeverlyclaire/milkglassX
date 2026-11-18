@@ -272,9 +272,7 @@ class PlayerEngine(
             updateUi(); return
         }
         if (!isPlaying || hasEnded) return
-        if (!nativeStreamActive) {
-            position = min(duration.toDouble(), position + d4 * speed)
-        }
+        if (!nativeStreamActive) return
         val st = skipTimes
         if (st != null) updateSkipPrompt(st, d4)
         else {

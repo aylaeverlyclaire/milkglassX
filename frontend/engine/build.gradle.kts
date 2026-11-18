@@ -28,7 +28,6 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.datasource.okhttp)
     implementation(libs.media3.database)
-    implementation(libs.libmpv)
 
     testImplementation(libs.junit)
     testImplementation(libs.org.json)

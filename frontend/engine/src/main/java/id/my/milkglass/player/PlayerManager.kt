@@ -14,6 +14,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.DatabaseProvider
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
@@ -190,8 +191,9 @@ class PlayerManager(
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(15_000)
 
+        val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
-            .setDataSourceFactory(httpDataSourceFactory)
+            .setDataSourceFactory(dataSourceFactory)
 
         val mediaItemBuilder = MediaItem.Builder()
             .setUri(Uri.parse(resolvedStream.directUrl))

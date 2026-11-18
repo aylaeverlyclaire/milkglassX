@@ -8,7 +8,10 @@ import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import androidx.work.WorkerParameters
 import id.my.milkglass.net.CloudflareChallengeException
 import id.my.milkglass.net.IsolatedHttpClients
@@ -33,6 +36,15 @@ enum class DownloadDrainOutcome {
     BLOCKED_CHALLENGE,
     FAILED_PERMANENT
 }
+
+
+data class MkvDownloadStatus(
+    val isRunning: Boolean = false,
+    val isSucceeded: Boolean = false,
+    val isFailed: Boolean = false,
+    val progressPercent: Int = 0,
+    val outcome: String? = null
+)
 
 data class MkvDownloadRequest(
     val animeSlug: String,
@@ -76,6 +88,20 @@ class MkvDownloadManager(
 
         workManager.enqueueUniqueWork(uniqueName, ExistingWorkPolicy.KEEP, workRequest)
         return uniqueName
+    }
+
+
+    fun observeDownload(uniqueName: String): Flow<MkvDownloadStatus> {
+        return workManager.getWorkInfosForUniqueWorkFlow(uniqueName).map { list ->
+            val info = list.firstOrNull() ?: return@map MkvDownloadStatus()
+            MkvDownloadStatus(
+                isRunning = info.state == WorkInfo.State.ENQUEUED || info.state == WorkInfo.State.RUNNING,
+                isSucceeded = info.state == WorkInfo.State.SUCCEEDED,
+                isFailed = info.state == WorkInfo.State.FAILED || info.state == WorkInfo.State.CANCELLED,
+                progressPercent = info.progress.getInt(MkvDownloadWorker.KEY_PROGRESS, 0),
+                outcome = info.outputData.getString(MkvDownloadWorker.KEY_OUTCOME)
+            )
+        }
     }
 
     fun cancelDownload(uniqueName: String) {

@@ -63,10 +63,14 @@ object ErrorMapper {
             return MSG_NO_INTERNET
         }
         val reason = error?.let { classifyThrowable(it) }
-        return if (reason == FailureReason.DNS && !isNetworkConnected(context)) {
-            MSG_NO_INTERNET
-        } else {
-            MSG_SOURCES_UNAVAILABLE
+        val detail = error?.message?.takeIf { it.isNotBlank() }
+        return when (reason) {
+            FailureReason.HTTP_403 -> detail ?: "Diblokir Cloudflare (403). Selesaikan verifikasi WebView."
+            FailureReason.NOT_FOUND -> detail ?: "Episode MKV tidak ditemukan di Otakudesu, Samehadaku, Oploverz, maupun Kusonime."
+            FailureReason.TIMEOUT -> "Koneksi timeout saat mengambil video dari sumber."
+            FailureReason.CODEC -> "Format video/codec tidak didukung oleh ExoPlayer (butuh libmpv)."
+            FailureReason.DNS -> "Gagal resolve DNS sumber video."
+            else -> detail ?: MSG_SOURCES_UNAVAILABLE
         }
     }
 

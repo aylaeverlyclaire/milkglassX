@@ -1,5 +1,7 @@
 package com.milkglass.app.ui.screens
 
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.SurfaceView
 import androidx.compose.animation.AnimatedVisibility
@@ -81,7 +83,13 @@ import com.milkglass.app.ui.common.SectionHeader
 import com.milkglass.app.ui.common.milkClickable
 import id.my.milkglass.player.PlayerManager
 import id.my.milkglass.player.PlayerState
+import com.milkglass.app.ui.components.CloudflareVerificationOverlay
+import id.my.milkglass.net.CloudflareChallengeCoordinator
+import id.my.milkglass.download.MkvDownloadManager
+import id.my.milkglass.download.MkvDownloadRequest
+import id.my.milkglass.download.MkvDownloadStatus
 import id.my.milkglass.resolver.StreamResolver
+import id.my.milkglass.source.MkvQuality
 import kotlinx.coroutines.delay
 import kotlin.math.ceil
 
@@ -100,9 +108,20 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         ).also { it.initialize() }
     }
     val nativeState by playerManager.playerState.collectAsState()
+    var cfChallenge by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    DisposableEffect(Unit) {
+        CloudflareChallengeCoordinator.uiLauncher = { host, url ->
+            mainHandler.post { cfChallenge = host to url }
+        }
+        onDispose {
+            CloudflareChallengeCoordinator.uiLauncher = null
+        }
+    }
 
     
-    DisposableEffect(e, playerManager) {
+    DisposableEffect(e, e.episode, playerManager) {
         val slug = StreamResolver.buildEpisodeSlug(e.anime.romaji, e.episode)
         fun startStream(qualityPref: String, resumeMs: Long) {
             val maxH = when (qualityPref) {
@@ -161,8 +180,9 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                 }
             }
             is PlayerState.Error -> {
-                
                 e.nativeStreamActive = false
+                e.isPlaying = false
+                e.bufferTimer = 0.0
             }
             else -> Unit
         }
@@ -194,8 +214,38 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                 
                 Box(Modifier.fillMaxWidth().background(Color.Black).windowInsetsPadding(WindowInsets.statusBars))
                 VideoArea(ctl, e, playerManager, Modifier.fillMaxWidth().aspectRatio(16f / 9f).heightIn(max = vh * .56f), fullscreen = false)
+                val errState = nativeState as? PlayerState.Error
+                if (errState != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF2B1215))
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MilkText(
+                            errState.error.userMessage,
+                            Milk.type.style(12f, 500, 16f),
+                            Color(0xFFFFB4AB),
+                            Modifier.weight(1f).padding(end = 12.dp)
+                        )
+                        MilkButton("Coba Lagi", variant = ButtonVariant.Ghost) {
+                            e.onNativeRetry?.invoke()
+                        }
+                    }
+                }
                 PlayerInfo(ctl, entry, Modifier.weight(1f))
             }
+        }
+
+        val pendingCf = cfChallenge
+        if (pendingCf != null) {
+            CloudflareVerificationOverlay(
+                host = pendingCf.first,
+                targetUrl = pendingCf.second,
+                onDismiss = { cfChallenge = null }
+            )
         }
     }
 }
@@ -460,9 +510,52 @@ private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Mo
             .padding(start = Gutter, end = Gutter, top = 24.dp, bottom = 16.dp), 
         verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
-        Column {
+        val ctx = LocalContext.current
+        val dlManager = remember(ctx) { MkvDownloadManager(ctx.applicationContext) }
+        val targetQuality = remember(ctl.persisted.settings.quality) {
+            MkvQuality.fromText(ctl.persisted.settings.quality) ?: MkvQuality.P1080
+        }
+        val animeSlug = remember(a.romaji, ep) {
+            StreamResolver.buildEpisodeSlug(a.romaji.ifBlank { a.title }, ep).substringBefore("-ep-")
+        }
+        val workName = remember(animeSlug, ep, targetQuality) {
+            "mkv_dl_${animeSlug}_ep_${ep}_${targetQuality.label}"
+        }
+        val dlStatus by dlManager.observeDownload(workName).collectAsState(initial = MkvDownloadStatus())
+        val alreadyDownloaded = remember(animeSlug, ep, targetQuality, dlStatus.isSucceeded) {
+            dlManager.getDownloadedFile(animeSlug, ep, targetQuality).let { it.exists() && it.length() > 1024L }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             MilkText(ctl.episodeLineOf(a, ep), ty.title, c.onSurface)
             MilkText("${a.romaji} ${tr.t("player.minutesSuffix", "episodeMinutes" to a.episodeMinutes)}", ty.body, c.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                val btnLabel = when {
+                    alreadyDownloaded || dlStatus.isSucceeded -> "MKV ${targetQuality.label} Tersimpan"
+                    dlStatus.isRunning -> "Mengunduh ${dlStatus.progressPercent}%..."
+                    dlStatus.isFailed -> "Gagal • Unduh Ulang MKV"
+                    else -> "Unduh MKV ${targetQuality.label}"
+                }
+                MilkButton(
+                    btnLabel,
+                    variant = if (alreadyDownloaded || dlStatus.isSucceeded) ButtonVariant.Ghost else ButtonVariant.Primary,
+                    enabled = !dlStatus.isRunning && !alreadyDownloaded
+                ) {
+                    dlManager.enqueueEpisodeDownload(
+                        MkvDownloadRequest(
+                            animeSlug = animeSlug,
+                            animeTitle = a.romaji.ifBlank { a.title },
+                            episodeNumber = ep,
+                            preferredQuality = targetQuality
+                        )
+                    )
+                }
+                if (dlStatus.isRunning) {
+                    MilkButton("Batal", variant = ButtonVariant.Ghost) {
+                        dlManager.cancelDownload(workName)
+                    }
+                }
+            }
         }
         
         val mx = minOf(a.totalEpisodes, time.releasedEpisodeCount(a) + if (time.isOngoing(a)) 1 else 0)
