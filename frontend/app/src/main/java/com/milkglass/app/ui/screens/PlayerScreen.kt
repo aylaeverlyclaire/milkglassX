@@ -230,9 +230,9 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                             Color(0xFFFFB4AB),
                             Modifier.weight(1f).padding(end = 12.dp)
                         )
-                        MilkButton("Coba Lagi", variant = ButtonVariant.Ghost) {
+                        MilkButton("Coba Lagi", variant = ButtonVariant.Outlined, onClick = {
                             e.onNativeRetry?.invoke()
-                        }
+                        })
                     }
                 }
                 PlayerInfo(ctl, entry, Modifier.weight(1f))
@@ -538,22 +538,23 @@ private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Mo
                 }
                 MilkButton(
                     btnLabel,
-                    variant = if (alreadyDownloaded || dlStatus.isSucceeded) ButtonVariant.Ghost else ButtonVariant.Primary,
-                    enabled = !dlStatus.isRunning && !alreadyDownloaded
-                ) {
-                    dlManager.enqueueEpisodeDownload(
-                        MkvDownloadRequest(
-                            animeSlug = animeSlug,
-                            animeTitle = a.romaji.ifBlank { a.title },
-                            episodeNumber = ep,
-                            preferredQuality = targetQuality
+                    variant = if (alreadyDownloaded || dlStatus.isSucceeded) ButtonVariant.Outlined else ButtonVariant.Primary,
+                    dimmed = dlStatus.isRunning || alreadyDownloaded,
+                    onClick = {
+                        dlManager.enqueueEpisodeDownload(
+                            MkvDownloadRequest(
+                                animeSlug = animeSlug,
+                                animeTitle = a.romaji.ifBlank { a.title },
+                                episodeNumber = ep,
+                                preferredQuality = targetQuality
+                            )
                         )
-                    )
-                }
-                if (dlStatus.isRunning) {
-                    MilkButton("Batal", variant = ButtonVariant.Ghost) {
-                        dlManager.cancelDownload(workName)
                     }
+                )
+                if (dlStatus.isRunning) {
+                    MilkButton("Batal", variant = ButtonVariant.Outlined, onClick = {
+                        dlManager.cancelDownload(workName)
+                    })
                 }
             }
         }
