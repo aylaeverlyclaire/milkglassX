@@ -25,7 +25,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - run: npm install --no-audit --no-fund
+      - name: Install deps (pastikan binary workerd linux ikut terpasang)
+        run: |
+          npm install --no-audit --no-fund
+          WV=$(node -p "require('workerd/package.json').version")
+          npm ls @cloudflare/workerd-linux-64 >/dev/null 2>&1 || npm install --no-save --no-audit --no-fund "@cloudflare/workerd-linux-64@$WV"
       - run: npx tsc -p .
 
       - name: Cek token
