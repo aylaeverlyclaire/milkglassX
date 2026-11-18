@@ -1,0 +1,12 @@
+<resources>
+    <!-- windowBackground = warna surface terang agar tidak ada kilat warna sebelum Compose menggambar. -->
+    <!-- Atribut baru dipisah per API agar aman di Android 8.0 (API 26): windowLightNavigationBar = API 27,
+         enforceNavigationBarContrast = API 29. Lihat values-v27 dan values-v29. -->
+    <style name="Theme.Milkglass.Base" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/milk_surface</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+    <style name="Theme.Milkglass" parent="Theme.Milkglass.Base" />
+</resources>

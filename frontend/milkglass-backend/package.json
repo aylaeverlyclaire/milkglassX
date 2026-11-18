@@ -1,0 +1,22 @@
+{
+  "name": "milkglass-backend",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 execute milkglass_db --local --file=./schema.sql",
+    "db:migrate:remote": "wrangler d1 execute milkglass_db --remote --file=./schema.sql"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.4.2",
+    "hono": "^4.6.10",
+    "jose": "^5.9.6",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^3.86.0"
+  }
+}

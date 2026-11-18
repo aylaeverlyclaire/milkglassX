@@ -1,0 +1,13 @@
+{
+ "social": false,
+ "premium": false,
+ "ads": false,
+ "share": false,
+ "like": false,
+ "favorite": false,
+ "comments": false,
+ "autoSkip": false,
+ "reminders": false,
+ "watchParty": false,
+ "roleBadges": false
+}

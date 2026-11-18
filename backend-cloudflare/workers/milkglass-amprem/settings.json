@@ -1,0 +1,24 @@
+{
+  "result": {
+    "placement": {
+      "mode": "smart"
+    },
+    "compatibility_date": "2026-11-10",
+    "compatibility_flags": [],
+    "usage_model": "standard",
+    "tags": [],
+    "tail_consumers": [],
+    "logpush": false,
+    "annotations": {
+      "workers/triggered_by": "upload"
+    },
+    "cache_options": {
+      "enabled": true,
+      "cross_version_cache": false
+    },
+    "bindings": []
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

@@ -1,0 +1,87 @@
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
+}
+
+android {
+    namespace = "com.milkglass.app"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.milkglass.app"
+        // minSdk 26 = Android 8.0. Dukungan: Android 8.0 (API 26) s.d. Android 17 (API 37).
+        // BlurMaskFilter ber-akselerasi hardware baru ada di API 28; di API 26-27 CssShadow memakai
+        // pendekatan berlapis (lihat core/design/CssShadow.kt). Font variabel Compose butuh API 26+.
+        minSdk = 26
+        targetSdk = 35
+        // Naik tiap build CI supaya APK baru bisa menimpa yang lama tanpa copot pasang.
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)
+        versionName = "0.6.0-otakudesu-mkv"
+        val masterSecret = System.getenv("MILKGLASS_MASTER_SECRET")
+            ?: (project.findProperty("MILKGLASS_MASTER_SECRET") as? String)
+            ?: ""
+        buildConfigField("String", "MILKGLASS_MASTER_SECRET", "\"${masterSecret.replace("\"", "\\\"")}\"")
+    }
+
+    signingConfigs {
+        // Kunci TETAP (bukan kunci debug yang berubah tiap runner) supaya pembaruan APK bisa dipasang di atas versi lama.
+        // Hanya untuk sideload pribadi; bukan untuk Play Store.
+        create("milkglass") {
+            storeFile = file("milkglass.keystore")
+            storePassword = "milkglass"
+            keyAlias = "milkglass"
+            keyPassword = "milkglass"
+        }
+    }
+
+    buildTypes {
+        release {
+            // APK release (R8 + tanpa debuggable) jauh lebih lancar daripada debug untuk Compose.
+            // Ditandatangani dengan kunci tetap "milkglass" agar bisa langsung dipasang dan diperbarui (sideload); bukan untuk Play Store.
+            isMinifyEnabled = true
+            isShrinkResources = false // font diambil lewat getIdentifier(); penyusutan resource akan membuangnya
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("milkglass")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = "17" }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+    testOptions { unitTests.isReturnDefaultValues = true }
+}
+
+dependencies {
+    implementation(project(":engine"))
+    implementation(platform(libs.compose.bom))
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.graphics)
+    implementation(libs.compose.ui.text)
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.ui.tooling.preview)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.coil.compose)
+    implementation(libs.media3.exoplayer)
+    // Memasang profil baseline bawaan Compose saat instalasi (release): tanpa ini kode Compose dijalankan lewat JIT
+    // dan terasa patah-patah pada penggunaan pertama (terutama Android 8-12).
+    implementation(libs.androidx.profileinstaller)
+    debugImplementation(libs.compose.ui.tooling)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.serialization.json)
+}

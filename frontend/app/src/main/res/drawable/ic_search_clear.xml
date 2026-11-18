@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Tombol hapus bawaan Chromium untuk <input type="search"> (diukur: glyph 10,25 x 10,5 px, warna #325591). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="16dp"
+    android:height="16dp"
+    android:viewportWidth="16"
+    android:viewportHeight="16">
+    <path
+        android:strokeColor="#FF325591"
+        android:strokeWidth="2.2"
+        android:pathData="M3.65 3.65L12.35 12.35M12.35 3.65L3.65 12.35" />
+</vector>

@@ -1,0 +1,649 @@
+name: Build APK dari zip
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      smoke:
+        description: "Jalankan matriks emulator (isi 'false' untuk hanya build + tes)"
+        default: "true"
+      mc_sequences:
+        description: "Monte Carlo: jumlah sesi acak (sesi x langkah = jumlah aksi)"
+        default: "50000"
+      mc_steps:
+        description: "Monte Carlo: langkah (aksi) per sesi"
+        default: "100"
+
+permissions:
+  contents: read
+
+# Push beruntun (mis. banyak "Add files via upload") membatalkan run lama yang belum selesai, bukan menumpuk
+# 11 emulator per commit. Run publish yang sudah berjalan tetap singkat; run baru menerbitkan ulang.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Typecheck backend
+        working-directory: milkglass-backend
+        run: |
+          npm install --no-audit --no-fund
+          npx tsc -p .
+      - name: Uji skrip sinkron + canary (mock, tanpa jaringan)
+        run: node --test scripts/*.test.mjs
+
+  build:
+    # Dipatok ke 24.04: "ubuntu-latest" mulai pindah ke Ubuntu 26 (19 Okt 2026) dan image-nya berbeda.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Siapkan folder proyek (dari zip, atau langsung dari root)
+        shell: bash
+        run: |
+          # Tanpa "ls *.zip | head": dengan pipefail, glob kosong membuat skrip keluar diam-diam
+          # sebelum pesan error sempat tercetak.
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ ${#zips[@]} -gt 0 ]; then
+            echo "Mengekstrak: ${zips[0]}"
+            mkdir -p "$RUNNER_TEMP/proj"
+            unzip -q "${zips[0]}" -d "$RUNNER_TEMP/proj"
+            ROOT="$RUNNER_TEMP/proj"
+          elif [ -f settings.gradle.kts ]; then
+            echo "Tidak ada zip; memakai proyek di root repo"
+            ROOT="$GITHUB_WORKSPACE"
+          else
+            echo "::error::Tidak ada .zip maupun settings.gradle.kts di root repo. Isi root: $(ls -A | tr '\n' ' ')"
+            exit 1
+          fi
+          # Zip kadang membungkus proyek dalam satu folder; cari settings.gradle.kts-nya.
+          SETTINGS=$(find "$ROOT" -maxdepth 3 -name settings.gradle.kts -not -path '*/__MACOSX/*' -print -quit)
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::settings.gradle.kts tidak ditemukan. Isi zip:"; find "$ROOT" -maxdepth 2 | head -n 40
+            exit 1
+          fi
+          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
+          echo "Folder proyek: $(dirname "$SETTINGS")"
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v4
+
+      - name: Pasang SDK
+        shell: bash
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platforms;android-35" "build-tools;34.0.0" "platform-tools" | tail -n 5
+          echo "ANDROID_HOME=$ANDROID_HOME"
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.9"
+
+      - name: Cache font Roboto
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PROJECT_DIR }}/app/src/main/res/font
+          key: roboto-fonts-v1
+
+      - name: Unduh font Roboto
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          D=app/src/main/res/font; mkdir -p "$D"
+          B=https://raw.githubusercontent.com/google/fonts/main/ofl
+          get() { [ -s "$2" ] && [ "$(stat -c%s "$2")" -gt 50000 ] && return 0; curl -fsSL --retry 3 -o "$2" "$1" && [ "$(stat -c%s "$2")" -gt 50000 ] || { rm -f "$2"; echo "::warning::gagal unduh $2"; }; }
+          get "$B/roboto/Roboto%5Bwdth%2Cwght%5D.ttf" "$D/roboto_variable.ttf"
+          get "$B/robotomono/RobotoMono%5Bwght%5D.ttf" "$D/roboto_mono_variable.ttf"
+
+      - name: Build APK debug
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --stacktrace --console=plain 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      # Engine v2 (resolver, pemutar, unduhan, token). Belum dipakai :app; langkah ini membuktikan ia terkompilasi.
+      - name: Kompilasi engine v2
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -o pipefail
+          gradle :engine:assembleDebug --stacktrace --console=plain 2>&1 | tee "$RUNNER_TEMP/engine.log"
+
+      # Tes JVM engine (pure XDCC IRC).
+      - name: Tes engine
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -o pipefail
+          gradle :engine:testDebugUnitTest --stacktrace --console=plain 2>&1 | tee "$RUNNER_TEMP/engine-test.log"
+
+      # APK release: R8 + non-debuggable. Untuk Compose ini jauh lebih lancar daripada APK debug (yang paling lambat).
+      # Ditandatangani kunci debug supaya bisa langsung dipasang. Gagal di sini tidak menggagalkan APK debug.
+      - name: Build APK release (lebih lancar)
+        continue-on-error: true
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -o pipefail
+          gradle :app:assembleRelease --stacktrace --console=plain 2>&1 | tee "$RUNNER_TEMP/release.log"
+
+      # Bila build gagal, tampilkan cuplikan penyebabnya di halaman ringkasan run (tab "Summary").
+      - name: Ringkasan error build
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '### Penyebab build gagal (cuplikan log)'
+            echo '```'
+            if [ -f "$RUNNER_TEMP/build.log" ]; then
+              grep -nE '^e: |error:|What went wrong|Execution failed|Could not |FAILURE' "$RUNNER_TEMP/build.log" | head -n 40 || true
+              grep -E '^e: ' "$RUNNER_TEMP/build.log" | sed 's#file://##' | head -n 20 | while IFS= read -r l; do echo "::error::$l" >&2; done || true
+            else
+              echo 'build.log tidak ada: kegagalan terjadi SEBELUM langkah Build (lihat langkah merah di log).'
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: success() || failure()
+        with:
+          name: milkglass-release-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v7
+        if: success() || failure()
+        with:
+          name: milkglass-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: log-build
+          path: |
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/release.log
+          if-no-files-found: ignore
+
+  # Tes unit + Monte Carlo dipisah dari job build: emulator (smoke) hanya butuh APK, jadi tak perlu menunggu
+  # tes dan simulasi (sampai 25 menit) selesai. Keduanya berjalan paralel dengan matriks emulator.
+  test:
+    name: Tes unit dan Monte Carlo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Siapkan folder proyek (dari zip, atau langsung dari root)
+        shell: bash
+        run: |
+          # Tanpa "ls *.zip | head": dengan pipefail, glob kosong membuat skrip keluar diam-diam
+          # sebelum pesan error sempat tercetak.
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ ${#zips[@]} -gt 0 ]; then
+            echo "Mengekstrak: ${zips[0]}"
+            mkdir -p "$RUNNER_TEMP/proj"
+            unzip -q "${zips[0]}" -d "$RUNNER_TEMP/proj"
+            ROOT="$RUNNER_TEMP/proj"
+          elif [ -f settings.gradle.kts ]; then
+            echo "Tidak ada zip; memakai proyek di root repo"
+            ROOT="$GITHUB_WORKSPACE"
+          else
+            echo "::error::Tidak ada .zip maupun settings.gradle.kts di root repo. Isi root: $(ls -A | tr '\n' ' ')"
+            exit 1
+          fi
+          # Zip kadang membungkus proyek dalam satu folder; cari settings.gradle.kts-nya.
+          SETTINGS=$(find "$ROOT" -maxdepth 3 -name settings.gradle.kts -not -path '*/__MACOSX/*' -print -quit)
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::settings.gradle.kts tidak ditemukan. Isi zip:"; find "$ROOT" -maxdepth 2 | head -n 40
+            exit 1
+          fi
+          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
+          echo "Folder proyek: $(dirname "$SETTINGS")"
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v4
+
+      - name: Pasang SDK
+        shell: bash
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platforms;android-35" "build-tools;34.0.0" "platform-tools" | tail -n 5
+          echo "ANDROID_HOME=$ANDROID_HOME"
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.9"
+
+      - name: Tes unit (tidak menggagalkan build)
+        continue-on-error: true
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          status=0
+          gradle :app:testDebugUnitTest --stacktrace --console=plain > "$RUNNER_TEMP/test.log" 2>&1 || status=$?
+          tail -n 40 "$RUNNER_TEMP/test.log"
+          {
+            echo "### Tes unit (kode keluar: $status)"
+            echo '```'
+            grep -nE '^e: |error:|FAILED|AssertionError|tests completed|What went wrong|Execution failed' "$RUNNER_TEMP/test.log" | head -n 60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Pesan kegagalan lengkap tiap tes (dari laporan XML JUnit), supaya tidak perlu mengunduh artefak.
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY" || true
+          import glob, sys, xml.etree.ElementTree as ET
+          out = []
+          for f in sorted(glob.glob("app/build/test-results/testDebugUnitTest/*.xml")):
+              for tc in ET.parse(f).getroot().iter("testcase"):
+                  for fl in list(tc.findall("failure")) + list(tc.findall("error")):
+                      txt = (fl.get("message") or "") + "\n" + (fl.text or "")
+                      lines = [l for l in txt.splitlines() if l.strip()][:14]
+                      out.append("**" + tc.get("classname", "") + " > " + tc.get("name", "") + "**\n```\n" + "\n".join(lines) + "\n```")
+                      print("::error::TES GAGAL " + tc.get("classname", "") + " > " + tc.get("name", "") + " :: " + " | ".join(lines[:3]).replace("%", "%25"), file=sys.stderr)
+          if out:
+              print("### Rincian tes gagal\n" + "\n".join(out))
+          PY
+          exit $status
+
+      # Simulasi Monte Carlo atas logika asli aplikasi (AppController/PlayerEngine/StateCodec) di JVM.
+      # Default 50.000 sesi x 100 langkah = 5 juta aksi + 100 sesi soak x 3.000 langkah. Hasil: tab Summary + artefak.
+      - name: Simulasi Monte Carlo (stabilitas & performa logika)
+        continue-on-error: true
+        timeout-minutes: 25
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          MC_SEQUENCES: ${{ inputs.mc_sequences || '50000' }}
+          MC_STEPS: ${{ inputs.mc_steps || '100' }}
+          MC_SEED: "20261112"
+          MC_MAX_SECONDS: "900"
+          MC_SOAK_SEQUENCES: "100"
+          MC_SOAK_STEPS: "3000"
+        run: |
+          status=0
+          gradle :app:testDebugUnitTest --tests '*MonteCarloStabilityTest' --rerun --no-daemon --console=plain \
+            > "$RUNNER_TEMP/mc.log" 2>&1 || status=$?
+          tail -n 60 "$RUNNER_TEMP/mc.log"
+          f=app/build/reports/montecarlo/ringkasan.md
+          if [ -f "$f" ]; then
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Monte Carlo: tidak ada laporan (kode keluar: $status)"
+              echo '```'
+              grep -nE '^e: |error:|FAILED|Exception|AssertionError|tests completed|What went wrong|Execution failed' "$RUNNER_TEMP/mc.log" | head -n 60 || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $status
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: log-tes-dan-montecarlo
+          path: |
+            ${{ env.PROJECT_DIR }}/app/build/reports/tests/
+            ${{ env.PROJECT_DIR }}/app/build/reports/montecarlo/
+            ${{ runner.temp }}/mc.log
+            ${{ runner.temp }}/test.log
+          if-no-files-found: ignore
+
+  # Uji asap di emulator untuk tiap versi Android 8 s.d. 17: pasang APK, buka aplikasi, jalankan Monkey
+  # (2.500 ketukan/gestur acak), lalu periksa crash/ANR dan ambil tangkapan layar. API 37 (Android 17) bersifat
+  # eksperimental: bila image emulatornya belum tersedia, job itu boleh gagal tanpa menggagalkan run.
+  smoke:
+    name: Emulator Android ${{ matrix.label }} (API ${{ matrix.api }})
+    needs: build
+    if: needs.build.result == 'success' && inputs.smoke != 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    # API 27 (8.1) belum bisa memulai emulator di runner dan API 37 masih baru: tidak menggagalkan seluruh run.
+    continue-on-error: ${{ matrix.api >= 37 || matrix.api == 27 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { api: 26, label: "8.0" }
+          - { api: 27, label: "8.1" }
+          - { api: 28, label: "9" }
+          - { api: 29, label: "10" }
+          - { api: 30, label: "11" }
+          - { api: 31, label: "12" }
+          - { api: 33, label: "13" }
+          - { api: 34, label: "14" }
+          - { api: 35, label: "15" }
+          - { api: 36, label: "16" }
+          - { api: 37, label: "17" }
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: milkglass-debug-apk
+          path: apk-debug
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: milkglass-release-apk
+          path: apk-release
+
+      - name: Aktifkan KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Tulis skrip uji asap
+        run: |
+          cat > smoke.sh <<'SH'
+          #!/usr/bin/env bash
+          # Dua fase di emulator yang sama: APK debug lalu APK release (R8). Tiap fase: pasang, buka, Monkey, lalu
+          # periksa crash/ANR. Penyebab (stack trace / alasan ANR) ditulis ke tab Summary dan ke pesan anotasi.
+          set -u
+          PKG=com.milkglass.app
+          SUM="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          TAG="Android ${SMOKE_LABEL:-?} (API ${SMOKE_API:-?})"
+          overall=0
+
+          one_line() { tr '\n\r' '  ' | tr -s ' ' | cut -c1-400; }
+          fail() { echo "::error::$*"; echo "- ❌ $*" >> "$SUM"; overall=1; }
+          block() { # $1 judul, $2 berkas, $3 maks baris
+            [ -s "$2" ] || return 0
+            { echo; echo "<details><summary>$1</summary>"; echo; echo '```'; head -n "${3:-60}" "$2"; echo '```'; echo "</details>"; } >> "$SUM"
+          }
+
+          phase() {
+            local name="$1" apk; apk="$(ls "$2"/*.apk 2>/dev/null | head -n 1)"
+            local out="out-$name"; mkdir -p "$out"
+            echo "::group::$TAG — fase $name"
+            echo "### $TAG — $name" >> "$SUM"
+            if [ -z "$apk" ]; then fail "$TAG [$name]: APK tidak ditemukan"; echo "::endgroup::"; return; fi
+            adb uninstall "$PKG" > /dev/null 2>&1 || true
+            adb logcat -G 16M > /dev/null 2>&1 || true   # buffer besar: jejak crash tidak tertimpa log Monkey
+            adb logcat -c
+            if ! timeout 240 adb install -r "$apk" > "$out/install.txt" 2>&1 || ! grep -q Success "$out/install.txt"; then
+              cat "$out/install.txt"
+              fail "$TAG [$name]: gagal pasang APK: $(one_line < "$out/install.txt")"
+              block "keluaran pasang" "$out/install.txt" 20
+              echo "::endgroup::"; return
+            fi
+            timeout 120 adb shell am start -W -n "$PKG/.MainActivity" > "$out/start.txt" 2>&1
+            cat "$out/start.txt"
+            if grep -qiE "error|exception|does not exist" "$out/start.txt"; then
+              fail "$TAG [$name]: gagal membuka aplikasi: $(one_line < "$out/start.txt")"
+              block "keluaran am start" "$out/start.txt" 30
+            fi
+            sleep 15
+            timeout 30 adb exec-out screencap -p > "$out/shot-start.png" || true
+            # Batas waktu: emulator yang macet tidak boleh menahan job sampai habis waktu tanpa laporan apa pun.
+            timeout 30 adb shell dumpsys gfxinfo "$PKG" reset > /dev/null 2>&1 || true   # mulai hitung frame dari nol
+            timeout 600 adb shell monkey -p "$PKG" -s 20261112 --throttle 80 --ignore-timeouts --pct-trackball 0 --pct-syskeys 0 --pct-appswitch 0 -v 2500 > "$out/monkey.txt" 2>&1
+            mrc=$?
+            if [ $mrc -eq 124 ]; then
+              timeout 30 adb shell 'pkill -f commands.monkey' > /dev/null 2>&1 || true
+              echo "::warning::$TAG [$name]: Monkey melebihi 10 menit dan dihentikan (emulator sangat lambat); hasil di bawah hanya sebagian"
+              echo "- ⚠️ Monkey dihentikan setelah 10 menit (emulator sangat lambat); hasil parsial" >> "$SUM"
+            fi
+            timeout 30 adb exec-out screencap -p > "$out/shot-end.png" || true
+            # ---- Metrik kelincahan (selama Monkey menekan/menggeser acak) ----
+            # Catatan: emulator CI merender lewat perangkat lunak (tanpa GPU), jadi angka mutlaknya lebih buruk daripada HP
+            # sungguhan. Yang bermakna adalah PERBANDINGAN antar-versi pada API yang sama, bukan angka absolutnya.
+            timeout 30 adb shell dumpsys gfxinfo "$PKG" > "$out/gfxinfo.txt" 2>&1 || true
+            timeout 30 adb shell dumpsys meminfo "$PKG" > "$out/meminfo.txt" 2>&1 || true
+            g() { grep -m1 "$1" "$out/gfxinfo.txt" | sed -E "$2" ; }
+            m_total="$(g 'Total frames rendered' 's/.*: *([0-9]+).*/\1/')"
+            m_janky="$(g '^Janky frames:' 's/Janky frames: *//')"
+            m_p50="$(g '50th percentile' 's/.*: *([0-9]+)ms.*/\1/')"
+            m_p90="$(g '90th percentile' 's/.*: *([0-9]+)ms.*/\1/')"
+            m_p95="$(g '95th percentile' 's/.*: *([0-9]+)ms.*/\1/')"
+            m_p99="$(g '99th percentile' 's/.*: *([0-9]+)ms.*/\1/')"
+            m_slowui="$(g 'Number Slow UI thread' 's/.*: *([0-9]+).*/\1/')"
+            m_pss="$(grep -m1 -E 'TOTAL( PSS)?:? +[0-9]+' "$out/meminfo.txt" | grep -oE '[0-9]+' | head -n1)"
+            m_start="$(grep -m1 'TotalTime' "$out/start.txt" | grep -oE '[0-9]+' | head -n1)"
+            m_line="frame=${m_total:-?} janky=${m_janky:-?} p50=${m_p50:-?}ms p90=${m_p90:-?}ms p95=${m_p95:-?}ms p99=${m_p99:-?}ms slowUI=${m_slowui:-?} PSS=$(( ${m_pss:-0} / 1024 ))MB start=${m_start:-?}ms"
+            echo "PERF [$name] $TAG: $m_line" | tee "$out/perf.txt"
+            echo "::notice title=PERF $name API ${SMOKE_API:-?}::$m_line"
+            echo "- 📊 **$name** $m_line" >> "$SUM"
+            timeout 120 adb logcat -d -b all > "$out/logcat.txt" 2>&1 || timeout 120 adb logcat -d > "$out/logcat.txt" 2>&1
+            timeout 60 adb logcat -d -b crash > "$out/crash.txt" 2>&1 || true
+            timeout 60 adb shell 'cat /data/anr/* 2>/dev/null' > "$out/anr-traces.txt" 2>&1 || true
+            local pid; pid="$(timeout 30 adb shell pidof "$PKG" | tr -d '\r')"
+            echo "pid akhir: ${pid:-<mati>}"
+
+            local bad=0
+            # Hanya crash PROSES APLIKASI ini yang dihitung (emulator juga punya crash sistem, mis. wallpaper Google di API 33).
+            cat "$out/crash.txt" "$out/logcat.txt" 2>/dev/null | awk -v pkg="$PKG" '
+              /FATAL EXCEPTION/ { if (keep) printf "%s", buf; buf=$0 "\n"; n=1; keep=0; next }
+              n>0 && n<26 { buf=buf $0 "\n"; n++; if (index($0, "Process: " pkg)) keep=1 }
+              END { if (keep) printf "%s", buf }' | head -n 60 > "$out/fatal.txt"
+            if [ -s "$out/fatal.txt" ]; then
+              cat "$out/fatal.txt"
+              fail "$TAG [$name]: CRASH — $(grep -m1 -A3 'FATAL EXCEPTION' "$out/fatal.txt" | sed 's/^.*AndroidRuntime: *//' | one_line)"
+              block "stack trace crash" "$out/fatal.txt" 60; bad=1
+            elif grep -q "FATAL EXCEPTION" "$out/logcat.txt" "$out/crash.txt" 2>/dev/null; then
+              echo "::warning::$TAG [$name]: ada crash proses sistem lain (bukan $PKG), diabaikan"
+            fi
+            # ANR: yang menentukan adalah apa yang dikerjakan THREAD UTAMA saat ANR. Bila ia sedang menunggu loop pesan
+            # (idle) atau menunggu RenderThread (nSyncAndDrawFrame) di emulator berrender perangkat lunak yang CPU-nya
+            # habis, itu bukan kode aplikasi yang memblokir -> peringatan. Selain itu (mis. frame Compose/aplikasi) -> gagal.
+            anr_starved=0
+            if grep -q "ANR in $PKG" "$out/logcat.txt"; then
+              grep -h -B2 -A60 "ANR in $PKG" "$out/logcat.txt" | head -n 110 > "$out/anr.txt"
+              cat "$out/anr.txt"
+              tot="$(grep -m1 -oE '[0-9.]+% TOTAL' "$out/anr.txt" | grep -oE '^[0-9]+')"
+              appcpu="$(grep -m1 -E "% [0-9]+/$PKG[: ]" "$out/anr.txt" | sed 's/^.*ActivityManager: *//' | one_line)"
+              ctx="CPU total ${tot:-?}%; aplikasi: ${appcpu:-tidak muncul di daftar CPU teratas}"
+              awk -v p="Cmd line: $PKG" '$0 ~ p {f=1} f {print} /^----- end/ && f {exit}' "$out/anr-traces.txt" 2>/dev/null | head -n 700 > "$out/anr-app-threads.txt"
+              awk '/^"main" prio=/ {f=1; next} f && /^$/ {exit} f && /^  at / {print}' "$out/anr-app-threads.txt" | head -n 14 > "$out/anr-main-stack.txt"
+              main_top="$(head -n 1 "$out/anr-main-stack.txt" | sed 's/^ *//')"
+              reason="$(grep -h -m1 -A1 "ANR in $PKG" "$out/anr.txt" | sed 's/^.*ActivityManager: *//' | one_line)"
+              if [ -n "$main_top" ] && echo "$main_top" | grep -qE 'MessageQueue\.nativePollOnce|nSyncAndDrawFrame|BinderProxy\.transactNative|Object\.wait|Unsafe\.park'; then
+                anr_starved=1
+                echo "::warning::$TAG [$name]: ANR tetapi thread utama tidak sedang menjalankan kode aplikasi (${main_top}); $ctx — kemungkinan emulator kehabisan CPU/rendering. $reason"
+                echo "- ⚠️ ANR, tetapi thread utama: \`$main_top\` ($ctx)" >> "$SUM"
+              elif [ "$name" = "debug" ]; then
+                # Build debug tidak dioptimasi (Compose lambat) dan tidak dikirim ke pengguna; di emulator tanpa GPU yang CPU-nya
+                # habis, ANR dengan frame Compose tidak membuktikan masalah di APK release. Fase release yang menentukan.
+                anr_starved=1
+                echo "::warning::$TAG [debug]: ANR pada build DEBUG (bukan penentu; release yang dikirim) — thread utama: ${main_top:-?}; $ctx. $reason"
+                echo "- ⚠️ ANR pada build debug (tidak dihitung gagal): thread utama \`${main_top:-?}\` ($ctx)" >> "$SUM"
+              else
+                fail "$TAG [$name]: ANR — thread utama: ${main_top:-jejak tidak tersedia} — $ctx — $reason"
+                bad=1
+              fi
+              block "stack thread utama saat ANR" "$out/anr-main-stack.txt" 14
+              block "detail ANR (logcat)" "$out/anr.txt" 110
+              block "semua thread aplikasi saat ANR (/data/anr)" "$out/anr-app-threads.txt" 150
+            fi
+            # Hanya crash/ANR milik APLIKASI yang dihitung gagal. "Monkey aborted" tanpa "// CRASH" berarti sistem emulator
+            # sendiri macet (mis. timeout dump meminfo), bukan aplikasi: dicatat sebagai peringatan.
+            if grep -qE "^// CRASH: $PKG" "$out/monkey.txt"; then
+              grep -nE -B3 -A30 "^// CRASH" "$out/monkey.txt" | head -n 70 > "$out/monkey-crash.txt"
+              cat "$out/monkey-crash.txt"
+              fail "$TAG [$name]: Monkey melaporkan crash — $(grep -m1 -A2 -E '^// CRASH' "$out/monkey.txt" | one_line)"
+              block "laporan crash Monkey" "$out/monkey-crash.txt" 70; bad=1
+            elif grep -qE "^// NOT RESPONDING: $PKG" "$out/monkey.txt" && [ $anr_starved -eq 0 ] && [ $bad -eq 0 ]; then
+              grep -nE -B3 -A30 "^// NOT RESPONDING: $PKG" "$out/monkey.txt" | head -n 70 > "$out/monkey-anr.txt"
+              fail "$TAG [$name]: Monkey melaporkan ANR — $(grep -m1 -A3 -E "^// NOT RESPONDING: $PKG" "$out/monkey.txt" | one_line)"
+              block "laporan ANR Monkey" "$out/monkey-anr.txt" 70; bad=1
+            elif grep -q "Monkey aborted" "$out/monkey.txt"; then
+              echo "::warning::$TAG [$name]: Monkey berhenti karena sistem emulator macet (bukan crash aplikasi): $(grep -m1 -B1 'System appears to have crashed' "$out/monkey.txt" | one_line)"
+              echo "- ⚠️ Monkey berhenti dini: sistem emulator macet, tanpa crash/ANR aplikasi" >> "$SUM"
+            fi
+            if [ -z "$pid" ] && [ $bad -eq 0 ]; then
+              echo "::warning::$TAG [$name]: proses aplikasi sudah tidak ada di akhir uji tanpa crash/ANR (kemungkinan dimatikan sistem saat memori emulator menipis)"
+              echo "- ⚠️ proses aplikasi sudah tidak ada di akhir, tanpa crash/ANR" >> "$SUM"
+            fi
+            if [ $bad -ne 0 ]; then
+              grep -E "AndroidRuntime|DEBUG|libc|Fatal|died" "$out/logcat.txt" | tail -n 40 > "$out/ringkas-logcat.txt" || true
+              block "logcat terkait (40 baris terakhir)" "$out/ringkas-logcat.txt" 40
+            else
+              echo "- ✅ tidak ada crash/ANR; Monkey selesai ($(grep -c . "$out/monkey.txt") baris keluaran)" >> "$SUM"
+              echo "OK [$name]: tidak ada crash/ANR"
+            fi
+            echo "::endgroup::"
+          }
+
+          adb shell getprop ro.build.version.release; adb shell getprop ro.build.version.sdk
+          # sys.boot_completed bisa true sebelum layanan paket siap ("Can't find service: package"): tunggu sampai bisa dipakai.
+          for i in $(seq 1 60); do adb shell pm path android 2>/dev/null | grep -q '^package:' && break; sleep 3; done
+          adb root > /dev/null 2>&1 && adb wait-for-device || true   # agar /data/anr (jejak thread) bisa dibaca
+          for k in window_animation_scale transition_animation_scale animator_duration_scale; do adb shell settings put global $k 0.0 > /dev/null 2>&1 || true; done
+          phase debug apk-debug
+          phase release apk-release
+          exit $overall
+          SH
+
+      # API 27 dan 37 tidak memakai pola image biasa ("android-NN;google_apis;x86_64"): API 27 tidak punya varian itu,
+      # API 37 bernama "android-37.0". Daftar image dari sdkmanager, pilih yang cocok (x86_64 lebih disukai), tulis ke Summary.
+      - name: Cari image sistem (API 27 dan 37)
+        id: img
+        if: ${{ matrix.api >= 37 || matrix.api == 27 }}
+        env:
+          API: ${{ matrix.api }}
+        run: |
+          SDKM="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM="$(command -v sdkmanager || true)"
+          list="$("$SDKM" --list 2>/dev/null | grep -oE "system-images;android-${API}[^ |]*" | sort -u || true)"
+          {
+            echo "### Image sistem API ${API} yang tersedia di sdkmanager"
+            echo '```'; echo "${list:-<tidak ada>}"; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$list"
+          pick=""
+          for cand in "google_apis;x86_64" "default;x86_64" "google_apis;x86" "default;x86" "google_apis_ps16k;x86_64" "google_apis_playstore;x86_64"; do
+            pick="$(echo "$list" | grep -E "^system-images;android-${API}(\.[0-9]+)?;" | grep -F ";${cand}" | head -n 1 || true)"
+            [ -n "$pick" ] && break
+          done
+          if [ -z "$pick" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Tidak ada image system-images;android-${API}* untuk x86/x86_64 di sdkmanager; uji API ${API} dilewati"
+            echo "- ⚠️ Uji API ${API} dilewati: tidak ada image emulator x86/x86_64 yang cocok di runner" >> "$GITHUB_STEP_SUMMARY"
+          else
+            level="$(echo "$pick" | cut -d';' -f2 | sed 's/^android-//')"
+            tgt="$(echo "$pick" | cut -d';' -f3)"
+            arch="$(echo "$pick" | cut -d';' -f4)"
+            { echo "level=$level"; echo "target=$tgt"; echo "arch=$arch"; } >> "$GITHUB_OUTPUT"
+            echo "Dipilih: $pick (api-level=$level, target=$tgt, arch=$arch)"
+            echo "- Dipakai: \`$pick\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Ruang disk: runner hanya menyisakan ~3,5 GB; image API 37 butuh partisi data lebih besar dari bawaan.
+      - name: Bebaskan ruang disk (API 37)
+        if: ${{ matrix.api >= 37 }}
+        run: |
+          df -h / | tail -n 1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL /usr/local/lib/android/sdk/ndk 2>/dev/null || true
+          df -h / | tail -n 1
+
+      - name: Jalankan emulator & uji
+        if: ${{ steps.img.outputs.skip != 'true' && matrix.api < 37 }}
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          SMOKE_LABEL: ${{ matrix.label }}
+          SMOKE_API: ${{ matrix.api }}
+        with:
+          api-level: ${{ steps.img.outputs.level || matrix.api }}
+          target: ${{ steps.img.outputs.target || 'google_apis' }}
+          arch: ${{ steps.img.outputs.arch || 'x86_64' }}
+          profile: pixel_6
+          disable-animations: true
+          emulator-boot-timeout: 900
+          script: bash smoke.sh
+
+      # API 37: aksi emulator menekan tombol sebelum layanan `input` siap ("Can't find service: input", exit 20).
+      # Jadi emulator dijalankan sendiri dan ditunggu sampai layanan `package` dan `input` benar-benar ada.
+      - name: Jalankan emulator & uji (API 37)
+        if: ${{ steps.img.outputs.skip != 'true' && matrix.api >= 37 }}
+        env:
+          SMOKE_LABEL: ${{ matrix.label }}
+          SMOKE_API: ${{ matrix.api }}
+          IMG_LEVEL: ${{ steps.img.outputs.level }}
+          IMG_TARGET: ${{ steps.img.outputs.target }}
+          IMG_ARCH: ${{ steps.img.outputs.arch }}
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export PATH="$SDK/platform-tools:$SDK/emulator:$SDK/cmdline-tools/latest/bin:$PATH"
+          # Diagnostik: tampilkan perintah yang gagal sebagai anotasi (log lengkap tidak selalu terbaca dari API).
+          trap 'echo "::error::Setup emulator API 37 gagal (baris $LINENO, exit $?): $BASH_COMMAND"' ERR
+          PKGID="system-images;android-${IMG_LEVEL};${IMG_TARGET};${IMG_ARCH}"
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "emulator" "platform-tools" "$PKGID" | tail -n 3
+          echo no | avdmanager create avd -n test -k "$PKGID" -d pixel_6 --force
+          # Lokasi AVD berbeda antar versi cmdline-tools (ANDROID_AVD_HOME / ANDROID_USER_HOME / ~/.config/.android): cari yang nyata.
+          CFG="$(find "${ANDROID_AVD_HOME:-/nonexistent}" "${ANDROID_USER_HOME:-/nonexistent}" "$HOME" -path '*/test.avd/config.ini' 2>/dev/null | head -n 1 || true)"
+          [ -n "$CFG" ] || { echo "::error::config.ini AVD 'test' tidak ditemukan setelah avdmanager create"; exit 1; }
+          echo "AVD config: $CFG"
+          printf 'disk.dataPartition.size=4096M\n' >> "$CFG"
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+          nohup emulator -avd test -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -camera-back none -camera-front none > emu.log 2>&1 &
+          adb wait-for-device
+          for i in $(seq 1 450); do
+            [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && \
+            adb shell service check package 2>/dev/null | grep -q "found" && \
+            ! adb shell service check input 2>/dev/null | grep -q "not found" && break
+            sleep 2
+          done
+          adb shell service check input; adb shell service check package
+          adb shell input keyevent 82 || true
+          for k in window_animation_scale transition_animation_scale animator_duration_scale; do adb shell settings put global $k 0 || true; done
+          bash smoke.sh; rc=$?
+          adb emu kill || true
+          exit $rc
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smoke-android-${{ matrix.label }}-api${{ matrix.api }}
+          path: |
+            out-debug/
+            out-release/
+          if-no-files-found: ignore
+
+  # APK langsung (bukan zip) di tautan tetap, ditimpa tiap build sukses:
+  # https://github.com/<repo>/releases/download/apk-terbaru/milkglass.apk
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: milkglass-release-apk
+          path: apk
+      - name: Terbitkan APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cp apk/*.apk milkglass.apk
+          gh release delete apk-terbaru --yes --cleanup-tag 2>/dev/null || true
+          gh release create apk-terbaru milkglass.apk --target "${{ github.sha }}" --prerelease \
+            --title "APK terbaru (build #${{ github.run_number }})" \
+            --notes "Commit ${{ github.sha }}. Pasang langsung; pembaruan menimpa versi lama tanpa copot pasang."
+          echo "APK: https://github.com/${{ github.repository }}/releases/download/apk-terbaru/milkglass.apk" >> "$GITHUB_STEP_SUMMARY"

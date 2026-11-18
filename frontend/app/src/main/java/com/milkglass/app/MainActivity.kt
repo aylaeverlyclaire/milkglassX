@@ -1,0 +1,126 @@
+package com.milkglass.app
+
+import android.graphics.Color as AndroidColor
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import com.milkglass.app.core.app.AppController
+import com.milkglass.app.core.data.AppData
+import com.milkglass.app.core.design.Milk
+import com.milkglass.app.core.remote.CatalogRepository
+import com.milkglass.app.core.remote.FileCatalogCache
+import com.milkglass.app.core.remote.FileSnapshotStore
+import com.milkglass.app.core.remote.HttpUrlTransport
+import com.milkglass.app.core.design.MilkTheme
+import com.milkglass.app.core.design.ThemeMode
+import com.milkglass.app.core.poster.PosterBitmaps
+import com.milkglass.app.core.poster.PosterStore
+import com.milkglass.app.core.storage.StateStore
+import com.milkglass.app.ui.shell.AppRoot
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import java.io.File
+
+class MainActivity : ComponentActivity() {
+    private var controller: AppController? = null
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
+
+    private class Loaded(val data: AppData, val posters: PosterStore, val controller: AppController)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        val gridOverlay = intent.getBooleanExtra("grid", false)
+        
+        
+        val loaded = mutableStateOf<Loaded?>(null)
+        val appCtx = applicationContext
+        val density = resources.displayMetrics.density
+        Thread {
+            val data = AppData.load(appCtx)
+            
+            val posters = PosterStore(emptyMap())
+            PosterBitmaps.prewarm(posters, density)
+            
+            val repo = CatalogRepository(
+                HttpUrlTransport(), FileCatalogCache(File(cacheDir, "catalog_home.json")),
+                snapshots = FileSnapshotStore(File(filesDir, "catalog")),
+            )
+            val c = AppController(
+                data, posters, StateStore(File(filesDir, StateStore.FILE_NAME)),
+                catalogRepo = repo,
+                initialCatalog = repo.cachedSnapshot(),
+                metaSource = com.milkglass.app.core.remote.AniZipMetaSource(),
+                skipSource = com.milkglass.app.core.remote.AniSkipSource(),
+                extrasSource = com.milkglass.app.core.remote.AniListExtrasHttpSource(),
+            )
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                controller = c
+                watchConnectivity(c)
+                loaded.value = Loaded(data, posters, c)
+            }
+        }.start()
+        setContent {
+            val l = loaded.value
+            val mode = if (l != null) ThemeMode.fromKey(l.controller.persisted.settings.theme) else ThemeMode.System
+            MilkTheme(mode) {
+                val dark = Milk.isDark
+                DisposableEffect(dark) {
+                    enableEdgeToEdge(
+                        statusBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT) { dark },
+                        navigationBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT) { dark },
+                    )
+                    onDispose { }
+                }
+                if (l == null) {
+                    androidx.compose.foundation.layout.Box(
+                        androidx.compose.ui.Modifier.fillMaxSize().background(Milk.colors.surface),
+                    )
+                } else {
+                    androidx.compose.foundation.layout.Box(androidx.compose.ui.Modifier.fillMaxSize()) {
+                        AppRoot(l.controller)
+                        if (gridOverlay) com.milkglass.app.core.design.MilkGridOverlay()
+                    }
+                }
+            }
+        }
+    }
+
+    
+    private fun watchConnectivity(controller: AppController) {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        fun isOnline(): Boolean = cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        controller.online = isOnline()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { runOnUiThread { controller.onConnectivityChanged(true) } }
+            override fun onLost(network: Network) { runOnUiThread { controller.onConnectivityChanged(false) } }
+        }
+        netCallback = cb
+        cm.registerDefaultNetworkCallback(cb)
+    }
+
+    override fun onDestroy() {
+        
+        netCallback?.let { cb ->
+            runCatching { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(cb) }
+        }
+        netCallback = null
+        super.onDestroy()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        controller?.saveNow()
+    }
+}

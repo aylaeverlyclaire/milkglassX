@@ -1,0 +1,18 @@
+# Gradle / Android
+.gradle/
+build/
+/local.properties
+*.iml
+.idea/
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+# Kunci rilis — JANGAN di-commit
+*.jks
+*.keystore
+
+# Pengecualian: kunci sideload tetap milik proyek ini (passwordnya sudah ada di app/build.gradle.kts; bukan kunci Play Store)
+!app/milkglass.keystore

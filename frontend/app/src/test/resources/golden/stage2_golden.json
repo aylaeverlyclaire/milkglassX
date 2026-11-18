@@ -1,0 +1,424 @@
+{
+ "now": 1700000000000,
+ "tz": "Asia/Jakarta",
+ "release": [
+  {
+   "id": 0,
+   "released": 24,
+   "ongoing": true,
+   "next": 1700053200000
+  },
+  {
+   "id": 1,
+   "released": 12,
+   "ongoing": false,
+   "next": null
+  },
+  {
+   "id": 2,
+   "released": 18,
+   "ongoing": true,
+   "next": 1700391600000
+  },
+  {
+   "id": 3,
+   "released": 7,
+   "ongoing": true,
+   "next": 1700143200000
+  },
+  {
+   "id": 4,
+   "released": 24,
+   "ongoing": false,
+   "next": null
+  },
+  {
+   "id": 5,
+   "released": 9,
+   "ongoing": true,
+   "next": 1700569800000
+  },
+  {
+   "id": 6,
+   "released": 8,
+   "ongoing": true,
+   "next": 1700492400000
+  },
+  {
+   "id": 7,
+   "released": 4,
+   "ongoing": true,
+   "next": 1700314200000
+  },
+  {
+   "id": 8,
+   "released": 6,
+   "ongoing": true,
+   "next": 1700226000000
+  },
+  {
+   "id": 9,
+   "released": 12,
+   "ongoing": false,
+   "next": null
+  },
+  {
+   "id": 10,
+   "released": 10,
+   "ongoing": true,
+   "next": 1700064000000
+  },
+  {
+   "id": 11,
+   "released": 15,
+   "ongoing": true,
+   "next": 1700580600000
+  }
+ ],
+ "continue": [
+  {
+   "id": 0,
+   "info": {
+    "episode": 24,
+    "position": 860
+   }
+  },
+  {
+   "id": 1,
+   "info": {
+    "episode": 4,
+    "position": 0
+   }
+  },
+  {
+   "id": 2,
+   "info": null
+  },
+  {
+   "id": 3,
+   "info": null
+  },
+  {
+   "id": 4,
+   "info": {
+    "episode": null,
+    "waiting": 1,
+    "completed": true
+   }
+  },
+  {
+   "id": 5,
+   "info": null
+  },
+  {
+   "id": 6,
+   "info": {
+    "episode": 8,
+    "position": 410
+   }
+  },
+  {
+   "id": 7,
+   "info": null
+  },
+  {
+   "id": 8,
+   "info": null
+  },
+  {
+   "id": 9,
+   "info": {
+    "episode": null,
+    "waiting": 1,
+    "completed": true
+   }
+  },
+  {
+   "id": 10,
+   "info": null
+  },
+  {
+   "id": 11,
+   "info": null
+  }
+ ],
+ "contList": [
+  0,
+  6,
+  1
+ ],
+ "trending": [
+  0,
+  2,
+  6,
+  4,
+  11,
+  1,
+  10,
+  3,
+  5,
+  9,
+  7,
+  8
+ ],
+ "recommended": [
+  8,
+  11,
+  5,
+  2,
+  10,
+  7,
+  3
+ ],
+ "affinity": {
+  "action": 1,
+  "fantasy": 1,
+  "adventure": 1,
+  "slice-of-life": 2,
+  "drama": 4,
+  "sports": 1,
+  "music": 1
+ },
+ "access": [
+  {
+   "id": 0,
+   "acc": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "lock",
+    "lock"
+   ]
+  },
+  {
+   "id": 1,
+   "acc": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "lock",
+    "ok"
+   ]
+  },
+  {
+   "id": 2,
+   "acc": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "lock",
+    "lock"
+   ]
+  },
+  {
+   "id": 3,
+   "acc": [
+    "ok",
+    "ok",
+    "lock",
+    "ok",
+    "lock",
+    "lock"
+   ]
+  },
+  {
+   "id": 4,
+   "acc": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "lock",
+    "ok"
+   ]
+  },
+  {
+   "id": 5,
+   "acc": [
+    "ok",
+    "ok",
+    "lock",
+    "ok",
+    "lock",
+    "lock"
+   ]
+  },
+  {
+   "id": 6,
+   "acc": [
+    "ok",
+    "ok",
+    "lock",
+    "ok",
+    "lock",
+    "lock"
+   ]
+  },
+  {
+   "id": 7,
+   "acc": [
+    "ok",
+    "lock",
+    "lock",
+    "ok",
+    "lock",
+    "lock"
+   ]
+  },
+  {
+   "id": 8,
+   "acc": [
+    "ok",
+    "ok",
+    "lock",
+    "ok",
+    "lock",
+    "lock"
+   ]
+  },
+  {
+   "id": 9,
+   "acc": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "lock",
+    "ok"
+   ]
+  },
+  {
+   "id": 10,
+   "acc": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "lock",
+    "lock"
+   ]
+  },
+  {
+   "id": 11,
+   "acc": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "lock",
+    "lock"
+   ]
+  }
+ ],
+ "schedule": [
+  [
+   {
+    "id": 0,
+    "ts": 1700053200000,
+    "ep": 25
+   },
+   {
+    "id": 10,
+    "ts": 1700064000000,
+    "ep": 11
+   }
+  ],
+  [
+   {
+    "id": 3,
+    "ts": 1700143200000,
+    "ep": 8
+   }
+  ],
+  [
+   {
+    "id": 8,
+    "ts": 1700226000000,
+    "ep": 7
+   }
+  ],
+  [
+   {
+    "id": 7,
+    "ts": 1700314200000,
+    "ep": 5
+   }
+  ],
+  [
+   {
+    "id": 2,
+    "ts": 1700391600000,
+    "ep": 19
+   }
+  ],
+  [
+   {
+    "id": 6,
+    "ts": 1700492400000,
+    "ep": 9
+   }
+  ],
+  [
+   {
+    "id": 5,
+    "ts": 1700569800000,
+    "ep": 10
+   },
+   {
+    "id": 11,
+    "ts": 1700580600000,
+    "ep": 16
+   }
+  ]
+ ],
+ "search": {
+  "|all": [
+   0,
+   6,
+   4,
+   2,
+   11,
+   9,
+   1,
+   10,
+   5,
+   7,
+   3,
+   8
+  ],
+  "kae|all": [
+   0
+  ],
+  "Mecha|all": [
+   2,
+   10
+  ],
+  "  |action": [
+   0,
+   2,
+   11
+  ],
+  "2024|all": [],
+  "zzzz|all": [],
+  "é|all": [
+   0,
+   6,
+   2,
+   9,
+   1,
+   10,
+   5,
+   7,
+   3,
+   8,
+   4,
+   11
+  ],
+  "ksatria|mecha": [
+   2
+  ]
+ }
+}
