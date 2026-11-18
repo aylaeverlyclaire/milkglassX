@@ -64,7 +64,7 @@ class CatalogMemoTest {
     }
 
     private fun search(c: AppController, q: String, genre: String = "all", vibe: String = "all"): List<Anime> {
-        c.searchQuery = q; c.searchGenre = genre; c.searchVibe = vibe
+        c.searchQuery = q; c.submittedQuery = q; c.searchGenre = genre; c.searchVibe = vibe
         return c.searchCatalog()
     }
 

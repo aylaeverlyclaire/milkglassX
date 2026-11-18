@@ -318,6 +318,8 @@ class AppController(
     var navToken by mutableStateOf(0)
     var overlay by mutableStateOf<Overlay?>(null)
     var searchQuery by mutableStateOf("")
+    /** Kueri yang sudah dikonfirmasi (tombol Cari/Enter). Hasil & request jaringan hanya memakai ini, bukan ketikan mentah. */
+    var submittedQuery by mutableStateOf("")
     var searchGenre by mutableStateOf("all")
     var searchVibe by mutableStateOf("all")
     var searchFresh by mutableStateOf(0)
@@ -528,7 +530,7 @@ class AppController(
     fun searchCatalog(): List<Anime> {
         
         val cat = catalog
-        val q = normalizeText(searchQuery.trim())
+        val q = normalizeText(submittedQuery.trim())
         val genre = searchGenre
         val vibe = searchVibe
         searchMemoKey?.let { k ->
@@ -601,7 +603,7 @@ class AppController(
         if (top is ViewEntry.Player && top.engine.isFullscreen) { top.engine.toggleFullscreen(); return }
         popView()
     }
-    fun openSearch() { searchQuery = ""; searchGenre = "all"; searchVibe = "all"; searchFresh++; pushView(ViewEntry.Search) }
+    fun openSearch() { searchQuery = ""; submittedQuery = ""; searchGenre = "all"; searchVibe = "all"; searchFresh++; pushView(ViewEntry.Search) }
     fun openDetail(id: Int) {
         val top = viewStack.lastOrNull()
         if (top is ViewEntry.Detail && top.id == id) return
@@ -617,7 +619,7 @@ class AppController(
         openEpisode(a, targetEp)
     }
 
-    fun searchByGenre(g: String) { searchQuery = ""; searchGenre = g; searchVibe = "all"; searchFresh++; pushView(ViewEntry.Search) }
+    fun searchByGenre(g: String) { searchQuery = ""; submittedQuery = ""; searchGenre = g; searchVibe = "all"; searchFresh++; pushView(ViewEntry.Search) }
     fun openLegalDocument(key: String) { if (data.locale.legalDocs.containsKey(key)) overlay = Overlay.LegalDocument(key) }
     fun closeOverlay() { overlay = null }
 
@@ -639,14 +641,44 @@ class AppController(
         }
     }
 
+    /** Konfirmasi pencarian: baru sekarang hasil ditampilkan dan server dihubungi. */
     fun submitSearch() {
         val q = searchQuery.trim()
-        if (q.isNotEmpty() && !persisted.recentSearches.contains(q)) {
-            persisted = persisted.copy(recentSearches = (listOf(q) + persisted.recentSearches).take(6))
+        submittedQuery = q
+        if (q.isNotEmpty()) {
+            persisted = persisted.copy(
+                recentSearches = (listOf(q) + persisted.recentSearches.filterNot { it.equals(q, ignoreCase = true) }).take(6),
+            )
         }
     }
+
+    /** Isi kolom dengan [text] lalu langsung cari (dipakai saat mengetuk saran / riwayat). */
+    fun runSearch(text: String) { searchQuery = text; submitSearch() }
+
+    /** Saran judul ala YouTube: murni lokal & ringan (maks [limit]), tanpa jaringan. Awalan judul didahulukan. */
+    fun titleSuggestions(raw: String, limit: Int = 8): List<String> {
+        val q = normalizeText(raw.trim())
+        if (q.isEmpty()) return emptyList()
+        val idx = searchIndex
+        val starts = ArrayList<String>()
+        val contains = ArrayList<String>()
+        val seen = HashSet<String>()
+        for (a in catalog) {
+            val d = idx[a.id] ?: continue
+            val label = a.romaji.ifBlank { a.title }
+            if (label.isBlank() || !seen.add(label.lowercase())) continue
+            val t = d.title
+            val r = normalizeText(a.romaji)
+            when {
+                t.startsWith(q) || r.startsWith(q) -> starts.add(label)
+                t.contains(q) || r.contains(q) -> contains.add(label)
+            }
+            if (starts.size >= limit) break
+        }
+        return (starts + contains).take(limit)
+    }
     fun clearRecentSearches() { persisted = persisted.copy(recentSearches = emptyList()) }
-    fun resetSearch() { searchQuery = ""; searchGenre = "all"; searchVibe = "all"; searchFresh++ }
+    fun resetSearch() { searchQuery = ""; submittedQuery = ""; searchGenre = "all"; searchVibe = "all"; searchFresh++ }
 
     
     fun openEpisode(a: Anime, ep: Int) {

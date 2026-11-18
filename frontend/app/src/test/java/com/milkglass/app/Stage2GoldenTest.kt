@@ -95,7 +95,7 @@ class Stage2GoldenTest {
         g.getValue("search").jsonObject.forEach { (key, v) ->
             val q = key.substringBeforeLast("|")
             val genre = key.substringAfterLast("|")
-            ctl.searchQuery = q; ctl.searchGenre = genre
+            ctl.searchQuery = q; ctl.submittedQuery = q; ctl.searchGenre = genre
             assertEquals("cari '$key'", v.jsonArray.map { it.jsonPrimitive.int }, ctl.searchCatalog().map { it.id })
         }
     }

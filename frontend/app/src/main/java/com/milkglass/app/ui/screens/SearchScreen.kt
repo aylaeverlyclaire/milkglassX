@@ -25,6 +25,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -77,10 +79,13 @@ fun SearchScreen(ctl: AppController) {
     
     LaunchedEffect(ctl.searchFresh) { androidx.compose.runtime.withFrameNanos { }; runCatching { focus.requestFocus(); kb?.show() } }
     
-    LaunchedEffect(ctl.searchQuery) {
-        delay(350)
-        ctl.searchRemote(ctl.searchQuery)
-        ctl.searchUniversalIfNeeded(ctl.searchQuery)
+    // Jaringan hanya dipanggil setelah pencarian dikonfirmasi, bukan tiap huruf.
+    LaunchedEffect(ctl.submittedQuery) {
+        if (ctl.submittedQuery.isNotBlank()) {
+            fm.clearFocus(); kb?.hide()
+            ctl.searchRemote(ctl.submittedQuery)
+            ctl.searchUniversalIfNeeded(ctl.submittedQuery)
+        }
     }
 
     Column(Modifier.fillMaxSize().background(c.surface)) {
@@ -101,7 +106,7 @@ fun SearchScreen(ctl: AppController) {
                 if (ctl.searchQuery.isEmpty()) MilkText(tr.t("search.placeholder"), ty.searchInput, c.onSurfaceVariant.copy(alpha = .72f), maxLines = 1)
                 BasicTextField(
                     value = ctl.searchQuery,
-                    onValueChange = { ctl.searchQuery = it },
+                    onValueChange = { ctl.searchQuery = it; if (it.isBlank()) ctl.submittedQuery = "" },
                     modifier = Modifier.fillMaxWidth().padding(end = trailing).focusRequester(focus),
                     singleLine = true,
                     textStyle = ty.searchInput.copy(color = c.onSurface),
@@ -112,7 +117,7 @@ fun SearchScreen(ctl: AppController) {
                 if (ctl.searchQuery.isNotEmpty()) {
                     Box(
                         Modifier.align(Alignment.CenterEnd).size(24.dp)
-                            .milkClickable(pressDim = false) { ctl.searchQuery = "" },
+                            .milkClickable(pressDim = false) { ctl.searchQuery = ""; ctl.submittedQuery = "" },
                         contentAlignment = Alignment.Center,
                     ) { MilkIcon(MilkIcons.SearchClear, size = 16.dp, tint = Color.Unspecified) }
                 }
@@ -136,12 +141,49 @@ fun SearchScreen(ctl: AppController) {
 }
 
 @Composable
+private fun SuggestionRow(text: String, onPick: () -> Unit, onFill: (() -> Unit)?) {
+    val c = Milk.colors
+    val ty = Milk.type
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).milkClickable(pressDim = false) { onPick() }
+            .padding(horizontal = Gutter),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        MilkIcon(MilkIcons.Search, size = 20.dp, tint = c.onSurfaceVariant)
+        Box(Modifier.weight(1f)) { Clamp1(text, ty.body, c.onSurface) }
+        if (onFill != null) {
+            Box(Modifier.size(40.dp).milkClickable(pressDim = false) { onFill() }, contentAlignment = Alignment.Center) {
+                MilkText("\u2196", ty.subtitle, c.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
 private fun SearchResults(ctl: AppController) {
     val c = Milk.colors
     val ty = Milk.type
     val tr = ctl.tr
     val time = ctl.time
-    val q = ctl.searchQuery
+    val q = ctl.submittedQuery
+    val typing = ctl.searchQuery.trim().isNotEmpty() && ctl.searchQuery.trim() != q.trim()
+    if (typing) {
+        // Sedang mengetik: hanya daftar saran ringan (tanpa kartu/poster/jaringan).
+        val typed = ctl.searchQuery
+        val suggestions by produceState(emptyList<String>(), typed) {
+            delay(120)
+            value = ctl.titleSuggestions(typed)
+        }
+        Column(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 24.dp)) {
+            // Baris pertama: cari persis teks yang diketik.
+            SuggestionRow(typed.trim(), onPick = { ctl.runSearch(typed); }, onFill = null)
+            suggestions.filterNot { it.equals(typed.trim(), ignoreCase = true) }.forEach { s ->
+                SuggestionRow(s, onPick = { ctl.runSearch(s) }, onFill = { ctl.searchQuery = s })
+            }
+        }
+        return
+    }
     val results = ctl.searchCatalog()
     if (q.trim().isEmpty() && ctl.searchGenre == "all" && ctl.searchVibe == "all") {
         
@@ -152,7 +194,7 @@ private fun SearchResults(ctl: AppController) {
             if (ctl.persisted.recentSearches.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SectionHeader(tr.t("search.recent"), right = { LabelStrong(tr.t("common.delete"), { ctl.clearRecentSearches() }) })
-                    MilkColumnGrid(ctl.persisted.recentSearches) { t -> MilkChip(t, false, { ctl.searchQuery = t }, Modifier.fillMaxWidth()) }
+                    MilkColumnGrid(ctl.persisted.recentSearches) { t -> MilkChip(t, false, { ctl.runSearch(t) }, Modifier.fillMaxWidth()) }
                 }
             }
             
@@ -161,7 +203,7 @@ private fun SearchResults(ctl: AppController) {
             if (tries.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SectionHeader(tr.t("search.trySearch"))
-                    MilkColumnGrid(tries) { t -> MilkChip(t, false, { ctl.searchQuery = t }, Modifier.fillMaxWidth()) }
+                    MilkColumnGrid(tries) { t -> MilkChip(t, false, { ctl.runSearch(t) }, Modifier.fillMaxWidth()) }
                 }
             }
         }

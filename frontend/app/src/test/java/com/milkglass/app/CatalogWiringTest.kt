@@ -118,7 +118,7 @@ class CatalogWiringTest {
         assertEquals(listOf("/v1/catalog/browse?q=Judul+999&page=1"), t.calls)
         assertNotNull(c.animeOf(999))   
 
-        c.searchQuery = "judul 999"
+        c.searchQuery = "judul 999"; c.submittedQuery = "judul 999"
         assertEquals(listOf(999), c.searchCatalog().map { it.id })
     }
 
