@@ -82,6 +82,9 @@ import com.milkglass.app.ui.common.MilkText
 import com.milkglass.app.ui.common.SectionHeader
 import com.milkglass.app.ui.common.milkClickable
 import id.my.milkglass.player.PlayerManager
+import id.my.milkglass.player.PlaybackPhase
+import id.my.milkglass.player.PlaybackRequest
+import id.my.milkglass.player.PlayerSnapshot
 import id.my.milkglass.player.PlayerState
 import com.milkglass.app.ui.components.CloudflareVerificationOverlay
 import id.my.milkglass.net.CloudflareChallengeCoordinator
@@ -107,103 +110,63 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
             authTokenProvider = { ctl.persisted.accessToken }
         ).also { it.initialize() }
     }
-    val nativeState by playerManager.playerState.collectAsState()
+    val snap by playerManager.snapshot.collectAsState()
     var cfChallenge by remember { mutableStateOf<Pair<String, String>?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(playerManager) {
         CloudflareChallengeCoordinator.uiLauncher = { host, url ->
             mainHandler.post { cfChallenge = host to url }
         }
         onDispose {
             CloudflareChallengeCoordinator.uiLauncher = null
-        }
-    }
-
-    
-    DisposableEffect(playerManager) {
-        onDispose {
+            ctl.onQualityChanged = null
             playerManager.release()
         }
     }
 
     DisposableEffect(e, e.episode, playerManager) {
-        val slug = StreamResolver.buildEpisodeSlug(e.anime.romaji, e.episode)
-        fun startStream(qualityPref: String, resumeMs: Long) {
-            val maxH = when (qualityPref) {
-                "1080p" -> 1080
-                "720p" -> 720
-                "480p" -> 480
-                else -> 0
-            }
-            e.nativeStreamActive = false
-            e.nativeBuffering = true
-            e.nativeDurationSeconds = null
-            e.isPlaying = false
-            playerManager.setMaxVideoResolution(maxH)
-            playerManager.playStreamEpisode(
+        val slug = StreamResolver.buildEpisodeSlug(e.anime.romaji.ifBlank { e.anime.title }, e.episode)
+        e.onNativeSeekMs = { ms -> playerManager.seekTo(ms) }
+        e.onNativePlayPause = { play -> if (play) playerManager.resume() else playerManager.pause() }
+        e.onNativeRetry = { playerManager.retry() }
+        ctl.onQualityChanged = { newQuality -> playerManager.switchResolution(newQuality) }
+
+        playerManager.load(
+            PlaybackRequest(
                 slug = slug,
-                preferredResolution = if (qualityPref == "Auto") "1080p" else qualityPref,
+                preferredResolution = ctl.persisted.settings.quality,
                 anilistId = e.anime.id,
                 title = e.anime.title,
                 romajiTitle = e.anime.romaji,
-                startPositionMs = resumeMs
+                startPositionMs = (e.position * 1000.0).toLong().coerceAtLeast(0L)
             )
-        }
-
-        e.onNativeSeekMs = { ms -> playerManager.seekTo(ms) }
-        e.onNativePlayPause = { play -> if (play) playerManager.resume() else playerManager.pause() }
-        e.onNativeRetry = { startStream(ctl.persisted.settings.quality, (e.position * 1000.0).toLong()) }
-        ctl.onQualityChanged = { newQuality ->
-            startStream(newQuality, (e.position * 1000.0).toLong())
-        }
-
-        startStream(ctl.persisted.settings.quality, (e.position * 1000.0).toLong())
+        )
 
         onDispose {
-            if (ctl.onQualityChanged != null) ctl.onQualityChanged = null
             e.onNativeSeekMs = null
             e.onNativePlayPause = null
             e.onNativeRetry = null
             e.nativeStreamActive = false
-            playerManager.stopStreamSession()
+            e.nativeBuffering = false
         }
     }
 
-    LaunchedEffect(nativeState) {
-        when (nativeState) {
-            is PlayerState.Idle,
-            is PlayerState.Buffering -> {
-                e.nativeBuffering = true
-                e.bufferTimer = 1.0
-                e.isPlaying = false
-            }
-            is PlayerState.Playing -> {
-                e.nativeStreamActive = true
-                e.nativeBuffering = false
-                e.bufferTimer = 0.0
-                e.isPlaying = true
-            }
-            is PlayerState.Paused -> {
-                e.nativeStreamActive = true
-                e.nativeBuffering = false
-                e.bufferTimer = 0.0
-                e.isPlaying = false
-            }
-            is PlayerState.Ended -> {
-                e.nativeBuffering = false
-                e.bufferTimer = 0.0
-                e.isPlaying = false
-                if (e.nativeStreamActive && e.duration > 0) {
-                    e.position = e.duration.toDouble()
-                }
-            }
-            is PlayerState.Error -> {
-                e.nativeStreamActive = false
-                e.nativeBuffering = false
-                e.isPlaying = false
-                e.bufferTimer = 0.0
-            }
+    LaunchedEffect(snap) {
+        e.nativeStreamActive = snap.isReady
+        e.nativeBuffering = snap.isLoading
+        e.isPlaying = snap.isPlaying
+        e.bufferTimer = if (snap.isLoading) 1.0 else 0.0
+        if (snap.durationMs > 0L) {
+            e.nativeDurationSeconds = (snap.durationMs / 1000L).toInt().coerceAtLeast(1)
+        } else {
+            e.nativeDurationSeconds = null
+        }
+        if (snap.isReady && snap.durationMs > 0L) {
+            e.syncFromNativePlayer(snap.positionMs)
+        }
+        if (snap.phase == PlaybackPhase.ENDED && snap.durationMs > 0L) {
+            e.position = (snap.durationMs / 1000.0)
         }
     }
 
@@ -214,12 +177,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
                 delay(250)
-                if (e.nativeStreamActive) {
-                    val durMs = playerManager.getDuration()
-                    if (durMs > 0L) e.nativeDurationSeconds = (durMs / 1000L).toInt().coerceAtLeast(1)
-                    val posMs = playerManager.getCurrentPosition()
-                    if (posMs > 0L) e.syncFromNativePlayer(posMs)
-                }
+
                 e.tick()
             }
         }
@@ -235,8 +193,8 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                 
                 Box(Modifier.fillMaxWidth().background(Color.Black).windowInsetsPadding(WindowInsets.statusBars))
                 VideoArea(ctl, e, playerManager, Modifier.fillMaxWidth().aspectRatio(16f / 9f).heightIn(max = vh * .56f), fullscreen = false)
-                val errState = nativeState as? PlayerState.Error
-                if (errState != null) {
+                val errObj = snap.error
+                if (snap.phase == PlaybackPhase.ERROR && errObj != null) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -246,12 +204,12 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         MilkText(
-                            errState.error.userMessage,
+                            errObj.userMessage,
                             Milk.type.style(12f, 500, 16f),
                             Color(0xFFFFB4AB),
                             Modifier.weight(1f).padding(end = 12.dp)
                         )
-                        MilkButton("Coba Lagi", onClick = { e.onNativeRetry?.invoke() }, variant = ButtonVariant.Outlined, small = true)
+                        MilkButton("Coba Lagi", onClick = { playerManager.retry() }, variant = ButtonVariant.Outlined, small = true)
                     }
                 }
                 PlayerInfo(ctl, entry, Modifier.weight(1f))
@@ -338,36 +296,50 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
         
         
         val subLines by playerManager.subtitleLines.collectAsState()
-        if (!e.nativeStreamActive) {
-            Box(Modifier.fillMaxSize().background(Color.Black))
-        } else {
-            AndroidView(
-                factory = { ctx ->
-                    TextureView(ctx).also { tv ->
-                        playerManager.player?.setVideoTextureView(tv)
-                    }
-                },
-                update = { tv ->
-                    playerManager.player?.setVideoTextureView(tv)
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+        val videoAspect by playerManager.videoAspectRatio.collectAsState()
+        Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            if (e.nativeStreamActive) {
+                AndroidView(
+                    factory = { ctx ->
+                        TextureView(ctx).also { tv ->
+                            playerManager.attachTextureView(tv)
+                        }
+                    },
+                    update = { tv ->
+                        playerManager.attachTextureView(tv)
+                    },
+                    modifier = Modifier.fillMaxHeight().aspectRatio(videoAspect, matchHeightConstraintsFirst = true)
+                )
+            }
         }
         if (e.nativeStreamActive && subLines.isNotEmpty()) {
-            Box(
+            Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(horizontal = 20.dp, vertical = if (fullscreen) 56.dp else 36.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color.Black.copy(alpha = 0.68f))
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .padding(
+                        start = 16.dp,
+                        end = 16.dp,
+                        bottom = if (fullscreen) 28.dp else 10.dp
+                    ),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                MilkText(
-                    subLines.joinToString("\n"),
-                    ty.style(if (fullscreen) 16f else 13f, 600, if (fullscreen) 22f else 18f)
-                        .copy(shadow = Shadow(Color.Black, androidx.compose.ui.geometry.Offset(0f, 1.5f), 4f)),
-                    Color.White
-                )
+                subLines.takeLast(3).forEach { line ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color.Black.copy(alpha = 0.52f))
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        MilkText(
+                            text = line,
+                            style = ty.style(if (fullscreen) 16f else 12.5f, 600, if (fullscreen) 21f else 17f)
+                                .copy(shadow = Shadow(Color.Black, androidx.compose.ui.geometry.Offset(0f, 1.5f), 4f)),
+                            color = Color.White,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                }
             }
         }
         Box(
@@ -448,7 +420,8 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
                 .pointerInput(e.faded) { if (!e.faded) detectTapGestures { } }, 
         ) {
             Row(Modifier.then(cutout).padding(start = 12.dp, end = 12.dp).offset(y = 24.dp).fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
-                MilkText("${ctl.time.formatDuration(e.position)} / ${ctl.time.formatDuration(e.duration.toDouble())}", ty.style(12f, 400, mono = true), Color.White)
+                val durLabel = if (e.duration > 0) ctl.time.formatDuration(e.duration.toDouble()) else "--:--"
+                MilkText("${ctl.time.formatDuration(if (e.duration > 0) e.position else 0.0)} / $durLabel", ty.style(12f, 400, mono = true), Color.White)
                 Spacer(Modifier.weight(1f))
                 Box(
                     Modifier.height(32.dp).clip(RoundedCornerShape(16.dp))

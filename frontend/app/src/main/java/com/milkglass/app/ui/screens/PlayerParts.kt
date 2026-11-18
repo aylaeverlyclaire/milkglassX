@@ -70,6 +70,7 @@ fun SeekBar(position: Double, max: Int, fullscreen: Boolean, onSeek: (Double) ->
                 val down = awaitFirstDown()
                 fun upd(x: Float) {
                     val w = size.width
+                    if (max <= 0) return
                     val frac = ((x - 8.dp.toPx()) / (w - 16.dp.toPx())).coerceIn(0f, 1f)
                     onSeek((frac * max).roundToInt().toDouble())
                 }
@@ -78,7 +79,7 @@ fun SeekBar(position: Double, max: Int, fullscreen: Boolean, onSeek: (Double) ->
             }
         },
     ) {
-        val p = (position / max).toFloat().coerceIn(0f, 1f)
+        val p = if (max > 0) (position / max).toFloat().coerceIn(0f, 1f) else 0f
         val cy = size.height / 2f
         val th = 4.dp.toPx()
         drawRect(rest, Offset(0f, cy - th / 2f), Size(size.width, th))

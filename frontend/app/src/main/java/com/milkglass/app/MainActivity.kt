@@ -13,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.milkglass.app.core.app.AppController
+import id.my.milkglass.source.SourceAvailabilityIndex
 import com.milkglass.app.core.data.AppData
 import com.milkglass.app.core.design.Milk
 import com.milkglass.app.core.remote.CatalogRepository
@@ -56,6 +57,7 @@ class MainActivity : ComponentActivity() {
                 HttpUrlTransport(), FileCatalogCache(File(cacheDir, "catalog_home.json")),
                 snapshots = FileSnapshotStore(File(filesDir, "catalog")),
             )
+            val availabilityIndex = SourceAvailabilityIndex(appCtx)
             val c = AppController(
                 data, posters, StateStore(File(filesDir, StateStore.FILE_NAME)),
                 catalogRepo = repo,
@@ -63,7 +65,18 @@ class MainActivity : ComponentActivity() {
                 metaSource = com.milkglass.app.core.remote.AniZipMetaSource(),
                 skipSource = com.milkglass.app.core.remote.AniSkipSource(),
                 extrasSource = com.milkglass.app.core.remote.AniListExtrasHttpSource(),
+                availabilityChecker = { anime ->
+                    availabilityIndex.isAvailable(listOf(anime.romaji, anime.title))
+                },
             )
+            Thread {
+                val count = runCatching { availabilityIndex.refreshIfNeeded() }.getOrDefault(0)
+                if (count > 0) {
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed) c.notifyAvailabilityUpdated()
+                    }
+                }
+            }.start()
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 controller = c

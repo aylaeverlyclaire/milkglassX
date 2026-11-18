@@ -3,11 +3,14 @@ package id.my.milkglass
 import id.my.milkglass.extractor.HosterFilter
 import id.my.milkglass.extractor.JsUnpacker
 import id.my.milkglass.player.ErrorMapper
+import id.my.milkglass.player.PlayerManager
 import id.my.milkglass.resolver.FailureReason
 import id.my.milkglass.resolver.StreamResolutionException
 import id.my.milkglass.resolver.StreamResolver
 import id.my.milkglass.source.MkvQuality
 import id.my.milkglass.source.SourcePriority
+import id.my.milkglass.source.IndexedAnimeEntry
+import id.my.milkglass.source.SourceAvailabilityIndex
 import id.my.milkglass.source.SourceSlugCache
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -77,5 +80,30 @@ class StreamingEndToEndTest {
     fun errorMapperPreservesStreamResolutionReason() {
         val err = StreamResolutionException(FailureReason.HTTP_403, "Cloudflare challenge")
         assertEquals(FailureReason.HTTP_403, ErrorMapper.classifyThrowable(err))
+    }
+
+    @Test
+    fun subtitleSanitizerDropsAssVectorDrawingsAndBlankLines() {
+        val raw = "m 0 0 l 235.5 0 l 215.5 108 l 0 10\n\nMemastikan kau tetap hidup\\N\\Ndan bersekolah"
+        val lines = PlayerManager.sanitizeSubtitleText(raw)
+        assertEquals(listOf("Memastikan kau tetap hidup", "dan bersekolah"), lines)
+    }
+
+    @Test
+    fun availabilityIndexMatchesPresentTitlesAndRejectsMissingOnes() {
+        val index = SourceAvailabilityIndex(null)
+        val entries = (1..20).map { i ->
+            IndexedAnimeEntry(
+                source = SourcePriority.OTAKUDESU,
+                title = if (i == 1) "Tantei wa Mou Shindeiru Season 2" else "Sample Anime $i",
+                normalizedTitle = if (i == 1) "tantei wa mou shindeiru season 2" else "sample anime $i",
+                tokens = if (i == 1) setOf("tantei", "wa", "mou", "shindeiru", "season") else setOf("sample", "anime", "$i"),
+                url = "https://otakudesu.blog/anime/sample-$i/"
+            )
+        }
+        index.loadEntriesForTest(entries)
+        assertTrue(index.isReady)
+        assertTrue(index.isAvailable(listOf("Tantei wa mou, Shindeiru. Season 2")))
+        assertFalse(index.isAvailable(listOf("Anime Fiktif Yang Tidak Ada Di Sumber")))
     }
 }

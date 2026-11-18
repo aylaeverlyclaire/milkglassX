@@ -101,6 +101,7 @@ class AppController(
     private val skipSource: com.milkglass.app.core.remote.SkipSource? = null,
     
     private val extrasSource: com.milkglass.app.core.remote.AniListExtrasSource? = null,
+    private val availabilityChecker: ((Anime) -> Boolean)? = null,
     
     seedState: ((com.milkglass.app.core.data.Translator, Long) -> com.milkglass.app.core.storage.PersistedState)? = null,
 ) {
@@ -122,8 +123,17 @@ class AppController(
     private val searchedQueries = HashSet<String>()
 
     
+    private var availabilityRevision by mutableStateOf(0)
+
+    fun notifyAvailabilityUpdated() {
+        availabilityRevision++
+    }
+
     val catalog: List<Anime> by derivedStateOf {
-        if (remoteEntries.isEmpty()) seedCatalog else seedCatalog + remoteEntries.values.map { it.anime }
+        val rev = availabilityRevision
+        val raw = if (remoteEntries.isEmpty()) seedCatalog else seedCatalog + remoteEntries.values.map { it.anime }
+        val checker = availabilityChecker
+        if (checker == null || rev < 0) raw else raw.filter(checker).ifEmpty { raw }
     }
     private val catalogIndex: Map<Int, Anime> by derivedStateOf { catalog.associateBy { it.id } }
 
