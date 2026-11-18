@@ -249,7 +249,6 @@ private fun SheetBody(ctl: AppController, o: Overlay, vh: androidx.compose.ui.un
         fun title(t: String) = t
         val titleText = when (o) {
             is Overlay.LegalDocument -> ctl.tr.legalDoc(o.key)?.title ?: ""
-            Overlay.PlayerMenu -> tr.t("player.settings")
             Overlay.QualityPicker -> tr.t("player.videoQuality")
             is Overlay.EditField -> tr.t(if (o.key == "nm") "profile.editName" else "profile.editUsername")
             is Overlay.SettingOptions -> tr.t("settings.theme")
@@ -277,11 +276,6 @@ private fun SheetBody(ctl: AppController, o: Overlay, vh: androidx.compose.ui.un
                         }
                     }
                     MilkButton(tr.t("common.understood"), { ctl.closeOverlay() }, wide = true, variant = ButtonVariant.Tonal)
-                }
-                Overlay.PlayerMenu -> {
-                    MilkCard {
-                        SettingItem(MilkIcons.Hd, tr.t("player.resolution"), ctl.effectiveQuality(), { ChevronIcon() }, { ctl.overlay = Overlay.QualityPicker })
-                    }
                 }
                 Overlay.QualityPicker -> {
                     listOf("Auto", "1080p", "720p", "480p").forEach { q ->

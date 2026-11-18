@@ -44,7 +44,6 @@ data class ListSelection(val scope: String, val keys: List<String>)
 
 sealed interface Overlay {
     data class LegalDocument(val key: String) : Overlay
-    data object PlayerMenu : Overlay
     data object QualityPicker : Overlay
     data object ClearHistory : Overlay
     data object DeleteSelection : Overlay

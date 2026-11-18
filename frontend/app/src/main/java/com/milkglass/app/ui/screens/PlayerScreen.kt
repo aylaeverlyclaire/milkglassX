@@ -317,7 +317,6 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
                 } else {
                     Spacer(Modifier.weight(1f))
                 }
-                VideoButton(MilkIcons.More, 40, { ctl.overlay = com.milkglass.app.core.app.Overlay.PlayerMenu }, bg = false, enabled = !e.faded)
             }
         }
 
