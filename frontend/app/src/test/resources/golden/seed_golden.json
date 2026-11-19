@@ -1,0 +1,163 @@
+{
+ "boot": 1700000000000,
+ "nextAirAt": [
+  1700053200000,
+  null,
+  1700391600000,
+  1700143200000,
+  null,
+  1700569800000,
+  1700492400000,
+  1700314200000,
+  1700226000000,
+  null,
+  1700064000000,
+  1700580600000
+ ],
+ "threads": [
+  {
+   "aid": 0,
+   "ep": 1,
+   "msgs": [
+    {
+     "id": "t0.1.0",
+     "authorId": "dito",
+     "text": "Ada yang sadar detail di latar belakang pas adegan pembuka?",
+     "sentAt": 1699988840000
+    },
+    {
+     "id": "t0.1.1",
+     "authorId": "mika",
+     "text": "Teori: tokoh utama sebenarnya sudah tahu dari awal",
+     "sentAt": 1699991060000
+    },
+    {
+     "id": "t0.1.2",
+     "authorId": "bayu",
+     "text": "Nunggu episode minggu depan nggak sabar",
+     "sentAt": 1699993280000
+    },
+    {
+     "id": "t0.1.3",
+     "authorId": "sora",
+     "text": "Animasinya halus banget di adegan tengah",
+     "sentAt": 1699995500000
+    },
+    {
+     "id": "t0.1.4",
+     "authorId": "nana",
+     "text": "Ada yang sadar detail di latar belakang pas adegan pembuka?",
+     "sentAt": 1699997720000
+    }
+   ]
+  },
+  {
+   "aid": 3,
+   "ep": 7,
+   "msgs": [
+    {
+     "id": "t3.7.0",
+     "authorId": "sora",
+     "text": "Pacing-nya pas, nggak terasa 24 menit",
+     "sentAt": 1699988480000
+    },
+    {
+     "id": "t3.7.1",
+     "authorId": "nana",
+     "text": "Pengisi suara karakter sampingnya juara",
+     "sentAt": 1699990700000
+    },
+    {
+     "id": "t3.7.2",
+     "authorId": "rin",
+     "text": "Episode ini bikin deg-degan, Rei no Gakkou makin seru",
+     "sentAt": 1699992920000
+    },
+    {
+     "id": "t3.7.3",
+     "authorId": "dito",
+     "text": "Lagu penutupnya cocok banget buat suasana",
+     "sentAt": 1699995140000
+    },
+    {
+     "id": "t3.7.4",
+     "authorId": "mika",
+     "text": "Pacing-nya pas, nggak terasa 24 menit",
+     "sentAt": 1699997360000
+    }
+   ]
+  },
+  {
+   "aid": 11,
+   "ep": 24,
+   "msgs": [
+    {
+     "id": "t11.24.0",
+     "authorId": "nana",
+     "text": "Nunggu episode minggu depan nggak sabar",
+     "sentAt": 1699985240000
+    },
+    {
+     "id": "t11.24.1",
+     "authorId": "rin",
+     "text": "Animasinya halus banget di adegan tengah",
+     "sentAt": 1699987460000
+    },
+    {
+     "id": "t11.24.2",
+     "authorId": "dito",
+     "text": "Ada yang sadar detail di latar belakang pas adegan pembuka?",
+     "sentAt": 1699989680000
+    },
+    {
+     "id": "t11.24.3",
+     "authorId": "mika",
+     "text": "Teori: tokoh utama sebenarnya sudah tahu dari awal",
+     "sentAt": 1699991900000
+    },
+    {
+     "id": "t11.24.4",
+     "authorId": "bayu",
+     "text": "Nunggu episode minggu depan nggak sabar",
+     "sentAt": 1699994120000
+    },
+    {
+     "id": "t11.24.5",
+     "authorId": "sora",
+     "text": "Animasinya halus banget di adegan tengah",
+     "sentAt": 1699996340000
+    }
+   ]
+  },
+  {
+   "aid": 5,
+   "ep": 13,
+   "msgs": [
+    {
+     "id": "t5.13.0",
+     "authorId": "rin",
+     "text": "Episode ini bikin deg-degan, Ryuusei Hunter makin seru",
+     "sentAt": 1699990340000
+    },
+    {
+     "id": "t5.13.1",
+     "authorId": "dito",
+     "text": "Lagu penutupnya cocok banget buat suasana",
+     "sentAt": 1699992560000
+    },
+    {
+     "id": "t5.13.2",
+     "authorId": "mika",
+     "text": "Pacing-nya pas, nggak terasa 24 menit",
+     "sentAt": 1699994780000
+    },
+    {
+     "id": "t5.13.3",
+     "authorId": "bayu",
+     "text": "Pengisi suara karakter sampingnya juara",
+     "sentAt": 1699997000000
+    }
+   ]
+  }
+ ]
+}

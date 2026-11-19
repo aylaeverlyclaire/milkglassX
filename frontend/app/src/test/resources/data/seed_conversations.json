@@ -1,0 +1,156 @@
+[
+ {
+  "id": "g1",
+  "kind": "group",
+  "name": "Nobar Kaelan",
+  "ownerId": "sora",
+  "memberIds": [
+   "me",
+   "sora",
+   "dito",
+   "mika"
+  ],
+  "unreadCount": 2,
+  "messages": [
+   {
+    "authorId": "sora",
+    "text": "Nobar #Langit Terakhir Kaelan Ep 25 malam ini ya, jam 8",
+    "id": "g1.0",
+    "minutesAgo": 300
+   },
+   {
+    "authorId": "dito",
+    "text": "Siap, aku bawa camilan",
+    "id": "g1.1",
+    "minutesAgo": 280
+   },
+   {
+    "authorId": "mika",
+    "text": "Aku join dari rumah, mulai duluan aja kalau telat",
+    "id": "g1.2",
+    "minutesAgo": 95
+   },
+   {
+    "authorId": "sora",
+    "text": "Awas spoiler di luar grup ya",
+    "id": "g1.3",
+    "minutesAgo": 12
+   },
+   {
+    "authorId": "dito",
+    "text": "Oke, nanti aja dibahas pas nonton",
+    "id": "g1.4",
+    "minutesAgo": 8
+   }
+  ]
+ },
+ {
+  "id": "g2",
+  "kind": "group",
+  "name": "Klub Arus Biru",
+  "ownerId": "me",
+  "memberIds": [
+   "me",
+   "nana",
+   "dito"
+  ],
+  "unreadCount": 0,
+  "messages": [
+   {
+    "authorId": "nana",
+    "text": "Ada yang mau rewatch #Arus Biru akhir pekan ini?",
+    "id": "g2.0",
+    "minutesAgo": 1500
+   },
+   {
+    "authorId": "me",
+    "text": "Aku ikut, mulai dari Ep 1",
+    "id": "g2.1",
+    "minutesAgo": 1480
+   }
+  ]
+ },
+ {
+  "id": "d-nana",
+  "kind": "direct",
+  "name": "Nana",
+  "peerId": "nana",
+  "unreadCount": 1,
+  "messages": [
+   {
+    "authorId": "nana",
+    "text": "Eh udah nonton #Arus Biru belum?",
+    "id": "d-nana.0",
+    "minutesAgo": 2900
+   },
+   {
+    "authorId": "me",
+    "text": "Sudah tamat, endingnya bikin nangis",
+    "id": "d-nana.1",
+    "minutesAgo": 2880
+   },
+   {
+    "authorId": "nana",
+    "text": "Kan! Rekomendasi lanjutannya #Nada di Balik Tembok",
+    "id": "d-nana.2",
+    "minutesAgo": 40
+   }
+  ]
+ },
+ {
+  "id": "d-dito",
+  "kind": "direct",
+  "name": "Dito",
+  "peerId": "dito",
+  "unreadCount": 0,
+  "messages": [
+   {
+    "authorId": "dito",
+    "text": "Besok jadi marathon?",
+    "id": "d-dito.0",
+    "minutesAgo": 4300
+   },
+   {
+    "authorId": "me",
+    "text": "Jadi, bawa minum ya",
+    "id": "d-dito.1",
+    "minutesAgo": 4290
+   }
+  ]
+ },
+ {
+  "id": "public",
+  "kind": "public",
+  "name": "Publik",
+  "memberIds": [
+   "me",
+   "rin",
+   "dito",
+   "mika",
+   "bayu",
+   "sora",
+   "nana"
+  ],
+  "unreadCount": 0,
+  "messages": [
+   {
+    "authorId": "rin",
+    "text": "Selamat datang! Ada rekomendasi anime musim ini?",
+    "id": "public.0",
+    "minutesAgo": 180
+   },
+   {
+    "authorId": "nana",
+    "text": "Coba #Nada di Balik Tembok, ceritanya hangat",
+    "id": "public.1",
+    "minutesAgo": 150
+   },
+   {
+    "authorId": "bayu",
+    "text": "#Ksatria Mesin Seribu seru banget, animasinya mulus",
+    "id": "public.2",
+    "minutesAgo": 60
+   }
+  ]
+ }
+]

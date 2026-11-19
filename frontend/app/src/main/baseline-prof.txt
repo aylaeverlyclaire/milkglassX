@@ -1,0 +1,3 @@
+# Kompilasi AOT seluruh kode aplikasi saat instalasi (dipasang profileinstaller): tanpa JIT di pemakaian pertama.
+HSPLcom/milkglass/app/**;->**(**)**
+Lcom/milkglass/app/**;

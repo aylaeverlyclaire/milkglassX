@@ -1,0 +1,38 @@
+{
+  "result": {
+    "placement": {},
+    "compatibility_date": "2025-11-01",
+    "compatibility_flags": [],
+    "usage_model": "standard",
+    "tags": [],
+    "tail_consumers": [],
+    "logpush": false,
+    "annotations": {
+      "workers/triggered_by": "secret"
+    },
+    "bindings": [
+      {
+        "name": "ADMIN_SECRET",
+        "type": "secret_text"
+      },
+      {
+        "database_id": "9731d997-116f-4004-98b2-d4bef4e83085",
+        "id": "9731d997-116f-4004-98b2-d4bef4e83085",
+        "name": "DB",
+        "type": "d1"
+      },
+      {
+        "name": "GOOGLE_CLIENT_ID",
+        "text": "YOUR_GOOGLE_WEB_CLIENT_ID.apps.googleusercontent.com",
+        "type": "plain_text"
+      },
+      {
+        "name": "JWT_SECRET",
+        "type": "secret_text"
+      }
+    ]
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

@@ -1,0 +1,122 @@
+{
+  "result": [
+    {
+      "created_on": "2026-06-27T16:19:06.125403Z",
+      "modified_on": "2026-07-01T08:28:57.832197Z",
+      "id": "app",
+      "tag": "6c1d4610b65b438a8ee7f920135f6781",
+      "tags": [],
+      "deployment_id": "",
+      "tail_consumers": null,
+      "logpush": false,
+      "has_assets": true,
+      "has_modules": false,
+      "etag": "",
+      "handlers": [
+        "fetch"
+      ],
+      "last_deployed_from": "",
+      "compatibility_date": "2026-07-01",
+      "usage_model": "standard",
+      "routes": null
+    },
+    {
+      "created_on": "2026-11-10T08:12:48.246106Z",
+      "modified_on": "2026-11-11T07:12:52.734326Z",
+      "id": "milkglass-amprem",
+      "tag": "b867f6517b9b412cbff6919cfe1cc3bb",
+      "tags": [],
+      "deployment_id": "",
+      "tail_consumers": null,
+      "logpush": false,
+      "has_assets": true,
+      "has_modules": true,
+      "etag": "c5f602fd13e3fd0e886999b71993975deb8dd996e87050e23f4ac21cb05f81ec",
+      "handlers": [
+        "fetch"
+      ],
+      "placement_mode": "smart",
+      "placement_status": "INSUFFICIENT_INVOCATIONS",
+      "placement": {
+        "mode": "smart",
+        "status": "INSUFFICIENT_INVOCATIONS",
+        "last_analyzed_at": "2026-11-15T01:35:13.180517Z"
+      },
+      "last_deployed_from": "quick_editor",
+      "compatibility_date": "2026-11-10",
+      "usage_model": "standard",
+      "cache_options": {
+        "enabled": true,
+        "cross_version_cache": false
+      },
+      "routes": [
+        {
+          "id": "b92c93c02cf341e39bd578672401fcb3",
+          "pattern": "milkglass.my.id/amprem*",
+          "script": "milkglass-amprem",
+          "request_limit_fail_open": false
+        }
+      ]
+    },
+    {
+      "created_on": "2026-11-15T03:17:36.231696Z",
+      "modified_on": "2026-11-15T11:43:40.066079Z",
+      "id": "milkglass-backend",
+      "tag": "fd058897034f43c987577f696826b8bb",
+      "tags": [],
+      "deployment_id": "",
+      "tail_consumers": null,
+      "logpush": false,
+      "has_assets": false,
+      "has_modules": true,
+      "etag": "a4c1a388773a33bfd179e329102cd5673f4e158440098c1f276911191179f2d3",
+      "handlers": [
+        "fetch",
+        "scheduled"
+      ],
+      "last_deployed_from": "wrangler",
+      "compatibility_date": "2025-11-01",
+      "usage_model": "standard",
+      "routes": null
+    },
+    {
+      "created_on": "2026-11-15T02:49:50.693497Z",
+      "modified_on": "2026-11-15T02:49:52.145366Z",
+      "id": "patient-frog-8d1c",
+      "tag": "e7cb4f389fcf4b158516edcad235bd94",
+      "tags": null,
+      "deployment_id": "",
+      "tail_consumers": null,
+      "logpush": false,
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "redact_query_string": false,
+        "logs": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "persist": true,
+          "invocation_logs": true
+        },
+        "traces": {
+          "enabled": false,
+          "persist": true,
+          "head_sampling_rate": 1
+        }
+      },
+      "has_assets": false,
+      "has_modules": true,
+      "etag": "e35d761770b26cd0c3d2198093a565fc18ac0d6571f751c1ee7d9bfa125931a3",
+      "handlers": [
+        "fetch"
+      ],
+      "last_deployed_from": "dash_template",
+      "compatibility_date": "2026-11-15",
+      "usage_model": "standard",
+      "routes": null
+    }
+  ],
+  "success": true,
+  "errors": [],
+  "messages": []
+}

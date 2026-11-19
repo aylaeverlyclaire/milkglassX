@@ -1,0 +1,22 @@
+services:
+  cf-handler:
+    build: .
+    container_name: milkglass-cf-handler
+    ports:
+      - "8000:8000"
+    environment:
+      - CF_HEADLESS=true
+      - CF_CACHE_ENABLED=true
+      - CF_BROWSERS=3
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+    shm_size: 2g
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+    restart: unless-stopped

@@ -1,0 +1,114 @@
+name: Deploy backend (Cloudflare)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend/milkglass-backend
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc --noEmit
+
+      - name: Cek token
+        run: |
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/tokens/verify" || \
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" https://api.cloudflare.com/client/v4/user/tokens/verify
+
+      - name: Siapkan D1 (buat bila belum ada) dan isi database_id
+        run: |
+          ID=$(npx wrangler d1 list --json | python3 -c "import sys,json;print(next((d['uuid'] for d in json.load(sys.stdin) if d['name']=='milkglass_db'),''))")
+          if [ -z "$ID" ]; then
+            npx wrangler d1 create milkglass_db
+            ID=$(npx wrangler d1 list --json | python3 -c "import sys,json;print(next((d['uuid'] for d in json.load(sys.stdin) if d['name']=='milkglass_db'),''))")
+          fi
+          [ -n "$ID" ] || { echo "::error::D1 milkglass_db tidak ditemukan/gagal dibuat"; exit 1; }
+          sed -i "s/^database_id = \".*\"/database_id = \"$ID\"/" wrangler.toml
+          echo "D1 id: $ID"
+
+      - name: Terapkan skema (idempoten)
+        run: npx wrangler d1 execute milkglass_db --remote --file=./schema.sql
+
+      - name: Terapkan migrasi D1 (dicatat wrangler, tidak diulang)
+        run: npx wrangler d1 migrations apply milkglass_db --remote
+
+      - name: Deploy Worker
+        id: deploy
+        run: |
+          npx wrangler deploy 2>&1 | tee deploy.log
+          URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Worker: $URL"
+
+      - name: Isi secret Worker
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+        run: |
+          printf %s "$JWT_SECRET"   | npx wrangler secret put JWT_SECRET
+          printf %s "$ADMIN_SECRET" | npx wrangler secret put ADMIN_SECRET
+
+      - name: Sinkron katalog (dari Actions, bukan dari Worker)
+        working-directory: frontend
+        env:
+          WORKER_URL: ${{ steps.deploy.outputs.url }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          SCOPE: full
+        run: node scripts/sync-catalog.mjs
+
+      - name: Uji asap (live)
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+        run: |
+          set +e
+          FAIL=0
+          {
+            echo "URL=$URL"
+            [ -n "$URL" ] || { echo "URL kosong"; FAIL=1; }
+            sleep 8
+            echo "== health"; curl -fsS -m 15 "$URL/v1/health"; echo
+            echo "== sources"; curl -fsS -m 15 "$URL/v1/catalog/sources"; echo
+            echo "== admin tanpa secret"; curl -s -m 30 -o /dev/null -w 'HTTP %{http_code}\n' -X POST "$URL/v1/internal/sync-anilist"
+            echo "== home (sesudah sync)"
+            curl -sS -m 30 "$URL/v1/catalog/home" | python3 -c "import sys,json;d=json.load(sys.stdin)['data'];print({k:len(v) for k,v in d.items()}); a=d['popular'][0]; print('contoh:',a['id'],a['title'],a.get('score'))" || FAIL=1
+            echo "== status"; curl -sS -m 30 -w '\nHTTP %{http_code}\n' "$URL/v1/catalog/status" | head -c 400; echo
+            echo "== browse"; curl -sS -m 30 -w '\nHTTP %{http_code}\n' "$URL/v1/catalog/browse?status=1&page=1" | head -c 250; echo
+            echo "== snapshot berversi"
+            VER=$(curl -sS -m 30 "$URL/v1/catalog/status" | python3 -c "import sys,json;print(json.load(sys.stdin)['data'].get('version',''))")
+            echo "version=$VER"
+            [ -n "$VER" ] || { echo "status tanpa version"; FAIL=1; }
+            curl -sS -m 60 -D snap.h -o snap.json "$URL/v1/catalog/snapshot?v=$VER"
+            grep -iE '^(HTTP|etag|cache-control|x-milkglass-cache|content-length)' snap.h | tr -d '\r'
+            python3 -c "import json;d=json.load(open('snap.json'));print('snapshot_count=',len(d['data']),'meta=',d['meta'])" || FAIL=1
+            ETAG=$(grep -i '^etag:' snap.h | head -1 | cut -d' ' -f2- | tr -d '\r')
+            echo "== revalidasi If-None-Match (harus 304)"
+            curl -sS -m 30 -o /dev/null -w 'HTTP %{http_code}\n' -H "If-None-Match: $ETAG" "$URL/v1/catalog/snapshot?v=$VER" | tee rv.txt
+            grep -q 'HTTP 304' rv.txt || FAIL=1
+            echo "== snapshot kedua (harus HIT dari edge)"
+            curl -sS -m 30 -D snap2.h -o /dev/null "$URL/v1/catalog/snapshot?v=$VER"; grep -i '^x-milkglass-cache' snap2.h | tr -d '\r'
+          } > out.txt 2>&1
+          cat out.txt
+          MSG=$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' out.txt | head -c 3500)
+          echo "::notice title=smoke::$MSG"
+          grep -q "contoh:" out.txt || FAIL=1
+          exit $FAIL

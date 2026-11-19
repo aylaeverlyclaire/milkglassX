@@ -1,0 +1,15 @@
+name = "milkglass-backend"
+main = "src/index.ts"
+compatibility_date = "2025-11-01"
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "milkglass_db"
+database_id = "e6256510-99d9-4899-b16e-c47249b9deca"
+
+[vars]
+ENVIRONMENT = "production"
+GOOGLE_CLIENT_ID = "YOUR_GOOGLE_WEB_CLIENT_ID.apps.googleusercontent.com"

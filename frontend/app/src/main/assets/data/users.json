@@ -1,0 +1,71 @@
+{
+ "me": {
+  "name": "Kamu",
+  "color": "#4F37C8",
+  "role": "admin"
+ },
+ "rin": {
+  "name": "Rin",
+  "color": "#c2185b",
+  "role": "admin",
+  "isPublic": 1,
+  "watchedIds": [
+   0,
+   6,
+   4
+  ]
+ },
+ "dito": {
+  "name": "Dito",
+  "color": "#1565c0",
+  "isPublic": 1,
+  "watchedIds": [
+   0,
+   2,
+   7,
+   5
+  ]
+ },
+ "mika": {
+  "name": "Mika",
+  "color": "#2e7d32",
+  "role": "premium",
+  "isPublic": 0,
+  "watchedIds": [
+   0,
+   1,
+   10
+  ]
+ },
+ "bayu": {
+  "name": "Bayu",
+  "color": "#ef6c00",
+  "isPublic": 2,
+  "watchedIds": [
+   3,
+   5,
+   8
+  ]
+ },
+ "sora": {
+  "name": "Sora",
+  "color": "#6a1b9a",
+  "isPublic": 1,
+  "watchedIds": [
+   0,
+   3,
+   6
+  ]
+ },
+ "nana": {
+  "name": "Nana",
+  "color": "#00838f",
+  "isPublic": 1,
+  "watchedIds": [
+   4,
+   1,
+   9,
+   11
+  ]
+ }
+}

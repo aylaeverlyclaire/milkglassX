@@ -1,0 +1,2 @@
+ALTER TABLE users ADD COLUMN entitlement TEXT NOT NULL DEFAULT 'free';
+ALTER TABLE users ADD COLUMN entitlement_until INTEGER NOT NULL DEFAULT 0;

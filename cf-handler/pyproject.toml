@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["cf_handler*"]
+
+[project]
+name = "CloudflareHandleForScraping"
+description = "A cloudflare verification Handle script for webscraping"
+requires-python = ">=3.12"
+
+keywords = [
+    "python",
+    "recaptcha",
+    "solver",
+    "cloudflare",
+    "Handle",
+    "cloudflare-Handle",
+    "cloudflare-Handle-script",
+    "cloudflare-handler",
+    "drissionpage",
+]
+
+dynamic = ["version"]
+
+authors = [{ name = "Sarper AVCI" }]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+dependencies = [
+    "DrissionPage>=4.1.1.4,<4.2",
+    "python-socks[asyncio]>=2.5",
+    "curl_cffi",
+    "fastapi>=0.68.0",
+    "uvicorn>=0.15.0",
+    "pydantic>=2.0.0",
+]

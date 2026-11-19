@@ -1,0 +1,364 @@
+{
+ "weekdaysShort": [
+  "Min",
+  "Sen",
+  "Sel",
+  "Rab",
+  "Kam",
+  "Jum",
+  "Sab"
+ ],
+ "weekdaysLong": [
+  "Minggu",
+  "Senin",
+  "Selasa",
+  "Rabu",
+  "Kamis",
+  "Jumat",
+  "Sabtu"
+ ],
+ "monthsShort": [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "Mei",
+  "Jun",
+  "Jul",
+  "Agu",
+  "Sep",
+  "Okt",
+  "Nov",
+  "Des"
+ ],
+ "legalDocs": {
+  "usage": [
+   "Kebijakan Penggunaan",
+   [
+    [
+     "Akun dan identitas",
+     "Satu orang satu akun. Nama, nama pengguna, dan foto profil tidak boleh menyamar sebagai orang lain atau melanggar hak pihak lain."
+    ],
+    [
+     "Perilaku di fitur Sosial",
+     "Hormati sesama pengguna. Pelecehan, ujaran kebencian, ancaman, dan perundungan tidak diizinkan di obrolan publik, grup, maupun pesan pribadi."
+    ],
+    [
+     "Spam dan promosi",
+     "Dilarang mengirim pesan berulang, tautan penipuan, atau iklan tanpa izin. Gunakan tagar judul agar diskusi tetap rapi."
+    ],
+    [
+     "Spoiler",
+     "Bahas cerita episode terbaru di komentar episode atau grup nobar. Beri peringatan sebelum membuka spoiler di obrolan publik."
+    ],
+    [
+     "Foto dan konten",
+     "Foto profil, foto grup, dan pesan tidak boleh berisi konten dewasa, kekerasan ekstrem, atau data pribadi orang lain."
+    ],
+    [
+     "Privasi",
+     "Tontonan, Daftar Saya, dan pesan pribadi mengikuti pengaturanmu: Semua orang, Hanya teman, atau Hanya saya. Jangan menyebarkan isi pesan pribadi tanpa izin pengirimnya."
+    ],
+    [
+     "Penggunaan layanan",
+     "Akun tidak untuk dibagikan atau dijual. Dilarang mengakali iklan, batas kualitas, atau mengambil data layanan secara otomatis."
+    ],
+    [
+     "Pelaporan dan tindakan",
+     "Laporkan pesan lewat menu pesan. Pelanggaran dapat berujung peringatan, pembatasan mengirim pesan, atau penangguhan akun."
+    ]
+   ]
+  ],
+  "privacy": [
+   "Kebijakan Privasi",
+   [
+    [
+     "Data yang kami simpan",
+     "Milkglass menyimpan nama, nama pengguna, foto profil, daftar tontonan, Daftar Saya, riwayat, dan pesan yang kamu kirim. Semua data di prototipe ini adalah data contoh."
+    ],
+    [
+     "Cara data dipakai",
+     "Data dipakai untuk menampilkan progres tontonan, rekomendasi, pengingat episode baru, dan fitur Sosial seperti grup, pesan pribadi, dan nobar."
+    ],
+    [
+     "Siapa yang bisa melihat",
+     "Tontonan dan Daftar Saya tampil sesuai pengaturan privasimu. Pesan pribadi hanya terlihat oleh kamu dan lawan bicara. Pesan di obrolan publik terlihat semua pengguna."
+    ],
+    [
+     "Berbagi dengan pihak ketiga",
+     "Milkglass tidak menjual datamu. Data hanya dibagikan ke penyedia pembayaran dan penyimpanan seperlunya untuk menjalankan layanan."
+    ],
+    [
+     "Penyimpanan dan keamanan",
+     "Data disimpan di perangkat dan di server contoh dengan perlindungan standar. Tidak ada sistem yang sepenuhnya aman, jadi jaga akunmu."
+    ],
+    [
+     "Pengaturan dan penghapusan",
+     "Kamu bisa mengubah privasi, memblokir pengguna, menghapus riwayat, dan menghapus akun dari Profil. Data akun dihapus permanen 30 hari setelah permintaan."
+    ],
+    [
+     "Anak-anak",
+     "Layanan ini tidak ditujukan untuk anak di bawah 13 tahun. Judul dengan label usia tertentu hanya sebagai panduan."
+    ],
+    [
+     "Perubahan kebijakan",
+     "Kebijakan ini bisa berubah. Perubahan penting diumumkan lewat aplikasi sebelum berlaku."
+    ]
+   ]
+  ],
+  "terms": [
+   "Ketentuan Layanan",
+   [
+    [
+     "Penerimaan",
+     "Dengan memakai Milkglass kamu setuju dengan ketentuan ini. Jika tidak setuju, berhenti memakai layanan."
+    ],
+    [
+     "Layanan",
+     "Milkglass menyediakan tontonan anime, jadwal rilis, dan fitur Sosial. Katalog, jadwal, dan fitur dapat berubah kapan saja."
+    ],
+    [
+     "Akun",
+     "Kamu bertanggung jawab atas aktivitas di akunmu. Satu orang satu akun, dan akun tidak boleh dijual atau dipindahtangankan."
+    ],
+    [
+     "Premium",
+     "Premium memberi akses tanpa iklan, 1080p, unduhan, akses awal, dan foto profil kustom. Langganan diperpanjang otomatis dan bisa dibatalkan kapan saja sebelum tanggal perpanjangan."
+    ],
+    [
+     "Konten",
+     "Seluruh judul, gambar, dan teks di prototipe ini adalah contoh fiktif dan hanya untuk demonstrasi."
+    ],
+    [
+     "Pembatasan tanggung jawab",
+     "Layanan diberikan apa adanya. Milkglass tidak menjamin layanan selalu tersedia atau bebas gangguan."
+    ],
+    [
+     "Penghentian",
+     "Akun yang melanggar Kebijakan Penggunaan dapat dibatasi atau ditangguhkan."
+    ]
+   ]
+  ]
+ },
+ "commentTemplates": [
+  "Episode ini bikin deg-degan, {title} makin seru",
+  "Animasinya halus banget di adegan tengah",
+  "Lagu penutupnya cocok banget buat suasana",
+  "Ada yang sadar detail di latar belakang pas adegan pembuka?",
+  "Pacing-nya pas, nggak terasa 24 menit",
+  "Teori: tokoh utama sebenarnya sudah tahu dari awal",
+  "Pengisi suara karakter sampingnya juara",
+  "Nunggu episode minggu depan nggak sabar"
+ ],
+ "messages": {
+  "badge.earlyAccess": "Akses awal",
+  "common.unavailable": "Belum tersedia",
+  "auth.consentMiddle": "serta",
+  "auth.consentPrefix": "Dengan lanjut, kamu setuju dengan",
+  "auth.consentSuffix": ".",
+  "auth.continueWithGoogle": "Lanjutkan dengan Google",
+  "auth.signOutBody": "Progres dan Daftar Saya tetap tersimpan di perangkat ini.",
+  "auth.signOutTitle": "Keluar dari Milkglass?",
+  "auth.tagline": "Nonton anime, diskusi bareng teman.",
+  "auth.termsOfService": "Ketentuan Layanan",
+  "auth.usagePolicy": "Kebijakan Penggunaan",
+  "collection.clearHistoryBody": "Semua riwayat, progres, dan rekomendasi dari tontonanmu akan dihapus.",
+  "collection.clearHistoryTitle": "Hapus riwayat?",
+  "collection.completed": "Selesai",
+  "collection.completedCount": "{length} judul selesai",
+  "collection.episodeOfTotal": "Ep {value} dari {totalEpisodes}",
+  "collection.episodesRating": "{totalEpisodes} episode · ★ {formatRating}",
+  "collection.historyEmpty": "Riwayat kosong",
+  "collection.historyHint": "{length} tontonan",
+  "collection.longer": "Lebih lama",
+  "collection.noneCompleted": "Belum ada yang selesai",
+  "collection.notWatched": "Belum ditonton · {totalEpisodes} episode",
+  "collection.titleCount": "{length} judul",
+  "collection.watchlistEmpty": "Daftar Saya kosong",
+  "collectionTab.completed": "Selesai",
+  "collectionTab.history": "Riwayat",
+  "collectionTab.watchlist": "Daftar Saya",
+  "common.and": "dan",
+  "common.back": "Kembali",
+  "common.cancel": "Batal",
+  "common.undo": "Urungkan",
+  "collection.itemsDeleted": "{count} item dihapus",
+  "collection.historyCleared": "Riwayat dihapus",
+  "collection.noneWatching": "Belum ada yang sedang ditonton",
+  "collectionTab.watching": "Lanjut",
+  "detail.watchlistRemoved": "Dihapus dari Daftar Saya",
+  "home.becauseYouStopped": "Karena kamu berhenti di Ep {episode}",
+  "home.similarTo": "Mirip {title}",
+  "home.agoSuffix": " · {ago}",
+  "search.vibeLabel": "Suasana",
+  "vibe.relax": "Santai",
+  "vibe.tense": "Tegang",
+  "vibe.hype": "Semangat",
+  "vibe.touching": "Haru",
+  "player.nextUpLine": "Selanjutnya · Episode {n}",
+  "common.delete": "Hapus",
+  "common.exit": "Keluar",
+  "common.localTime": "waktu setempat",
+  "common.profile": "Profil",
+  "common.retry": "Coba lagi",
+  "common.save": "Simpan",
+  "common.today": "Hari ini",
+  "common.understood": "Mengerti",
+  "common.you": "Kamu",
+  "detail.collapse": "Ringkas",
+  "detail.episodeAirsOn": "Ep {ep} tayang {WEEKDAYS_LONG} pukul {formatClock}",
+  "detail.episodeAirsOnShort": "Ep {e} tayang {WEEKDAYS_LONG} pukul {formatClock}",
+  "detail.episodeNotAired": "Episode belum tayang",
+  "detail.finished": "Tamat · {totalEpisodes} episode",
+  "detail.newestFirst": "Terbaru dulu",
+  "detail.oldestFirst": "Terlama dulu",
+  "detail.readMore": "Selengkapnya",
+  "detail.rewatchEp1": "Tonton ulang Ep 1",
+  "detail.startEp1": "Mulai nonton Ep 1",
+  "detail.waitingNewEpisode": "Menunggu episode baru",
+  "detail.watchlistAdded": "Ditambahkan. Kamu diberi tahu saat episode baru tayang",
+  "detail.watchlistAddedPlain": "Ditambahkan ke Daftar Saya",
+  "detailTab.comments": "Komentar",
+  "detailTab.episodes": "Episode",
+  "detailTab.similar": "Mirip",
+  "episode.airsAt": "Tayang {WEEKDAYS_LONG} {formatClock}",
+  "episode.minutes": "{episodeMinutes} menit",
+  "episode.notAired": "Belum tayang",
+  "episode.premiumEarly": "Akses awal Premium",
+  "episode.remaining": "Sisa {max} menit",
+  "episode.watched": "Sudah ditonton",
+  "format.thousandSuffix": "{replace} rb",
+  "genre.action": "Aksi",
+  "genre.adventure": "Petualangan",
+  "genre.all": "Semua",
+  "genre.comedy": "Komedi",
+  "genre.drama": "Drama",
+  "genre.fantasy": "Fantasi",
+  "genre.mecha": "Mecha",
+  "genre.music": "Musik",
+  "genre.mystery": "Misteri",
+  "genre.slice-of-life": "Slice of Life",
+  "genre.sports": "Olahraga",
+  "genre.supernatural": "Supernatural",
+  "genre.romance": "Romantis",
+  "genre.sci-fi": "Fiksi Ilmiah",
+  "genre.horror": "Horor",
+  "genre.psychological": "Psikologis",
+  "genre.thriller": "Thriller",
+  "genre.mahou-shoujo": "Mahou Shoujo",
+  "home.airingToday": "Tayang hari ini",
+  "home.airsIn": "{formatCountdown} lagi",
+  "home.allSchedule": "Semua jadwal",
+  "home.completed": "Sudah selesai",
+  "home.continueEpisode": "Lanjut Ep {episode}",
+  "home.continueEpisodeRemaining": "Lanjut Ep {episode} · sisa {left} menit",
+  "home.continueWatching": "Lanjutkan menonton",
+  "home.continueWatchingShort": "Lanjut menonton",
+  "home.detail": "Detail",
+  "home.forYou": "Untuk kamu",
+  "home.mostPopular": "Terpopuler",
+  "home.ratingCount": "#{value} · {formatCompactCount} peminat",
+  "home.remainingMinutesSuffix": " · sisa {max} menit",
+  "home.startEpisode": "Mulai Ep {episode}",
+  "home.viewSchedule": "Lihat jadwal",
+  "home.waitingEpisode": "Ep {value} tayang {WEEKDAYS_LONG}",
+  "home.watchEpisode1": "Tonton Ep 1",
+  "home.youMightLike": "Mungkin kamu suka",
+  "legal.privacyLink": "Kebijakan Privasi",
+  "mainTab.collection": "Koleksi",
+  "mainTab.social": "Sosial",
+  "mainTab.home": "Beranda",
+  "mainTab.profile": "Profil",
+  "mainTab.schedule": "Jadwal",
+  "player.adaptsToNetwork": "Menyesuaikan jaringan",
+  "player.automatic": "Otomatis",
+  "player.connectionLost": "Koneksi terputus",
+  "player.endingSkipped": "Closing dilewati",
+  "player.episodeFinished": "Episode selesai",
+  "player.episodeTitleLine": "Episode {n}",
+  "player.finishedThanks": "Tamat. Terima kasih sudah menonton",
+  "player.loading": "Memuat…",
+  "player.next": "Berikutnya",
+  "player.noConnection": "Tidak ada koneksi internet",
+  "player.offline": "Offline",
+  "player.openingSkipped": "Opening dilewati",
+  "player.playNow": "Putar sekarang",
+  "player.playingInSeconds": "Diputar dalam {ceil} detik",
+  "player.reconnected": "Tersambung kembali",
+  "player.replay": "Ulangi",
+  "player.seekUnit": "detik",
+  "player.skipEnding": "Lewati closing",
+  "player.skipOpening": "Lewati opening",
+  "player.stillOffline": "Masih offline. Cek koneksi internetmu",
+  "player.videoQuality": "Kualitas video",
+  "profile.editName": "Ubah nama",
+  "profile.editUsername": "Ubah nama pengguna",
+  "profile.invalidChars": "Tanpa karakter < > \" &",
+  "profile.nameEmpty": "Nama tidak boleh kosong",
+  "profile.nameHelper": "Nama tampilan, maksimal 24 karakter",
+  "profile.nameTaken": "Nama sudah dipakai pengguna lain",
+  "profile.usernameError": "3–20 karakter: huruf kecil, angka, titik, garis bawah",
+  "profile.usernameHelper": "Huruf kecil, angka, titik, garis bawah (3–20)",
+  "schedule.noReleasesDay": "Tidak ada rilis.",
+  "schedule.now": "Sekarang",
+  "schedule.title": "Jadwal Rilis",
+  "schedule.watch": "Tonton",
+  "search.noResults": "Belum ketemu \"{escapeHtml}\". Coba kata lain.",
+  "search.placeholder": "Mau nonton apa?",
+  "search.recent": "Pencarian terakhir",
+  "search.reset": "Hapus pencarian",
+  "search.suggestions.genre": "Mecha",
+  "search.title": "Cari",
+  "search.trySearch": "Coba cari",
+  "selection.completedBody": "Progres tontonan judul ini ikut dihapus.",
+  "selection.count": "{length} dipilih",
+  "selection.deleteFromCompleted": "Hapus {n} judul dari Selesai?",
+  "selection.deleteFromHistory": "Hapus {n} dari riwayat?",
+  "selection.deleteFromWatchlist": "Hapus {n} judul dari Daftar Saya?",
+  "selection.historyBody": "Progres episode yang dipilih ikut dihapus.",
+  "selection.holdToSelect": "{t} · tahan untuk memilih",
+  "selection.watchlistBody": "Kamu tidak lagi diberi tahu saat episode baru tayang.",
+  "settings.account": "Akun",
+  "settings.deleteAccount": "Hapus akun",
+  "settings.deleteAccountBody": "Semua riwayat, daftar, dan pesanmu dihapus permanen setelah 30 hari. Ketik HAPUS untuk melanjutkan.{textField}",
+  "settings.deleteAccountTitle": "Hapus akun?",
+  "settings.deletionCancelled": "Penghapusan akun dibatalkan",
+  "settings.deletionScheduled": "Penghapusan dijadwalkan. Masuk lagi dalam 30 hari untuk membatalkan.",
+  "settings.footer": "Milkglass · data judul dari AniList",
+  "settings.name": "Nama",
+  "settings.session": "Sesi",
+  "settings.theme": "Tema",
+  "settings.typeDelete": "Ketik HAPUS",
+  "settings.typeDeleteCaps": "Ketik HAPUS dengan huruf kapital",
+  "theme.dark": "Gelap",
+  "theme.light": "Terang",
+  "theme.system": "Sistem",
+  "time.alreadyAired": "Sudah tayang",
+  "time.daysAgo": "{d} hari lalu",
+  "time.daysHours": "{d} hari {value} jam",
+  "time.hoursAgo": "{h} jam lalu",
+  "time.hoursMinutes": "{h} jam {value} menit",
+  "time.justNow": "Baru saja",
+  "time.minutes": "{m} menit",
+  "time.minutesAgo": "{m} menit lalu",
+  "time.yesterday": "Kemarin",
+  "user.username": "Nama pengguna",
+  "schedule.inShort": "{value} lagi",
+  "common.episodeAbbr": "Ep",
+  "common.finalSuffix": " · Terakhir",
+  "home.episodePrefix": "Ep {ep}",
+  "player.minutesSuffix": "· {episodeMinutes} menit",
+  "detail.airing": "Tayang setiap {day}",
+  "detail.episodesAvailable": "{released} dari {totalEpisodes} episode",
+  "detail.episodesAll": "{totalEpisodes} episode",
+  "detail.metaLine": "{studio} · {year} · {count} penilai",
+  "search.results": "{count} hasil",
+  "search.airingSuffix": " · Sedang tayang",
+  "settings.deleteConfirmWord": "HAPUS",
+  "player.automaticQuality": "Otomatis · 1080p",
+  "home.catalogLoading": "Memuat judul…",
+  "home.catalogFailed": "Judul belum bisa dimuat. Periksa koneksimu.",
+  "episode.label": "Episode {n}",
+  "detail.fans": "{count} peminat"
+ }
+}

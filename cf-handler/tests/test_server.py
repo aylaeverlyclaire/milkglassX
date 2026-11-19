@@ -1,0 +1,104 @@
+import pytest
+import asyncio
+import httpx
+
+pytestmark = pytest.mark.live
+
+def test_cookies_endpoint_single(client, test_url, expected_text, cf_cookie_prefixes):
+    \
+    response = client.get("/cookies", params={"url": test_url, "retries": 5})
+
+    assert response.status_code == 200, f"Request failed with status {response.status_code}"
+    data = response.json()
+
+    assert "cookies" in data, "Response missing 'cookies'"
+    assert "user_agent" in data, "Response missing 'user_agent'"
+
+    cookies = data["cookies"]
+    assert len(cookies) > 0, "No cookies returned"
+
+    cf_cookies = [name for name in cookies.keys() if name.startswith(cf_cookie_prefixes)]
+    assert len(cf_cookies) > 0, "No Cloudflare cookies found"
+
+def test_html_endpoint_single(client, test_url, expected_text, min_html_length):
+    \
+    response = client.get("/html", params={"url": test_url, "retries": 5})
+
+    assert response.status_code == 200, f"Request failed with status {response.status_code}"
+    html_content = response.text
+
+    assert html_content, "HTML content is empty"
+    assert len(html_content) > min_html_length, f"HTML content too short: {len(html_content)} chars"
+    assert expected_text in html_content, "Success text not found in HTML"
+
+    assert "x-cf-handler-cookies" in response.headers, "Missing x-cf-handler-cookies header"
+    assert "x-cf-handler-user-agent" in response.headers, "Missing x-cf-handler-user-agent header"
+    assert "x-processing-time-ms" in response.headers, "Missing x-processing-time-ms header"
+
+def test_cookies_endpoint_invalid_url(client):
+    \
+    response = client.get("/cookies", params={"url": "http://localhost:8080", "retries": 5})
+    assert response.status_code == 400, "Should reject localhost URLs"
+
+def test_html_endpoint_invalid_url(client):
+    \
+    response = client.get("/html", params={"url": "http://192.168.1.1", "retries": 5})
+    assert response.status_code == 400, "Should reject private IPs"
+
+@pytest.mark.asyncio
+async def test_cookies_endpoint_parallel_3(server_url, test_url):
+    \
+    async with httpx.AsyncClient() as client:
+        tasks = [
+            client.get(f"{server_url}/cookies", params={"url": test_url, "retries": 5}, timeout=60.0)
+            for _ in range(3)
+        ]
+
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, response in enumerate(responses, 1):
+            assert not isinstance(response, Exception), f"Request {i} failed: {response!r}"
+            assert response.status_code == 200, f"Request {i} failed with status {response.status_code}"
+            data = response.json()
+            assert "cookies" in data, f"Request {i} missing cookies"
+
+@pytest.mark.asyncio
+async def test_html_endpoint_parallel_3(server_url, test_url, expected_text):
+    \
+    async with httpx.AsyncClient() as client:
+        tasks = [
+            client.get(f"{server_url}/html", params={"url": test_url, "retries": 5}, timeout=60.0)
+            for _ in range(3)
+        ]
+
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, response in enumerate(responses, 1):
+            assert not isinstance(response, Exception), f"Request {i} failed: {response!r}"
+            assert response.status_code == 200, f"Request {i} failed with status {response.status_code}"
+            assert expected_text in response.text, f"Request {i} - success text not found"
+
+@pytest.mark.asyncio
+async def test_cache_stats_endpoint(server_url):
+    \
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{server_url}/cache/stats")
+
+        assert response.status_code == 200, f"Request failed with status {response.status_code}"
+
+        data = response.json()
+        assert "cached_entries" in data, "Missing cached_entries"
+        assert "total_hostnames" in data, "Missing total_hostnames"
+        assert "hostnames" in data, "Missing hostnames"
+
+@pytest.mark.asyncio
+async def test_cache_clear_endpoint(server_url):
+    \
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{server_url}/cache/clear")
+
+        assert response.status_code == 200, f"Request failed with status {response.status_code}"
+
+        data = response.json()
+        assert "status" in data, "Missing status"
+        assert data["status"] == "success", f"Status is not success: {data['status']}"
