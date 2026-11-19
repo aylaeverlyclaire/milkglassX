@@ -23,6 +23,137 @@ function checkUserPlayQuota(userId: string, maxPerMin: number): boolean {
   return b.count <= maxPerMin;
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// Hint bersama (D1): tautan hoster mentah yang terbukti bisa diekstrak oleh klien lain.
+// Hanya PETUNJUK: klien selalu mengekstrak + memverifikasi sendiri. Karena itu server membatasi ketat
+// apa yang boleh disimpan (host hoster dikenal, https, bukan IP/localhost) dan siapa yang boleh menulis.
+// ---------------------------------------------------------------------------------------------
+const HINT_MAX_AGE_SEC = 12 * 3600;
+const HINT_REFRESH_AFTER_SEC = 20 * 60;
+const HINT_MAX_CANDIDATES = 8;
+const HOSTER_TOKENS = [
+  'pixeldrain', 'pdrain', 'filedon', 'odfiles', 'buzzheavier', 'qiwi', 'mediafire', 'gofile',
+  'krakenfiles', 'kfiles', 'acefile', 'desustream', 'ondesu', 'wibufile', 'uqni', 'mp4upload',
+];
+
+function isPublicHttpsUrl(raw: string): URL | null {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'https:' || u.username || u.password) return null;
+    if (u.port && u.port !== '443') return null;
+    const h = u.hostname.toLowerCase();
+    if (!h.includes('.') || h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal')) return null;
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(':')) return null;
+    return u;
+  } catch {
+    return null;
+  }
+}
+
+function isKnownHosterUrl(raw: string): boolean {
+  const u = isPublicHttpsUrl(raw);
+  if (!u) return false;
+  const h = u.hostname.toLowerCase();
+  return HOSTER_TOKENS.some((t) => h.includes(t));
+}
+
+export function hintKey(title: string, ep: number): string {
+  const norm = title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+  return `${norm.slice(0, 120)}#${ep}`;
+}
+
+const hintBodySchema = z.object({
+  title: z.string().trim().min(2).max(160),
+  ep: z.number().int().min(1).max(2000),
+  candidates: z
+    .array(
+      z.object({
+        source: z.enum(['otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
+        quality: z.enum(['1080p', '720p', '480p', '360p']),
+        hoster: z.string().trim().min(1).max(40),
+        raw_url: z.string().max(2048),
+        referer: z.string().max(2048).optional(),
+      })
+    )
+    .min(1)
+    .max(HINT_MAX_CANDIDATES),
+});
+
+type StoredHint = { source: string; quality: string; hoster: string; raw_url: string; referer?: string };
+
+async function requireVerifiedUser(c: any): Promise<{ claims: VerifiedAccessClaims | null; deny: Response | null }> {
+  if (c.env.CF_REQUIRE_AUTH === 'false' || !c.env.JWT_SECRET || c.env.JWT_SECRET.trim().length < 32) {
+    return { claims: null, deny: null };
+  }
+  const auth = c.req.header('Authorization') || '';
+  const deny = (status: 401 | 429, message: string) => {
+    c.header('X-Milkglass-NoCache', '1');
+    return c.json({ status: 'error', message }, status) as Response;
+  };
+  if (!auth.startsWith('Bearer ')) return { claims: null, deny: deny(401, 'Autentikasi diperlukan.') };
+  const claims = await verifyAccessTokenClaims(auth.slice(7).trim(), c.env.JWT_SECRET);
+  if (!claims) return { claims: null, deny: deny(401, 'Token sesi tidak valid.') };
+  const proofOk = await verifyRequestProof(
+    c.req.method,
+    c.req.url,
+    c.req.header('X-Milkglass-Ts'),
+    c.req.header('X-Milkglass-Sig'),
+    claims,
+    c.env.JWT_SECRET
+  );
+  if (!proofOk) return { claims: null, deny: deny(401, 'Tanda tangan permintaan tidak valid.') };
+  if (!checkUserPlayQuota(claims.userId, 24)) {
+    c.header('Retry-After', '60');
+    return { claims: null, deny: deny(429, 'Batas permintaan pemutaran tercapai.') };
+  }
+  return { claims, deny: null };
+}
+
+playRoutes.post('/hint', rateLimit(20, 60), zValidator('json', hintBodySchema), async (c) => {
+  const { deny } = await requireVerifiedUser(c);
+  if (deny) return deny;
+  const { title, ep, candidates } = c.req.valid('json');
+  const clean: StoredHint[] = [];
+  const seen = new Set<string>();
+  for (const cand of candidates) {
+    if (!isKnownHosterUrl(cand.raw_url) || seen.has(cand.raw_url)) continue;
+    const ref = cand.referer && isPublicHttpsUrl(cand.referer) ? cand.referer : '';
+    seen.add(cand.raw_url);
+    clean.push({ source: cand.source, quality: cand.quality, hoster: cand.hoster, raw_url: cand.raw_url, referer: ref });
+  }
+  if (clean.length === 0) return c.json({ status: 'ok', stored: false });
+
+  const key = hintKey(title, ep);
+  const now = Math.floor(Date.now() / 1000);
+  const existing = await c.env.DB.prepare('SELECT updated_at FROM play_hints WHERE key = ?1').bind(key).first<{ updated_at: number }>();
+  if (existing && now - existing.updated_at < HINT_REFRESH_AFTER_SEC) {
+    // Sudah segar: lewati tulis (hemat kuota tulis D1).
+    return c.json({ status: 'ok', stored: false, fresh: true });
+  }
+  await c.env.DB.prepare(
+    `INSERT INTO play_hints (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
+     ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1`
+  ).bind(key, JSON.stringify(clean), now).run();
+  return c.json({ status: 'ok', stored: true });
+});
+
+async function lookupHint(db: D1Database, title: string, ep: number): Promise<StoredHint[] | null> {
+  try {
+    const row = await db
+      .prepare('SELECT payload, updated_at FROM play_hints WHERE key = ?1')
+      .bind(hintKey(title, ep))
+      .first<{ payload: string; updated_at: number }>();
+    if (!row) return null;
+    if (Math.floor(Date.now() / 1000) - row.updated_at > HINT_MAX_AGE_SEC) return null;
+    const arr = JSON.parse(row.payload) as StoredHint[];
+    const ok = (Array.isArray(arr) ? arr : []).filter((h) => h && isKnownHosterUrl(h.raw_url));
+    return ok.length ? ok : null;
+  } catch {
+    return null;
+  }
+}
+
 const resolveQuerySchema = z.object({
   title: z.string().trim().min(2).max(160),
   ep: z.coerce.number().int().min(1).max(2000),
@@ -81,16 +212,25 @@ playRoutes.get(
   edgeCache(900, 120, true),
   zValidator('query', resolveQuerySchema),
   async (c) => {
-    const handlerBase = (c.env.CF_HANDLER_URL || '').trim().replace(/\/+$/, '');
-    if (!handlerBase.startsWith('http://') && !handlerBase.startsWith('https://')) {
-      c.header('X-Milkglass-NoCache', '1');
-      return c.json(
-        { status: 'error', available: false, message: 'Server resolver belum dikonfigurasi.' },
-        503
-      );
+    const { title, ep, q } = c.req.valid('query');
+
+    // 1) Jalur cepat: hint bersama dari D1 (tanpa scrape, tanpa Cloudflare-challenge).
+    const hinted = await lookupHint(c.env.DB, title, ep);
+    if (hinted) {
+      return c.json({
+        status: 'ok',
+        data: { direct_candidates: [], client_extract_candidates: hinted, source: 'hint' },
+      });
     }
 
-    const { title, ep, q } = c.req.valid('query');
+    const handlerBase = (c.env.CF_HANDLER_URL || '').trim().replace(/\/+$/, '');
+    if (!handlerBase.startsWith('http://') && !handlerBase.startsWith('https://')) {
+      // Miss biasa (resolver server memang tidak dipasang): 200 kosong, bukan 503, supaya klien tidak
+      // menganggap server mati dan tetap bertanya lagi untuk episode lain. Tidak di-cache.
+      c.header('X-Milkglass-NoCache', '1');
+      return c.json({ status: 'ok', data: { direct_candidates: [], client_extract_candidates: [] } });
+    }
+
     const sourceMap = await getSourceBaseUrls(c.env.DB);
     const params = new URLSearchParams({
       title,

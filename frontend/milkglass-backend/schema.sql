@@ -127,6 +127,13 @@ CREATE TABLE IF NOT EXISTS catalog_episodes (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS play_hints (
+  key TEXT PRIMARY KEY,
+  payload TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  report_count INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE INDEX IF NOT EXISTS idx_animes_status_pop ON animes(status, popularity DESC);
 CREATE INDEX IF NOT EXISTS idx_animes_sched_pop ON animes(schedule_day, popularity DESC);
 CREATE INDEX IF NOT EXISTS idx_animes_updated ON animes(updated_at DESC);
@@ -139,3 +146,4 @@ CREATE INDEX IF NOT EXISTS idx_sessions_prev_hash ON user_sessions(previous_toke
 CREATE INDEX IF NOT EXISTS idx_catalog_title ON catalog_episodes(title);
 CREATE INDEX IF NOT EXISTS idx_catalog_anilist ON catalog_episodes(anilist_id, episode);
 CREATE INDEX IF NOT EXISTS idx_catalog_rec ON catalog_episodes(is_recommended, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_play_hints_updated ON play_hints(updated_at);

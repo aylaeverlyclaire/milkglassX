@@ -11,6 +11,8 @@ import id.my.milkglass.net.RemoteClearance
 import id.my.milkglass.resolver.StreamResolver
 import id.my.milkglass.source.DeadCandidateCache
 import id.my.milkglass.source.MkvCascadeResolver
+import id.my.milkglass.source.RawCandidateStore
+import id.my.milkglass.source.RawMkvCandidate
 import id.my.milkglass.source.SourceCircuitBreaker
 import id.my.milkglass.source.SourceAvailabilityIndex
 import id.my.milkglass.source.SourcePriority
@@ -209,13 +211,20 @@ class EngineRuntime private constructor(appContext: Context) {
         baseUrlProvider = { sourceConfig.baseUrlFor(it) }
     )
 
+    val rawCandidateStore: RawCandidateStore = RawCandidateStore(appContext)
+
+    /** Diisi setelah streamResolver dibuat (cascade dibuat lebih dulu). */
+    @Volatile private var hintSink: ((String, List<RawMkvCandidate>) -> Unit)? = null
+
     val cascadeResolver: MkvCascadeResolver = MkvCascadeResolver(
         clients = clients,
         slugCache = slugCache,
         baseUrlProvider = { sourceConfig.baseUrlFor(it) },
         indexLookup = { source, title -> availabilityIndex.lookupBestUrl(source, title) },
         remoteHtmlFetcher = { url -> fetchRemoteHtml(url) },
-        onAllSourcesFailed = { triggerSourceConfigRecovery() }
+        onAllSourcesFailed = { triggerSourceConfigRecovery() },
+        rawStore = rawCandidateStore,
+        onEpisodeResolved = { key, list -> hintSink?.invoke(key, list) }
     )
 
     val streamResolver: StreamResolver = StreamResolver(
@@ -226,7 +235,7 @@ class EngineRuntime private constructor(appContext: Context) {
         hasAuthSession = { sessionStore.hasActiveSession() },
         serverSignatureVerifier = { body, sig -> sessionStore.verifyServerSignature(body, sig) },
         cascadeResolver = cascadeResolver
-    )
+    ).also { resolver -> hintSink = resolver::reportHint }
 
     val httpTextClient: EngineHttpTextClient = object : EngineHttpTextClient {
         private val jsonMediaType = "application/json; charset=utf-8".toMediaType()

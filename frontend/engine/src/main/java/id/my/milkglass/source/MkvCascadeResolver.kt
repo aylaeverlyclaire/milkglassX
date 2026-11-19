@@ -19,6 +19,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 enum class SourcePriority(val rank: Int, val id: String, val defaultBaseUrl: String) {
@@ -1034,6 +1035,8 @@ class MkvCascadeResolver(
     private val indexLookup: ((SourcePriority, String) -> String?)? = null,
     private val remoteHtmlFetcher: ((String) -> String?)? = null,
     private val onAllSourcesFailed: (() -> Unit)? = null,
+    private val rawStore: RawCandidateStore? = null,
+    private val onEpisodeResolved: ((String, List<RawMkvCandidate>) -> Unit)? = null,
     private val providers: List<MkvSourceProvider> = listOf(
         OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         SamehadakuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.SAMEHADAKU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
@@ -1058,6 +1061,36 @@ class MkvCascadeResolver(
 
     private val rawCache = ConcurrentHashMap<String, CachedEpisodeCandidates>()
 
+    /** poll() yang tidak menelan interupsi: flag dipulihkan supaya pemanggil bisa berhenti. */
+    private fun <T> pollKeepingInterrupt(queue: java.util.concurrent.BlockingQueue<T>, timeoutNs: Long): T? =
+        try {
+            queue.poll(timeoutNs, TimeUnit.NANOSECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            null
+        }
+
+    private fun isCancellation(e: Throwable, abandoned: AtomicBoolean?): Boolean {
+        if (abandoned?.get() == true || Thread.currentThread().isInterrupted) return true
+        var c: Throwable? = e
+        var depth = 0
+        while (c != null && depth++ < 5) {
+            if (c is InterruptedException) return true
+            if (c is java.io.IOException && c.message.equals("Canceled", ignoreCase = true)) return true
+            c = c.cause
+        }
+        return false
+    }
+
+    private fun cancelledFailure(
+        attempted: List<SourcePriority>,
+        errors: Map<SourcePriority, String>,
+        cfHosts: Set<String>
+    ): CascadeResult.Failure = CascadeResult.Failure(
+        reason = "Dibatalkan",
+        diagnostics = CascadeDiagnostics(attempted, errors, cfHosts)
+    )
+
     private fun adaptiveProviderOrder(): List<MkvSourceProvider> {
         return providers.sortedWith(
             compareByDescending<MkvSourceProvider> { EndpointHealthScorer.sourceScore(it.priority.id) }
@@ -1070,7 +1103,7 @@ class MkvCascadeResolver(
         val nowMs = System.currentTimeMillis()
         val alreadyWarm = rawCache[cacheKey]?.let {
             nowMs - it.cachedAtMs <= RAW_CACHE_TTL_MS && it.candidates.isNotEmpty()
-        } == true
+        } == true || rawStore?.has(cacheKey, DISK_RAW_TTL_MS) == true
         if (alreadyWarm) return true
 
         val orderedProviders = adaptiveProviderOrder().take(2)
@@ -1084,6 +1117,22 @@ class MkvCascadeResolver(
             }
         }
         return false
+    }
+
+    /**
+     * Ekstrak kandidat mentah dari luar (hint bersama di Cloudflare) secara PARALEL dengan aturan ranking,
+     * dead-cache, deadline, dan pembatalan yang sama seperti jalur cascade biasa.
+     */
+    fun resolveFromRaw(
+        raw: List<RawMkvCandidate>,
+        preferredQuality: MkvQuality,
+        preferCompatibleContainer: Boolean
+    ): List<ResolvedMkvMedia> {
+        if (raw.isEmpty()) return emptyList()
+        val qualityOrder = listOf(preferredQuality) + MkvQuality.ALL_DESC.filterNot { it == preferredQuality }
+        val usable = rankCandidates(raw, qualityOrder, false, preferCompatibleContainer)
+        if (usable.isEmpty()) return emptyList()
+        return raceExtractCandidates(usable, maxResults = 3)
     }
 
     fun resolve(
@@ -1106,6 +1155,7 @@ class MkvCascadeResolver(
         val cachedRaw = rawCache[cacheKey]
             ?.takeIf { nowMs - it.cachedAtMs <= RAW_CACHE_TTL_MS }
             ?.candidates
+            ?: rawStore?.get(cacheKey, DISK_RAW_TTL_MS)?.also { rawCache[cacheKey] = CachedEpisodeCandidates(nowMs, it) }
 
         if (!cachedRaw.isNullOrEmpty()) {
             val usableCached = rankCandidates(cachedRaw, qualityOrder, allowBatchFallback, preferCompatibleContainer)
@@ -1129,14 +1179,16 @@ class MkvCascadeResolver(
         }
 
         var idx = 0
+        if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
         if (activeProviders.size >= 2) {
             val primary = activeProviders[0]
             val secondary = activeProviders[1]
             val hedgeQueue = LinkedBlockingQueue<ProviderFetchOutcome>(2)
+            val abandoned = AtomicBoolean(false)
             attempted.add(primary.priority)
             val primaryFuture = sharedProviderPool.submit {
                 val outcome = runCatching {
-                    fetchFromProvider(primary, animeTitle, episodeNumber)
+                    fetchFromProvider(primary, animeTitle, episodeNumber, abandoned)
                 }.getOrElse { e ->
                     ProviderFetchOutcome(primary.priority, error = e.message ?: e::class.java.simpleName)
                 }
@@ -1144,9 +1196,8 @@ class MkvCascadeResolver(
             }
             var secondaryFuture: Future<*>? = null
             try {
-                val fastPrimary = runCatching {
-                    hedgeQueue.poll(HEDGE_DELAY_MS, TimeUnit.MILLISECONDS)
-                }.getOrNull()
+                val fastPrimary = pollKeepingInterrupt(hedgeQueue, TimeUnit.MILLISECONDS.toNanos(HEDGE_DELAY_MS))
+                if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
 
                 if (fastPrimary != null) {
                     val resolved = handleProviderOutcome(
@@ -1158,7 +1209,7 @@ class MkvCascadeResolver(
                     attempted.add(secondary.priority)
                     secondaryFuture = sharedProviderPool.submit {
                         val outcome = runCatching {
-                            fetchFromProvider(secondary, animeTitle, episodeNumber)
+                            fetchFromProvider(secondary, animeTitle, episodeNumber, abandoned)
                         }.getOrElse { e ->
                             ProviderFetchOutcome(secondary.priority, error = e.message ?: e::class.java.simpleName)
                         }
@@ -1168,9 +1219,7 @@ class MkvCascadeResolver(
                     repeat(2) {
                         val remainingNs = deadlineNs - System.nanoTime()
                         if (remainingNs <= 0L) return@repeat
-                        val done = runCatching {
-                            hedgeQueue.poll(remainingNs, TimeUnit.NANOSECONDS)
-                        }.getOrNull() ?: return@repeat
+                        val done = pollKeepingInterrupt(hedgeQueue, remainingNs) ?: return@repeat
                         val resolved = handleProviderOutcome(
                             done, cacheKey, qualityOrder, allowBatchFallback, preferCompatibleContainer, attempted, errors, cfHosts
                         )
@@ -1179,13 +1228,16 @@ class MkvCascadeResolver(
                     idx = 2
                 }
             } finally {
+                // Tandai dulu: penyedia yang kalah/dibatalkan BUKAN kegagalan sumber (jangan buka circuit breaker).
+                abandoned.set(true)
                 if (!primaryFuture.isDone) primaryFuture.cancel(true)
                 secondaryFuture?.let { if (!it.isDone) it.cancel(true) }
             }
+            if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
         }
 
         while (idx < activeProviders.size) {
-            if (Thread.currentThread().isInterrupted) break
+            if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
             val provider = activeProviders[idx++]
             attempted.add(provider.priority)
             val outcome = fetchFromProvider(provider, animeTitle, episodeNumber)
@@ -1195,6 +1247,7 @@ class MkvCascadeResolver(
             if (resolved != null) return resolved
         }
 
+        if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
         onAllSourcesFailed?.invoke()
         val diagnostics = CascadeDiagnostics(attempted, errors, cfHosts)
         return CascadeResult.Failure(
@@ -1206,7 +1259,8 @@ class MkvCascadeResolver(
     private fun fetchFromProvider(
         provider: MkvSourceProvider,
         animeTitle: String,
-        episodeNumber: Int
+        episodeNumber: Int,
+        abandoned: AtomicBoolean? = null
     ): ProviderFetchOutcome {
         val t0 = System.currentTimeMillis()
         return try {
@@ -1219,6 +1273,11 @@ class MkvCascadeResolver(
             EndpointHealthScorer.recordSourceFailure(provider.priority.id)
             ProviderFetchOutcome(provider.priority, cfHost = cf.host, error = "403 CF")
         } catch (e: Exception) {
+            if (isCancellation(e, abandoned)) {
+                // Dibatalkan pengguna/hedging: bukan salah sumber. Jangan hukum circuit breaker maupun skor kesehatan.
+                Thread.currentThread().interrupt()
+                return ProviderFetchOutcome(provider.priority, error = "dibatalkan")
+            }
             SourceCircuitBreaker.recordFailure(provider.priority)
             EndpointHealthScorer.recordSourceFailure(provider.priority.id)
             ProviderFetchOutcome(provider.priority, error = e.message ?: e::class.java.simpleName)
@@ -1255,6 +1314,8 @@ class MkvCascadeResolver(
         }
         val resolvedList = raceExtractCandidates(usable, maxResults = 3)
         if (resolvedList.isNotEmpty()) {
+            // Beri tahu lapisan Cloudflare (hint bersama). Tidak boleh memblok/menggagalkan pemutaran.
+            runCatching { onEpisodeResolved?.invoke(cacheKey, usable.take(6)) }
             return CascadeResult.Success(
                 selected = resolvedList.first(),
                 alternatives = resolvedList.drop(1),
@@ -1268,6 +1329,7 @@ class MkvCascadeResolver(
     private fun putRawCache(cacheKey: String, candidates: List<RawMkvCandidate>, nowMs: Long) {
         if (rawCache.size > 64) rawCache.clear()
         rawCache[cacheKey] = CachedEpisodeCandidates(nowMs, candidates)
+        rawStore?.put(cacheKey, candidates)
     }
 
     private fun rankCandidates(
@@ -1308,6 +1370,7 @@ class MkvCascadeResolver(
         val cs = ExecutorCompletionService<ResolvedMkvMedia?>(sharedExtractionPool)
         val futures = ArrayList<Future<ResolvedMkvMedia?>>(batch.size)
         val results = mutableListOf<ResolvedMkvMedia>()
+        val abandoned = AtomicBoolean(false)
         try {
             for (candidate in batch) {
                 futures.add(
@@ -1316,11 +1379,14 @@ class MkvCascadeResolver(
                             val finalUrl = unshortener.unshorten(candidate.rawUrl, candidate.pageReferer, maxHops = 5)
                             val media = extractorRegistry.extract(finalUrl, candidate.pageReferer)
                             if (media == null) {
+                                // Kandidat yang sekadar kalah balapan/dibatalkan BUKAN kandidat mati.
+                                if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
                                 DeadCandidateCache.markDead(candidate.rawUrl)
                                 EndpointHealthScorer.recordFailure(candidate.hosterLabel)
                                 return@runCatching null
                             }
                             if (!media.isArchive && !extractorRegistry.verifyPlayableMedia(media)) {
+                                if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
                                 DeadCandidateCache.markDead(candidate.rawUrl)
                                 EndpointHealthScorer.recordFailure(media.hoster)
                                 return@runCatching null
@@ -1354,7 +1420,12 @@ class MkvCascadeResolver(
                 if (Thread.currentThread().isInterrupted) return@repeat
                 val remainingNs = deadlineNs - System.nanoTime()
                 if (remainingNs <= 0L) return@repeat
-                val fut = runCatching { cs.poll(remainingNs, TimeUnit.NANOSECONDS) }.getOrNull() ?: return@repeat
+                val fut = try {
+                    cs.poll(remainingNs, TimeUnit.NANOSECONDS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    null
+                } ?: return@repeat
                 val item = runCatching { fut.get() }.getOrNull()
                 if (item != null) {
                     results.add(item)
@@ -1366,6 +1437,7 @@ class MkvCascadeResolver(
                 }
             }
         } finally {
+            abandoned.set(true)
             futures.forEach { if (!it.isDone) it.cancel(true) }
         }
         return results
@@ -1373,6 +1445,7 @@ class MkvCascadeResolver(
 
     companion object {
         private const val RAW_CACHE_TTL_MS = 20L * 60L * 1000L
+        private const val DISK_RAW_TTL_MS = 6L * 60L * 60L * 1000L
         private const val HEDGE_DELAY_MS = 1_200L
 
         private val extractSeq = AtomicInteger(1)

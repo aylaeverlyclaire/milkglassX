@@ -5,7 +5,6 @@ import id.my.milkglass.MilkglassEndpoints
 import id.my.milkglass.download.EndpointHealthScorer
 import id.my.milkglass.download.MkvDownloadManager
 import id.my.milkglass.net.IsolatedHttpClients
-import id.my.milkglass.extractor.MkvHosterExtractorRegistry
 import id.my.milkglass.net.PublicIpGuard
 import id.my.milkglass.source.CascadeResult
 import id.my.milkglass.source.KusonimeSourceProvider
@@ -14,6 +13,7 @@ import id.my.milkglass.source.MkvCascadeResolver
 import id.my.milkglass.source.MkvQuality
 import id.my.milkglass.source.OploverzSourceProvider
 import id.my.milkglass.source.OtakudesuSourceProvider
+import id.my.milkglass.source.RawMkvCandidate
 import id.my.milkglass.source.ResolvedMkvMedia
 import id.my.milkglass.source.SamehadakuSourceProvider
 import id.my.milkglass.source.SourcePriority
@@ -22,7 +22,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import java.io.BufferedInputStream
@@ -33,10 +33,14 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLEncoder
+import org.json.JSONArray
 import org.json.JSONObject
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -100,10 +104,70 @@ class StreamResolver(
 
     private val resolvedCache = ConcurrentHashMap<String, CachedResolvedCandidates>()
     private val inFlightResolutions = ConcurrentHashMap<String, CompletableFuture<CachedResolvedCandidates?>>()
-    private val ipLockedExtractor = MkvHosterExtractorRegistry(clients)
 
     @Volatile
     private var serverResolverDisabledUntilMs: Long = 0L
+
+    private val serverHintClient by lazy {
+        clients.mediaAndApiClient.newBuilder()
+            .callTimeout(SERVER_HINT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .build()
+    }
+    private val hintExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "milkglass-hint").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
+    }
+    private val hintReportedAt = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Laporkan tautan hoster mentah yang terbukti bisa diekstrak ke Cloudflare (tabel hint bersama), supaya
+     * pengguna berikutnya melewati pencarian judul + scrape halaman. Fire-and-forget, throttle 30 menit per kunci.
+     * Server hanya menyimpan petunjuk; klien SELALU mengekstrak + memverifikasi sendiri sebelum memutar.
+     */
+    fun reportHint(cacheKey: String, candidates: List<RawMkvCandidate>) {
+        if (candidates.isEmpty() || !hasAuthSession()) return
+        val now = System.currentTimeMillis()
+        if (now < serverResolverDisabledUntilMs) return
+        val title = cacheKey.substringBeforeLast('#', "").trim()
+        val ep = cacheKey.substringAfterLast('#', "").toIntOrNull() ?: return
+        if (title.length < 2 || ep <= 0) return
+        val last = hintReportedAt[cacheKey]
+        if (last != null && now - last < 30L * 60L * 1000L) return
+        if (hintReportedAt.size > 64) hintReportedAt.clear()
+        hintReportedAt[cacheKey] = now
+        hintExecutor.execute {
+            runCatching {
+                val arr = JSONArray()
+                candidates.filter { !it.isBatchArchive }.take(6).forEach { c ->
+                    arr.put(
+                        JSONObject().put("source", c.source.id).put("quality", c.quality.label)
+                            .put("hoster", c.hosterLabel.take(40)).put("raw_url", c.rawUrl)
+                            .put("referer", c.pageReferer)
+                    )
+                }
+                if (arr.length() == 0) return@runCatching
+                val body = JSONObject().put("title", title).put("ep", ep).put("candidates", arr).toString()
+                val req = Request.Builder()
+                    .url("${backendBaseUrl.trimEnd('/')}/v1/play/hint")
+                    .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                serverHintClient.newCall(req).execute().use { resp ->
+                    if (resp.code == 404 || resp.code == 503) {
+                        serverResolverDisabledUntilMs = System.currentTimeMillis() + 6L * 60L * 60L * 1000L
+                    }
+                }
+            }
+        }
+    }
+
+    /** Menunggu future tanpa menelan interupsi (pembatalan harus merambat), timeout/kegagalan -> null. */
+    private fun <T> CompletableFuture<T>.awaitOrNull(ms: Long): T? =
+        try {
+            get(ms, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
 
     private fun resolveViaServerSplitPlane(
         searchTitle: String,
@@ -118,20 +182,36 @@ class StreamResolver(
             "?title=${URLEncoder.encode(searchTitle, "UTF-8")}" +
             "&ep=$episodeNum&q=${preferredQuality.label}"
         val req = Request.Builder().url(url).header("Accept", "application/json").build()
-        val body = runCatching {
-            clients.mediaAndApiClient.newCall(req).execute().use { resp ->
-                if (resp.code == 503 || resp.code == 404) {
-                    serverResolverDisabledUntilMs = System.currentTimeMillis() + 5L * 60L * 1000L
+        // Server hanyalah jalan pintas: dibatasi ketat supaya tidak pernah menahan alur lokal.
+        val body = try {
+            serverHintClient.newCall(req).execute().use { resp ->
+                val backoffMs = when {
+                    resp.code == 404 -> 6L * 60L * 60L * 1000L   // endpoint belum ada di backend: jangan tanya lagi berjam-jam
+                    resp.code == 503 -> 2L * 60L * 1000L
+                    resp.code == 401 || resp.code == 403 || resp.code == 429 -> 60_000L
+                    !resp.isSuccessful -> 30_000L
+                    else -> 0L
+                }
+                if (backoffMs > 0L) {
+                    serverResolverDisabledUntilMs = System.currentTimeMillis() + backoffMs
                     return@use null
                 }
-                if (!resp.isSuccessful) return@use null
                 val rawBody = resp.body?.string() ?: return@use null
                 if (!serverSignatureVerifier(rawBody, resp.header("X-Milkglass-Server-Sig"))) {
                     return@use null
                 }
                 rawBody
             }
-        }.getOrNull() ?: return emptyList()
+        } catch (e: InterruptedException) {
+            throw e
+        } catch (e: java.io.InterruptedIOException) {
+            if (Thread.currentThread().isInterrupted) throw InterruptedException()
+            serverResolverDisabledUntilMs = System.currentTimeMillis() + 20_000L  // timeout: istirahat singkat
+            null
+        } catch (_: Exception) {
+            serverResolverDisabledUntilMs = System.currentTimeMillis() + 20_000L
+            null
+        } ?: return emptyList()
 
         val data = runCatching { JSONObject(body).optJSONObject("data") }.getOrNull() ?: return emptyList()
         val resolved = mutableListOf<ResolvedMkvMedia>()
@@ -164,35 +244,28 @@ class StreamResolver(
         val needClientExtract = resolved.isEmpty() || preferCompatibleContainer
         val clientArr = if (needClientExtract) data.optJSONArray("client_extract_candidates") else null
         if (clientArr != null) {
-            for (i in 0 until minOf(clientArr.length(), 4)) {
+            // Hint dari Cloudflare diekstrak PARALEL (bukan satu per satu) lewat jalur cascade yang sama.
+            val raws = ArrayList<RawMkvCandidate>()
+            for (i in 0 until minOf(clientArr.length(), 8)) {
                 val obj = clientArr.optJSONObject(i) ?: continue
                 val rawUrl = obj.optString("raw_url").trim()
-                if (!rawUrl.startsWith("http")) continue
-                val referer = obj.optString("referer").takeIf { it.isNotBlank() }
-                val extracted = runCatching { ipLockedExtractor.extract(rawUrl, referer) }.getOrNull() ?: continue
-                if (!extracted.isArchive && !ipLockedExtractor.verifyPlayableMedia(extracted)) continue
-                val host = extracted.directUrl.toHttpUrlOrNull()?.host ?: continue
-                if (runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host); true }.getOrDefault(false).not()) continue
-                val src = SourcePriority.entries.firstOrNull { it.id == obj.optString("source") } ?: SourcePriority.OTAKUDESU
-                val qual = MkvQuality.fromText(obj.optString("quality")) ?: preferredQuality
-                val cont = when {
-                    extracted.isHls -> MediaContainer.HLS
-                    extracted.directUrl.contains(".mp4", ignoreCase = true) -> MediaContainer.MP4
-                    extracted.directUrl.contains(".mkv", ignoreCase = true) -> MediaContainer.MKV
-                    else -> MediaContainer.UNKNOWN
-                }
-                resolved.add(
-                    ResolvedMkvMedia(
-                        source = src,
-                        quality = qual,
-                        hoster = extracted.hoster,
-                        directUrl = extracted.directUrl,
-                        referer = extracted.referer,
-                        supportsRange = extracted.supportsRange,
-                        container = cont,
-                        isHls = extracted.isHls
+                if (!rawUrl.startsWith("https://")) continue
+                val hoster = obj.optString("hoster").ifBlank { "Hoster" }
+                raws.add(
+                    RawMkvCandidate(
+                        source = SourcePriority.entries.firstOrNull { it.id == obj.optString("source") } ?: SourcePriority.OTAKUDESU,
+                        quality = MkvQuality.fromText(obj.optString("quality")) ?: preferredQuality,
+                        hosterLabel = hoster,
+                        rawUrl = rawUrl,
+                        pageReferer = obj.optString("referer").trim(),
+                        container = MediaContainer.detect("", hoster, rawUrl)
                     )
                 )
+            }
+            for (media in cascadeResolver.resolveFromRaw(raws, preferredQuality, preferCompatibleContainer)) {
+                val host = media.directUrl.toHttpUrlOrNull()?.host ?: continue
+                if (runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host); true }.getOrDefault(false).not()) continue
+                resolved.add(media)
                 if (resolved.size >= 3) break
             }
         }
@@ -248,7 +321,7 @@ class StreamResolver(
         val mine = CompletableFuture<CachedResolvedCandidates?>()
         val existing = inFlightResolutions.putIfAbsent(sessionCacheKey, mine)
         if (existing != null) {
-            return runCatching { existing.get(25, TimeUnit.SECONDS) != null }.getOrDefault(false)
+            return existing.awaitOrNull(25_000L) != null
         }
         return try {
             val serverCandidates = resolveViaServerSplitPlane(
@@ -314,6 +387,10 @@ class StreamResolver(
         }
     }
 
+    /**
+     * Pembatalan coroutine (mis. pengguna ganti episode) kini benar-benar menginterupsi thread yang memblok,
+     * sehingga resolve episode lama tidak lagi menghabiskan pool provider/ekstraksi dan mengantre episode baru.
+     */
     suspend fun resolveAndStartStream(
         slug: String,
         preferredRes: String = "1080p",
@@ -322,7 +399,19 @@ class StreamResolver(
         anilistId: Int? = null,
         preferCompatibleContainer: Boolean = false,
         scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
-    ): LocalStreamSession = withContext(Dispatchers.IO) {
+    ): LocalStreamSession = runInterruptible(Dispatchers.IO) {
+        resolveAndStartStreamBlocking(slug, preferredRes, title, romajiTitle, anilistId, preferCompatibleContainer, scope)
+    }
+
+    private fun resolveAndStartStreamBlocking(
+        slug: String,
+        preferredRes: String,
+        title: String,
+        romajiTitle: String,
+        @Suppress("UNUSED_PARAMETER") anilistId: Int?,
+        preferCompatibleContainer: Boolean,
+        scope: CoroutineScope
+    ): LocalStreamSession {
         val preferredQuality = MkvQuality.fromText(preferredRes) ?: MkvQuality.P1080
         val episodeNum = extractEpisodeNumber(slug)
         val searchTitle = romajiTitle.ifBlank { title }.ifBlank {
@@ -334,7 +423,7 @@ class StreamResolver(
             val localFound = dlManager.findAnyDownloadedFile(slug.substringBefore("-ep-"), episodeNum, preferredQuality)
             if (localFound != null) {
                 val (localFile, foundQuality) = localFound
-                return@withContext LocalStreamSession(
+                return LocalStreamSession(
                     localHttpUrl = "file://${localFile.absolutePath}",
                     expectedSizeBytes = localFile.length(),
                     availableResolutions = listOf(foundQuality.label),
@@ -349,7 +438,7 @@ class StreamResolver(
         val sessionCacheKey = "${slug.lowercase()}#${preferredQuality.label}#${if (preferCompatibleContainer) "compat" else "std"}"
         val nowMs = System.currentTimeMillis()
         resolvedCache[sessionCacheKey]?.takeIf { nowMs - it.cachedAtMs <= RESOLVED_CACHE_TTL_MS }?.let { cached ->
-            return@withContext startSessionForCandidates(
+            return startSessionForCandidates(
                 candidates = cached.candidates,
                 availableResolutions = cached.availableResolutions,
                 activeResolution = cached.activeResolution,
@@ -362,9 +451,9 @@ class StreamResolver(
         inFlightResolutions[sessionCacheKey]?.let { inflight ->
             // Bergabung dengan prefetch yang sedang jalan, tapi dibatasi: prefetch yang macet tidak boleh
             // menahan pemutaran lebih dari ini (setelahnya resolve sendiri berjalan paralel).
-            val joined = runCatching { inflight.get(JOIN_INFLIGHT_MAX_MS, TimeUnit.MILLISECONDS) }.getOrNull()
+            val joined = inflight.awaitOrNull(JOIN_INFLIGHT_MAX_MS)
             if (joined != null) {
-                return@withContext startSessionForCandidates(
+                return startSessionForCandidates(
                     candidates = joined.candidates,
                     availableResolutions = joined.availableResolutions,
                     activeResolution = joined.activeResolution,
@@ -394,7 +483,7 @@ class StreamResolver(
                 resolvedSourceId = chosen.source.id,
                 resolvedHoster = chosen.hoster
             )
-            return@withContext startSessionForCandidates(
+            return startSessionForCandidates(
                 candidates = serverCandidates,
                 availableResolutions = availableRes,
                 activeResolution = chosen.quality.label,
@@ -411,6 +500,7 @@ class StreamResolver(
             allowBatchFallback = false,
             preferCompatibleContainer = preferCompatibleContainer
         )
+        if (Thread.currentThread().isInterrupted) throw InterruptedException()
         val altTitle = if (searchTitle == romajiTitle) title else romajiTitle
         val outcome = if (primaryOutcome is CascadeResult.Failure && altTitle.isNotBlank() && !altTitle.equals(searchTitle, ignoreCase = true)) {
             cascadeResolver.resolve(
@@ -424,7 +514,7 @@ class StreamResolver(
             primaryOutcome
         }
 
-        when (outcome) {
+        return when (outcome) {
             is CascadeResult.Failure -> {
                 val reason = if (outcome.diagnostics.cloudflareBlockedHosts.isNotEmpty()) {
                     FailureReason.HTTP_403
@@ -466,7 +556,7 @@ class StreamResolver(
                 )
             }
         }
-    }
+        }
 
     private fun startSessionForCandidates(
         candidates: List<ResolvedMkvMedia>,
@@ -696,6 +786,7 @@ class StreamResolver(
         const val DEFAULT_BACKEND_BASE_URL = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL
         private const val RESOLVED_CACHE_TTL_MS = 10L * 60L * 1000L
         private const val JOIN_INFLIGHT_MAX_MS = 12_000L
+        private const val SERVER_HINT_TIMEOUT_MS = 3_500L
 
         fun buildEpisodeSlug(romajiOrTitle: String, episode: Int): String {
             val clean = romajiOrTitle.lowercase()
