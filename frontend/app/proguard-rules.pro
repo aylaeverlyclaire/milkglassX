@@ -14,3 +14,6 @@
 -keep class is.xyz.mpv.** { *; }
 -dontwarn is.xyz.mpv.**
 -dontwarn org.jsoup.**
+
+# Dekoder FFmpeg (JNI) dimuat lewat refleksi oleh DefaultRenderersFactory
+-keep class androidx.media3.decoder.ffmpeg.** { *; }

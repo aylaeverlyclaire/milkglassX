@@ -25,6 +25,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
@@ -259,13 +260,21 @@ class PlayerManager(
             )
         }
 
+        // Mulai putar secepat mungkin (0,5 dtk data cukup), tetapi batasi memori: remux 1080p berbitrate tinggi
+        // dengan "prioritaskan waktu" bisa menumpuk >100 MB di heap dan membuat perangkat RAM kecil macet/OOM.
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(15_000, 60_000, 1_000, 2_000)
-            .setPrioritizeTimeOverSizeThresholds(true)
+            .setBufferDurationsMs(MIN_BUFFER_MS, MAX_BUFFER_MS, BUFFER_FOR_PLAYBACK_MS, BUFFER_AFTER_REBUFFER_MS)
+            .setTargetBufferBytes(TARGET_BUFFER_BYTES)
+            .setPrioritizeTimeOverSizeThresholds(false)
+            // Simpan 30 dtk ke belakang: geser mundur / "ulang 10 dtk" langsung dari buffer tanpa muat ulang.
+            .setBackBuffer(BACK_BUFFER_MS, true)
             .build()
 
+        // MediaCodec perangkat dulu (hemat baterai); bila codec tidak didukung perangkat, jatuh ke dekoder FFmpeg
+        // (DTS, TrueHD, EAC3, Vorbis, ALAC, dll.). Decoder fallback: coba dekoder lain bila yang pertama gagal init.
         val renderersFactory = DefaultRenderersFactory(context)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+            .setEnableDecoderFallback(true)
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
@@ -280,6 +289,8 @@ class PlayerManager(
             .setHandleAudioBecomingNoisy(true)
             .build()
             .also { player ->
+                // Geser ke keyframe terdekat: seek jauh lebih cepat daripada decode maju sampai frame persis.
+                player.setSeekParameters(SeekParameters.CLOSEST_SYNC)
                 player.addListener(playerListener)
                 attachedTextureView?.let { player.setVideoTextureView(it) }
             }
@@ -450,12 +461,7 @@ class PlayerManager(
         }
 
         val mediaItemBuilder = MediaItem.Builder().setUri(Uri.parse(mediaUrl))
-        val lower = mediaUrl.lowercase()
-        when {
-            lower.contains(".m3u8") -> mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-            lower.contains(".mkv") -> mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MATROSKA)
-            else -> mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP4)
-        }
+            .setMimeType(mimeTypeFor(mediaUrl))
         if (!cacheKey.isNullOrBlank() && !isLocalFile) {
             mediaItemBuilder.setCustomCacheKey(cacheKey)
         }
@@ -582,6 +588,29 @@ class PlayerManager(
 
     companion object {
         private const val DEFAULT_USER_AGENT = "Milkglass/1.0 (Android; Media3)"
+
+        internal const val MIN_BUFFER_MS = 15_000
+        internal const val MAX_BUFFER_MS = 50_000
+        internal const val BUFFER_FOR_PLAYBACK_MS = 500
+        internal const val BUFFER_AFTER_REBUFFER_MS = 1_500
+        internal const val BACK_BUFFER_MS = 30_000
+        internal const val TARGET_BUFFER_BYTES = 96 * 1024 * 1024
+
+        /**
+         * Tebakan MIME untuk urutan extractor. Hanya memengaruhi URUTAN percobaan (extractor lain tetap dicoba lewat
+         * sniffing), jadi menebak MKV untuk URL tanpa ekstensi aman dan menghindari sniff MP4 yang sia-sia.
+         */
+        internal fun mimeTypeFor(url: String): String {
+            val lower = url.lowercase()
+            val path = lower.substringBefore('#').substringBefore('?')
+            return when {
+                ".m3u8" in lower -> MimeTypes.APPLICATION_M3U8
+                ".mkv" in lower || path.endsWith(".mka") -> MimeTypes.VIDEO_MATROSKA
+                path.endsWith(".mp4") || path.endsWith(".m4v") -> MimeTypes.VIDEO_MP4
+                path.endsWith(".webm") -> MimeTypes.VIDEO_WEBM
+                else -> MimeTypes.VIDEO_MATROSKA
+            }
+        }
 
         private val assTagRegex = Regex("\\u007B[^\\u007D]*\\u007D")
         private val assDrawingLineRegex = Regex(
