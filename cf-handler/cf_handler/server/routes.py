@@ -431,7 +431,7 @@ def setup_routes(app: FastAPI):
                     hostname = value
                 elif key_lower == 'x-proxy':
                     proxy = value
-                elif key_lower == 'x-Handle-cache':
+                elif key_lower == 'x-handle-cache':
                     Handle_cache = value.lower() in ('true', '1', 'yes', 'on')
 
             if hostname and "://" in hostname:

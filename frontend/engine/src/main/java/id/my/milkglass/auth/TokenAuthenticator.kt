@@ -190,9 +190,7 @@ class AuthBearerInterceptor(
         if (!pk.isNullOrBlank() && original.header("X-Milkglass-Sig") == null) {
             val ts = (System.currentTimeMillis() / 1000L).toString()
             val pathAndQuery = original.url.encodedPath + (original.url.encodedQuery?.let { "?$it" } ?: "")
-            val canonical = "${original.method.uppercase()}
-$pathAndQuery
-$ts"
+            val canonical = "${original.method.uppercase()}\n$pathAndQuery\n$ts"
             val sig = computeHmacSha256Hex(pk, canonical)
             builder.header("X-Milkglass-Ts", ts)
             builder.header("X-Milkglass-Sig", sig)

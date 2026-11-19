@@ -4,7 +4,7 @@ import os
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from cf_handler.utils.constants import APP_VERSION
 from cf_handler.utils.security import AccessLogRedactor
@@ -24,6 +24,8 @@ def create_app() -> FastAPI:
 
         @app.middleware("http")
         async def require_auth_token(request: Request, call_next):
+            if request.method == "OPTIONS" and "access-control-request-method" in request.headers:
+                return Response(status_code=200)
             given = request.headers.get("x-auth-token", "").encode()
             if not hmac.compare_digest(given, expected):
                 return JSONResponse(status_code=401, content={"detail": "Missing or invalid x-auth-token header"})

@@ -31,7 +31,7 @@ class RequestMirror:
         cleaned_headers = {}
         for key, value in headers.items():
             key_lower = key.lower()
-            if key_lower not in ['x-hostname', 'x-proxy', 'x-Handle-cache', 'x-auth-token']:
+            if key_lower not in ['x-hostname', 'x-proxy', 'x-handle-cache', 'x-auth-token']:
                 cleaned_headers[key] = value
         return cleaned_headers
 
