@@ -87,8 +87,8 @@ data class ResolvedMkvMedia(
     val directUrl: String,
     val referer: String?,
     val supportsRange: Boolean,
-    val sizeLabel: String?,
-    val isBatchArchive: Boolean,
+    val sizeLabel: String? = null,
+    val isBatchArchive: Boolean = false,
     val container: MediaContainer = MediaContainer.MKV,
     val isHls: Boolean = false
 )
@@ -393,7 +393,7 @@ abstract class BaseHtmlMkvProvider(
             clients.sourceClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     if ((resp.code == 403 || resp.code == 503) && remoteHtmlFetcher != null) {
-                        val remoteHtml = runCatching { remoteHtmlFetcher.invoke(url) }.getOrNull()
+                        val remoteHtml = runCatching { remoteHtmlFetcher?.invoke(url) }.getOrNull()
                         if (!remoteHtml.isNullOrBlank()) {
                             return Jsoup.parse(remoteHtml, url)
                         }

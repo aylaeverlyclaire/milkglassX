@@ -240,7 +240,7 @@ class StreamResolver(
         }
         val episodeNum = extractEpisodeNumber(slug)
         val searchTitle = romajiTitle.ifBlank { title }.ifBlank {
-            slug.replace(Regex("-ep-\d+$", RegexOption.IGNORE_CASE), "").replace('-', ' ')
+            slug.replace(Regex("-ep-\\d+$", RegexOption.IGNORE_CASE), "").replace('-', ' ')
         }
         val mine = CompletableFuture<CachedResolvedCandidates?>()
         val existing = inFlightResolutions.putIfAbsent(sessionCacheKey, mine)
