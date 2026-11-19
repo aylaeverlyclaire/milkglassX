@@ -6,6 +6,14 @@ import { AppBindings } from '../index';
 
 export const systemRoutes = new Hono<{ Bindings: AppBindings }>();
 
+systemRoutes.get('/health', (c) => {
+  return c.json({
+    status: 'ok',
+    service: 'milkglass-backend',
+    resolution_mode: 'CLIENT_CASCADE_MKV',
+  });
+});
+
 const telemetryBodySchema = z.object({
   source_id: z.number().int().positive(),
   reason: z.enum(['http_403', 'expired', 'not_found', 'timeout', 'codec', 'dns']),

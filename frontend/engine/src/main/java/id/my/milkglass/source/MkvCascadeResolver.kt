@@ -1,6 +1,6 @@
 package id.my.milkglass.source
 
-import id.my.milkglass.extractor.ExtractedDirectMedia
+import id.my.milkglass.download.EndpointHealthScorer
 import id.my.milkglass.extractor.HosterFilter
 import id.my.milkglass.extractor.LinkUnshortener
 import id.my.milkglass.extractor.MkvHosterExtractorRegistry
@@ -12,6 +12,14 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.net.URLEncoder
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicInteger
 
 enum class SourcePriority(val rank: Int, val id: String, val defaultBaseUrl: String) {
     OTAKUDESU(1, "otakudesu", "https://otakudesu.blog"),
@@ -112,18 +120,31 @@ internal object TitleMatcher {
     }
 
     fun matchesEpisode(text: String, href: String, episodeNumber: Int): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.toIntOrNull() == episodeNumber) return true
         val epRegex = Regex("""(?:episode|eps|ep)[\s\-_]*0*($episodeNumber)(?!\d)""", RegexOption.IGNORE_CASE)
-        return epRegex.containsMatchIn(text) || epRegex.containsMatchIn(href)
+        return epRegex.containsMatchIn(trimmed) || epRegex.containsMatchIn(href)
     }
 
     fun searchQueries(animeTitle: String): List<String> {
         val raw = animeTitle.trim()
+        val beforeColon = raw.substringBefore(":").trim()
         val normalizedSeason = raw
             .replace(Regex("\\b2nd\\s+season\\b", RegexOption.IGNORE_CASE), "Season 2")
             .replace(Regex("\\b3rd\\s+season\\b", RegexOption.IGNORE_CASE), "Season 3")
             .replace(Regex("\\b4th\\s+season\\b", RegexOption.IGNORE_CASE), "Season 4")
+            .replace(Regex("\\bIII\\b"), "Season 3")
+            .replace(Regex("\\bII\\b"), "Season 2")
+            .replace(Regex("\\bIV\\b"), "Season 4")
             .replace(Regex("\\bpart\\s+\\d+\\b", RegexOption.IGNORE_CASE), "")
             .replace(Regex("\\bcour\\s+\\d+\\b", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("[:]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        val shortSeason = beforeColon
+            .replace(Regex("\\bIII\\b"), "Season 3")
+            .replace(Regex("\\bII\\b"), "Season 2")
+            .replace(Regex("\\bIV\\b"), "Season 4")
             .replace(Regex("\\s+"), " ")
             .trim()
         val baseTitle = normalizedSeason
@@ -131,7 +152,7 @@ internal object TitleMatcher {
             .replace(Regex("[:.,!?]+"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
-        return listOf(raw, normalizedSeason, baseTitle)
+        return listOf(raw, shortSeason, normalizedSeason, baseTitle)
             .filter { it.length >= 2 }
             .distinctBy { it.lowercase(Locale.ROOT) }
     }
@@ -143,10 +164,51 @@ internal object TitleMatcher {
     }
 }
 
+object SourceCircuitBreaker {
+    private const val COOLDOWN_MS = 3L * 60L * 1000L
+    private const val FAIL_THRESHOLD = 2
+
+    private val failCounts = ConcurrentHashMap<SourcePriority, Int>()
+    private val openUntilMs = ConcurrentHashMap<SourcePriority, Long>()
+
+    fun isOpen(source: SourcePriority, nowMs: Long = System.currentTimeMillis()): Boolean {
+        val until = openUntilMs[source] ?: return false
+        if (nowMs >= until) {
+            openUntilMs.remove(source)
+            failCounts[source] = 0
+            return false
+        }
+        return true
+    }
+
+    fun recordSuccess(source: SourcePriority) {
+        failCounts[source] = 0
+        openUntilMs.remove(source)
+    }
+
+    fun recordFailure(source: SourcePriority, nowMs: Long = System.currentTimeMillis()) {
+        val count = (failCounts[source] ?: 0) + 1
+        failCounts[source] = count
+        if (count >= FAIL_THRESHOLD) {
+            openUntilMs[source] = nowMs + COOLDOWN_MS
+        }
+    }
+
+    fun resetAll() {
+        failCounts.clear()
+        openUntilMs.clear()
+    }
+}
+
 abstract class BaseHtmlMkvProvider(
     protected val clients: IsolatedHttpClients,
-    protected var baseUrl: String
+    protected var baseUrl: String,
+    protected val slugCache: SourceSlugCache? = null,
+    private val baseUrlProvider: (() -> String)? = null
 ) : MkvSourceProvider {
+
+    protected fun activeBaseUrl(): String =
+        (baseUrlProvider?.invoke() ?: baseUrl).trimEnd('/')
 
     protected fun fetchDoc(url: String, referer: String? = null): Document {
         val req = Request.Builder().url(url).apply {
@@ -167,8 +229,10 @@ abstract class BaseHtmlMkvProvider(
 
 class OtakudesuSourceProvider(
     clients: IsolatedHttpClients,
-    baseUrl: String = SourcePriority.OTAKUDESU.defaultBaseUrl
-) : BaseHtmlMkvProvider(clients, baseUrl) {
+    baseUrl: String = SourcePriority.OTAKUDESU.defaultBaseUrl,
+    slugCache: SourceSlugCache? = null,
+    baseUrlProvider: (() -> String)? = null
+) : BaseHtmlMkvProvider(clients, baseUrl, slugCache, baseUrlProvider) {
 
     override val priority: SourcePriority = SourcePriority.OTAKUDESU
 
@@ -177,27 +241,40 @@ class OtakudesuSourceProvider(
         episodeNumber: Int,
         targetQualities: Set<MkvQuality>
     ): List<RawMkvCandidate> {
-        var bestAnimeUrl: String? = null
-        var searchUrl = "$baseUrl/"
-        for (q in TitleMatcher.searchQueries(animeTitle)) {
-            searchUrl = "$baseUrl/?s=${encodeQuery(q)}&post_type=anime"
-            val searchDoc = fetchDoc(searchUrl, "$baseUrl/")
-            bestAnimeUrl = searchDoc.select("ul.chivsrc > li")
-                .mapNotNull { li ->
-                    val a = li.selectFirst("h2 > a[href]") ?: return@mapNotNull null
-                    val title = a.text().trim()
-                    val href = a.absUrl("href")
-                    if (href.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
-                }
-                .maxByOrNull { it.first }
-                ?.takeIf { it.first >= 0.25 }
-                ?.second
-            if (bestAnimeUrl != null) break
+        val root = activeBaseUrl()
+        var bestAnimeUrl: String? = slugCache?.get(priority, animeTitle)
+        var searchUrl = "$root/"
+        if (bestAnimeUrl == null) {
+            for (q in TitleMatcher.searchQueries(animeTitle)) {
+                searchUrl = "$root/?s=${encodeQuery(q)}&post_type=anime"
+                val searchDoc = fetchDoc(searchUrl, "$root/")
+                bestAnimeUrl = searchDoc.select("ul.chivsrc > li")
+                    .mapNotNull { li ->
+                        val a = li.selectFirst("h2 > a[href]") ?: return@mapNotNull null
+                        val title = a.text().trim()
+                        val href = a.absUrl("href")
+                        if (href.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
+                    }
+                    .maxByOrNull { it.first }
+                    ?.takeIf { it.first >= 0.25 }
+                    ?.second
+                if (bestAnimeUrl != null) break
+            }
         }
         if (bestAnimeUrl == null) return emptyList()
+        slugCache?.put(priority, animeTitle, bestAnimeUrl)
 
-        val animeDoc = fetchDoc(bestAnimeUrl, searchUrl)
-        val epUrl = animeDoc.select(".episodelist ul li a[href]")
+        val animeDoc = runCatching { fetchDoc(bestAnimeUrl, searchUrl) }.getOrElse {
+            slugCache?.invalidate(priority, animeTitle)
+            throw it
+        }
+        val epBoxes = animeDoc.select("div.episodelist")
+        val orderedEpLinks = if (epBoxes.size > 1) {
+            epBoxes[1].select("ul li a[href]") + epBoxes[0].select("ul li a[href]")
+        } else {
+            animeDoc.select(".episodelist ul li a[href]")
+        }
+        val epUrl = orderedEpLinks
             .firstOrNull { a ->
                 val href = a.absUrl("href")
                 href.contains("/episode/") && TitleMatcher.matchesEpisode(a.text(), href, episodeNumber)
@@ -206,11 +283,15 @@ class OtakudesuSourceProvider(
         val epDoc = fetchDoc(epUrl, bestAnimeUrl)
         val results = mutableListOf<RawMkvCandidate>()
 
-        epDoc.select("div.download ul").forEach { ul ->
+        val downloadUls = epDoc.select("div.download ul")
+        downloadUls.forEachIndexed { ulIdx, ul ->
             val blockHeader = ul.previousElementSibling()?.text().orEmpty()
+            val isImplicitMkvUl = downloadUls.size >= 2 && ulIdx == downloadUls.lastIndex
             ul.select("li").forEach { li ->
                 val strongText = li.selectFirst("strong")?.text().orEmpty()
-                if (!TitleMatcher.isMkvBlock(blockHeader, strongText)) return@forEach
+                if (!TitleMatcher.isMkvBlock(blockHeader, strongText) &&
+                    !(isImplicitMkvUl && !strongText.contains("mp4", ignoreCase = true))
+                ) return@forEach
                 val quality = MkvQuality.fromText(strongText) ?: return@forEach
                 if (quality !in targetQualities) return@forEach
                 val sizeLabel = li.selectFirst("i")?.text()?.trim()?.takeIf { it.isNotBlank() }
@@ -239,8 +320,10 @@ class OtakudesuSourceProvider(
 
 class SamehadakuSourceProvider(
     clients: IsolatedHttpClients,
-    baseUrl: String = SourcePriority.SAMEHADAKU.defaultBaseUrl
-) : BaseHtmlMkvProvider(clients, baseUrl) {
+    baseUrl: String = SourcePriority.SAMEHADAKU.defaultBaseUrl,
+    slugCache: SourceSlugCache? = null,
+    baseUrlProvider: (() -> String)? = null
+) : BaseHtmlMkvProvider(clients, baseUrl, slugCache, baseUrlProvider) {
 
     override val priority: SourcePriority = SourcePriority.SAMEHADAKU
 
@@ -249,34 +332,59 @@ class SamehadakuSourceProvider(
         episodeNumber: Int,
         targetQualities: Set<MkvQuality>
     ): List<RawMkvCandidate> {
-        var bestAnimeUrl: String? = null
-        var searchUrl = "$baseUrl/"
-        for (q in TitleMatcher.searchQueries(animeTitle)) {
-            searchUrl = "$baseUrl/?s=${encodeQuery(q)}"
-            val searchDoc = fetchDoc(searchUrl, "$baseUrl/")
-            bestAnimeUrl = searchDoc.select("div.animposx a[href], article.animepost div.animposx a[href], .animepost div.animposx a[href]")
-                .mapNotNull { a ->
-                    val href = a.absUrl("href")
-                    val title = a.attr("title").ifBlank { a.text() }.trim()
-                    if (href.isBlank() || title.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
-                }
-                .maxByOrNull { it.first }
-                ?.takeIf { it.first >= 0.25 }
-                ?.second
-            if (bestAnimeUrl != null) break
+        val root = activeBaseUrl()
+        var bestAnimeUrl: String? = slugCache?.get(priority, animeTitle)
+        var searchUrl = "$root/"
+        if (bestAnimeUrl == null) {
+            for (q in TitleMatcher.searchQueries(animeTitle)) {
+                searchUrl = "$root/?s=${encodeQuery(q)}&post_type=anime"
+                val searchDoc = fetchDoc(searchUrl, "$root/")
+                bestAnimeUrl = searchDoc.select("div.animposx > a[href], article.animpost div.animposx > a[href], article.animepost div.animposx a[href]")
+                    .mapNotNull { a ->
+                        val href = a.absUrl("href")
+                        val title = a.selectFirst(".data .title h2")?.text()?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                            ?: a.attr("title").ifBlank { a.text() }.trim()
+                        if (href.isBlank() || title.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
+                    }
+                    .maxByOrNull { it.first }
+                    ?.takeIf { it.first >= 0.25 }
+                    ?.second
+                if (bestAnimeUrl != null) break
+            }
         }
         if (bestAnimeUrl == null) return emptyList()
 
-        val animeDoc = fetchDoc(bestAnimeUrl, searchUrl)
-        val epUrl = animeDoc.select("div.lstepsiode.listeps ul li a[href], .listeps ul li a[href], .lstepsiode ul li a[href], .epsleft a[href], .episode-lainnya ul li a[href]")
-            .firstOrNull { a ->
-                TitleMatcher.matchesEpisode(a.text(), a.absUrl("href"), episodeNumber)
-            }?.absUrl("href") ?: return emptyList()
+        var seriesUrl = bestAnimeUrl
+        var animeDoc = runCatching { fetchDoc(seriesUrl, searchUrl) }.getOrElse {
+            slugCache?.invalidate(priority, animeTitle)
+            throw it
+        }
+        if (!seriesUrl.contains("/anime/")) {
+            val resolvedSeries = animeDoc.selectFirst("a[href*='/anime/'], div.nvs.nvsc a[href]")?.absUrl("href")
+            if (!resolvedSeries.isNullOrBlank()) {
+                seriesUrl = resolvedSeries
+                animeDoc = fetchDoc(seriesUrl, bestAnimeUrl)
+            }
+        }
+        slugCache?.put(priority, animeTitle, seriesUrl)
 
-        val epDoc = fetchDoc(epUrl, bestAnimeUrl)
+        val epRows = animeDoc.select("div.lstepsiode.listeps ul li, .listeps ul li, .lstepsiode ul li, .episode-lainnya ul li")
+        val epUrl = epRows.firstOrNull { li ->
+            val badgeNum = li.selectFirst(".epsright, .epl-num, .shrink-0 a, .shrink-0 div")
+                ?.text()?.let { Regex("\\d+").find(it)?.value?.toIntOrNull() }
+            val a = li.selectFirst("h4 a[href], .lchx a[href], a[href*='-episode-'], a[href]") ?: return@firstOrNull false
+            badgeNum == episodeNumber || TitleMatcher.matchesEpisode(a.text(), a.absUrl("href"), episodeNumber)
+        }?.selectFirst("h4 a[href], .lchx a[href], a[href*='-episode-'], a[href]")?.absUrl("href")
+            ?: animeDoc.select("a[href*='-episode-']").firstOrNull { a ->
+                TitleMatcher.matchesEpisode(a.text(), a.absUrl("href"), episodeNumber)
+            }?.absUrl("href")
+            ?: return emptyList()
+
+        val epDoc = fetchDoc(epUrl, seriesUrl)
         val results = mutableListOf<RawMkvCandidate>()
 
-        epDoc.select("div.download-eps").forEach { block ->
+        epDoc.select("div.download-eps, div#downloadb").forEach { block ->
             val formatHeader = block.selectFirst("p b, p")?.text().orEmpty()
             block.select("ul li").forEach { li ->
                 val strongText = li.selectFirst("strong")?.text().orEmpty()
@@ -308,8 +416,10 @@ class SamehadakuSourceProvider(
 class OploverzSourceProvider(
     clients: IsolatedHttpClients,
     baseUrl: String = SourcePriority.OPLOVERZ.defaultBaseUrl,
-    private val backApiUrl: String = "https://backapi.oploverz.ac"
-) : BaseHtmlMkvProvider(clients, baseUrl) {
+    private val backApiUrl: String = "https://backapi.oploverz.ac",
+    slugCache: SourceSlugCache? = null,
+    baseUrlProvider: (() -> String)? = null
+) : BaseHtmlMkvProvider(clients, baseUrl, slugCache, baseUrlProvider) {
 
     override val priority: SourcePriority = SourcePriority.OPLOVERZ
 
@@ -330,31 +440,53 @@ class OploverzSourceProvider(
         episodeNumber: Int,
         targetQualities: Set<MkvQuality>
     ): List<RawMkvCandidate> {
-        var bestAnimeUrl: String? = null
-        var searchUrl = "$baseUrl/"
-        for (q in TitleMatcher.searchQueries(animeTitle)) {
-            searchUrl = "$baseUrl/?s=${encodeQuery(q)}"
-            val searchDoc = fetchDoc(searchUrl, "$baseUrl/")
-            bestAnimeUrl = searchDoc.select("div.bsx a[href], article.bs a[href]")
-                .mapNotNull { a ->
-                    val href = a.absUrl("href")
-                    val title = a.attr("title").ifBlank { a.text() }.trim()
-                    if (href.isBlank() || title.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
-                }
-                .maxByOrNull { it.first }
-                ?.takeIf { it.first >= 0.25 }
-                ?.second
-            if (bestAnimeUrl != null) break
+        val root = activeBaseUrl()
+        var bestAnimeUrl: String? = slugCache?.get(priority, animeTitle)
+        var searchUrl = "$root/"
+        if (bestAnimeUrl == null) {
+            for (q in TitleMatcher.searchQueries(animeTitle)) {
+                searchUrl = "$root/?s=${encodeQuery(q)}"
+                val searchDoc = fetchDoc(searchUrl, "$root/")
+                bestAnimeUrl = searchDoc.select("div.bsx, article.bs")
+                    .mapNotNull { el ->
+                        val a = el.selectFirst("a[href]") ?: return@mapNotNull null
+                        val href = a.absUrl("href")
+                        val title = el.selectFirst("div.tt h4, h4, .tt")?.text()?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                            ?: a.attr("title").ifBlank { a.text() }.trim()
+                        if (href.isBlank() || title.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
+                    }
+                    .maxByOrNull { it.first }
+                    ?.takeIf { it.first >= 0.25 }
+                    ?.second
+                if (bestAnimeUrl != null) break
+            }
         }
         if (bestAnimeUrl == null) return emptyList()
 
-        val animeDoc = fetchDoc(bestAnimeUrl, searchUrl)
-        val epUrl = animeDoc.select("div.eplister ul li a[href], ul#episodelist li a[href]")
-            .firstOrNull { a ->
-                TitleMatcher.matchesEpisode(a.text(), a.absUrl("href"), episodeNumber)
-            }?.absUrl("href") ?: return emptyList()
+        var seriesUrl = bestAnimeUrl
+        var animeDoc = runCatching { fetchDoc(seriesUrl, searchUrl) }.getOrElse {
+            slugCache?.invalidate(priority, animeTitle)
+            throw it
+        }
+        if (!seriesUrl.contains("/series/")) {
+            val allEpHref = animeDoc.selectFirst("div.nvs.nvsc a[href], a[aria-label='All Episodes'], a[href*='/series/'], .year a[href*='/anime/']")
+                ?.absUrl("href")
+            if (!allEpHref.isNullOrBlank()) {
+                seriesUrl = allEpHref
+                animeDoc = fetchDoc(seriesUrl, bestAnimeUrl)
+            }
+        }
+        slugCache?.put(priority, animeTitle, seriesUrl)
 
-        val epDoc = fetchDoc(epUrl, bestAnimeUrl)
+        val epUrl = animeDoc.select("div.eplister ul li, ul#episodelist li")
+            .firstOrNull { li ->
+                val num = li.selectFirst("div.epl-num")?.text()?.trim()?.toIntOrNull()
+                val a = li.selectFirst("a[href]") ?: return@firstOrNull false
+                num == episodeNumber || TitleMatcher.matchesEpisode(a.text(), a.absUrl("href"), episodeNumber)
+            }?.selectFirst("a[href]")?.absUrl("href") ?: return emptyList()
+
+        val epDoc = fetchDoc(epUrl, seriesUrl)
         val results = mutableListOf<RawMkvCandidate>()
 
         epDoc.select("div.soraddlx, div.mctnx, div.download-box").forEach { block ->
@@ -431,6 +563,7 @@ class OploverzSourceProvider(
         episodeNumber: Int,
         targetQualities: Set<MkvQuality>
     ): List<RawMkvCandidate> {
+        val root = activeBaseUrl()
         val searchReq = Request.Builder()
             .url("$backApiUrl/api/series?q=${encodeQuery(animeTitle)}")
             .build()
@@ -452,8 +585,9 @@ class OploverzSourceProvider(
             if (bestScore >= 0.25) bestSlug else null
         } ?: return emptyList()
 
-        val seriesUrl = "$baseUrl/series/$seriesSlug"
-        val animeDoc = fetchDoc(seriesUrl, "$baseUrl/")
+        val seriesUrl = "$root/series/$seriesSlug"
+        slugCache?.put(priority, animeTitle, seriesUrl)
+        val animeDoc = fetchDoc(seriesUrl, "$root/")
         val epUrl = animeDoc.select("div.eplister ul li a[href], ul#episodelist li a[href]")
             .firstOrNull { a ->
                 TitleMatcher.matchesEpisode(a.text(), a.absUrl("href"), episodeNumber)
@@ -491,8 +625,10 @@ class OploverzSourceProvider(
 
 class KusonimeSourceProvider(
     clients: IsolatedHttpClients,
-    baseUrl: String = SourcePriority.KUSONIME.defaultBaseUrl
-) : BaseHtmlMkvProvider(clients, baseUrl) {
+    baseUrl: String = SourcePriority.KUSONIME.defaultBaseUrl,
+    slugCache: SourceSlugCache? = null,
+    baseUrlProvider: (() -> String)? = null
+) : BaseHtmlMkvProvider(clients, baseUrl, slugCache, baseUrlProvider) {
 
     override val priority: SourcePriority = SourcePriority.KUSONIME
 
@@ -501,19 +637,29 @@ class KusonimeSourceProvider(
         episodeNumber: Int,
         targetQualities: Set<MkvQuality>
     ): List<RawMkvCandidate> {
-        val searchUrl = "$baseUrl/?s=${encodeQuery(animeTitle)}"
-        val searchDoc = fetchDoc(searchUrl, "$baseUrl/")
-        val bestPostUrl = searchDoc.select("div.kover a[href], h2.episodeye a[href]")
-            .mapNotNull { a ->
-                val href = a.absUrl("href")
-                val title = a.attr("title").ifBlank { a.text() }.trim()
-                if (href.isBlank() || title.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
-            }
-            .maxByOrNull { it.first }
-            ?.takeIf { it.first >= 0.25 }
-            ?.second ?: return emptyList()
+        val root = activeBaseUrl()
+        var bestPostUrl: String? = slugCache?.get(priority, animeTitle)
+        var searchUrl = "$root/"
+        if (bestPostUrl == null) {
+            searchUrl = "$root/?s=${encodeQuery(animeTitle)}"
+            val searchDoc = fetchDoc(searchUrl, "$root/")
+            bestPostUrl = searchDoc.select("div.kover a[href], h2.episodeye a[href]")
+                .mapNotNull { a ->
+                    val href = a.absUrl("href")
+                    val title = a.attr("title").ifBlank { a.text() }.trim()
+                    if (href.isBlank() || title.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
+                }
+                .maxByOrNull { it.first }
+                ?.takeIf { it.first >= 0.25 }
+                ?.second
+        }
+        if (bestPostUrl == null) return emptyList()
+        slugCache?.put(priority, animeTitle, bestPostUrl)
 
-        val postDoc = fetchDoc(bestPostUrl, searchUrl)
+        val postDoc = runCatching { fetchDoc(bestPostUrl, searchUrl) }.getOrElse {
+            slugCache?.invalidate(priority, animeTitle)
+            throw it
+        }
         val results = mutableListOf<RawMkvCandidate>()
 
         postDoc.select("div.smokeddlrh, div.dlbodz").forEach { block ->
@@ -550,11 +696,13 @@ class KusonimeSourceProvider(
 
 class MkvCascadeResolver(
     private val clients: IsolatedHttpClients,
+    private val slugCache: SourceSlugCache? = null,
+    private val baseUrlProvider: (SourcePriority) -> String = { it.defaultBaseUrl },
     private val providers: List<MkvSourceProvider> = listOf(
-        OtakudesuSourceProvider(clients),
-        SamehadakuSourceProvider(clients),
-        OploverzSourceProvider(clients),
-        KusonimeSourceProvider(clients)
+        OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }),
+        SamehadakuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.SAMEHADAKU) }),
+        OploverzSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OPLOVERZ) }),
+        KusonimeSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.KUSONIME) })
     )
 ) {
     private val unshortener = LinkUnshortener(clients)
@@ -565,7 +713,35 @@ class MkvCascadeResolver(
         val candidates: List<RawMkvCandidate>
     )
 
+    private data class ProviderFetchOutcome(
+        val source: SourcePriority,
+        val candidates: List<RawMkvCandidate> = emptyList(),
+        val cfHost: String? = null,
+        val error: String? = null
+    )
+
     private val rawCache = mutableMapOf<String, CachedEpisodeCandidates>()
+
+    fun warmEpisodeCandidates(animeTitle: String, episodeNumber: Int): Boolean {
+        val cacheKey = "${animeTitle.lowercase(Locale.ROOT).trim()}#$episodeNumber"
+        val nowMs = System.currentTimeMillis()
+        val alreadyWarm = synchronized(rawCache) {
+            rawCache[cacheKey]?.let { nowMs - it.cachedAtMs <= RAW_CACHE_TTL_MS && it.candidates.isNotEmpty() } == true
+        }
+        if (alreadyWarm) return true
+
+        val orderedProviders = providers.sortedBy { it.priority.rank }.take(2)
+        for (provider in orderedProviders) {
+            if (SourceCircuitBreaker.isOpen(provider.priority)) continue
+            val outcome = fetchFromProvider(provider, animeTitle, episodeNumber)
+            if (outcome.candidates.isNotEmpty()) {
+                SourceCircuitBreaker.recordSuccess(provider.priority)
+                putRawCache(cacheKey, outcome.candidates, System.currentTimeMillis())
+                return true
+            }
+        }
+        return false
+    }
 
     fun resolve(
         animeTitle: String,
@@ -584,36 +760,12 @@ class MkvCascadeResolver(
         val cacheKey = "${animeTitle.lowercase(Locale.ROOT).trim()}#$episodeNumber"
         val nowMs = System.currentTimeMillis()
         val cachedRaw = synchronized(rawCache) {
-            rawCache[cacheKey]?.takeIf { nowMs - it.cachedAtMs <= 20L * 60L * 1000L }?.candidates
+            rawCache[cacheKey]?.takeIf { nowMs - it.cachedAtMs <= RAW_CACHE_TTL_MS }?.candidates
         }
 
         if (!cachedRaw.isNullOrEmpty()) {
-            val usableCached = cachedRaw
-                .filter { allowBatchFallback || !it.isBatchArchive }
-                .sortedWith(
-                    compareBy<RawMkvCandidate> { qualityOrder.indexOf(it.quality) }
-                        .thenBy { HosterFilter.rank(it.hosterLabel, it.rawUrl) }
-                )
-            val fastResolved = mutableListOf<ResolvedMkvMedia>()
-            for (candidate in usableCached) {
-                val extracted = runCatching {
-                    val finalUrl = unshortener.unshorten(candidate.rawUrl, candidate.pageReferer)
-                    extractorRegistry.extract(finalUrl, candidate.pageReferer)
-                }.getOrNull() ?: continue
-                fastResolved.add(
-                    ResolvedMkvMedia(
-                        source = candidate.source,
-                        quality = candidate.quality,
-                        hoster = extracted.hoster,
-                        directUrl = extracted.directUrl,
-                        referer = extracted.referer,
-                        supportsRange = extracted.supportsRange,
-                        sizeLabel = candidate.sizeLabel,
-                        isBatchArchive = candidate.isBatchArchive || extracted.isArchive
-                    )
-                )
-                if (fastResolved.size >= 2) break
-            }
+            val usableCached = rankCandidates(cachedRaw, qualityOrder, allowBatchFallback)
+            val fastResolved = raceExtractCandidates(usableCached, maxResults = 2)
             if (fastResolved.isNotEmpty()) {
                 return CascadeResult.Success(
                     selected = fastResolved.first(),
@@ -623,67 +775,222 @@ class MkvCascadeResolver(
             }
         }
 
-        for (provider in orderedProviders) {
-            attempted.add(provider.priority)
-            val rawCandidates = try {
-                provider.findEpisodeMkvCandidates(animeTitle, episodeNumber, MkvQuality.ALL_DESC.toSet())
-            } catch (cf: CloudflareChallengeException) {
-                cfHosts.add(cf.host)
-                errors[provider.priority] = cf.message ?: "Cloudflare challenge"
-                continue
+        val activeProviders = orderedProviders.filter { provider ->
+            if (SourceCircuitBreaker.isOpen(provider.priority)) {
+                errors[provider.priority] = "Sumber sedang cooldown sementara"
+                false
+            } else {
+                true
+            }
+        }
+
+        var idx = 0
+        if (activeProviders.size >= 2) {
+            val primary = activeProviders[0]
+            val secondary = activeProviders[1]
+            attempted.add(primary.priority)
+            val primaryFuture = sharedProviderPool.submit<ProviderFetchOutcome> {
+                fetchFromProvider(primary, animeTitle, episodeNumber)
+            }
+            val fastPrimary = try {
+                primaryFuture.get(HEDGE_DELAY_MS, TimeUnit.MILLISECONDS)
+            } catch (_: TimeoutException) {
+                null
             } catch (e: Exception) {
-                errors[provider.priority] = e.message ?: e::class.java.simpleName
-                continue
+                ProviderFetchOutcome(primary.priority, error = e.message ?: e::class.java.simpleName)
             }
 
-            if (rawCandidates.isNotEmpty()) {
-                synchronized(rawCache) {
-                    rawCache[cacheKey] = CachedEpisodeCandidates(nowMs, rawCandidates)
+            if (fastPrimary != null) {
+                val resolved = handleProviderOutcome(
+                    fastPrimary, cacheKey, qualityOrder, allowBatchFallback, attempted, errors, cfHosts
+                )
+                if (resolved != null) return resolved
+                idx = 1
+            } else {
+                // Primary took > 1.2s: hedge with Secondary in parallel so whichever yields first wins
+                attempted.add(secondary.priority)
+                val secondaryFuture = sharedProviderPool.submit<ProviderFetchOutcome> {
+                    fetchFromProvider(secondary, animeTitle, episodeNumber)
                 }
+                val cs = ExecutorCompletionService<ProviderFetchOutcome>(sharedProviderPool)
+                val f1 = cs.submit { runCatching { primaryFuture.get(15, TimeUnit.SECONDS) }.getOrElse { ProviderFetchOutcome(primary.priority, error = it.message ?: "Timeout") } }
+                val f2 = cs.submit { runCatching { secondaryFuture.get(15, TimeUnit.SECONDS) }.getOrElse { ProviderFetchOutcome(secondary.priority, error = it.message ?: "Timeout") } }
+                try {
+                    repeat(2) {
+                        val done = runCatching { cs.poll(16, TimeUnit.SECONDS)?.get() }.getOrNull() ?: return@repeat
+                        val resolved = handleProviderOutcome(
+                            done, cacheKey, qualityOrder, allowBatchFallback, attempted, errors, cfHosts
+                        )
+                        if (resolved != null) return resolved
+                    }
+                } finally {
+                    f1.cancel(true)
+                    f2.cancel(true)
+                    primaryFuture.cancel(true)
+                    secondaryFuture.cancel(true)
+                }
+                idx = 2
             }
+        }
 
-            val usableCandidates = rawCandidates
-                .filter { allowBatchFallback || !it.isBatchArchive }
-                .sortedWith(
-                    compareBy<RawMkvCandidate> { qualityOrder.indexOf(it.quality) }
-                        .thenBy { HosterFilter.rank(it.hosterLabel, it.rawUrl) }
-                )
-
-            val resolvedList = mutableListOf<ResolvedMkvMedia>()
-            for (candidate in usableCandidates) {
-                val extracted = runCatching {
-                    val finalUrl = unshortener.unshorten(candidate.rawUrl, candidate.pageReferer)
-                    extractorRegistry.extract(finalUrl, candidate.pageReferer)
-                }.getOrNull() ?: continue
-
-                resolvedList.add(
-                    ResolvedMkvMedia(
-                        source = candidate.source,
-                        quality = candidate.quality,
-                        hoster = extracted.hoster,
-                        directUrl = extracted.directUrl,
-                        referer = extracted.referer,
-                        supportsRange = extracted.supportsRange,
-                        sizeLabel = candidate.sizeLabel,
-                        isBatchArchive = candidate.isBatchArchive || extracted.isArchive
-                    )
-                )
-                if (resolvedList.size >= 2) break
-            }
-
-            if (resolvedList.isNotEmpty()) {
-                return CascadeResult.Success(
-                    selected = resolvedList.first(),
-                    alternatives = resolvedList.drop(1),
-                    diagnostics = CascadeDiagnostics(attempted, errors, cfHosts)
-                )
-            }
-            errors[provider.priority] = "Tidak ada tautan MKV 480p/720p/1080p yang berhasil diekstrak"
+        while (idx < activeProviders.size) {
+            val provider = activeProviders[idx++]
+            attempted.add(provider.priority)
+            val outcome = fetchFromProvider(provider, animeTitle, episodeNumber)
+            val resolved = handleProviderOutcome(
+                outcome, cacheKey, qualityOrder, allowBatchFallback, attempted, errors, cfHosts
+            )
+            if (resolved != null) return resolved
         }
 
         return CascadeResult.Failure(
             reason = "Semua 4 sumber (Otakudesu -> Samehadaku -> Oploverz -> Kusonime) gagal menghasilkan MKV 480p/720p/1080p.",
             diagnostics = CascadeDiagnostics(attempted, errors, cfHosts)
         )
+    }
+
+    private fun fetchFromProvider(
+        provider: MkvSourceProvider,
+        animeTitle: String,
+        episodeNumber: Int
+    ): ProviderFetchOutcome {
+        return try {
+            val list = provider.findEpisodeMkvCandidates(animeTitle, episodeNumber, MkvQuality.ALL_DESC.toSet())
+            ProviderFetchOutcome(provider.priority, candidates = list)
+        } catch (cf: CloudflareChallengeException) {
+            ProviderFetchOutcome(provider.priority, cfHost = cf.host, error = cf.message ?: "Cloudflare challenge")
+        } catch (e: Exception) {
+            SourceCircuitBreaker.recordFailure(provider.priority)
+            ProviderFetchOutcome(provider.priority, error = e.message ?: e::class.java.simpleName)
+        }
+    }
+
+    private fun handleProviderOutcome(
+        outcome: ProviderFetchOutcome,
+        cacheKey: String,
+        qualityOrder: List<MkvQuality>,
+        allowBatchFallback: Boolean,
+        attempted: List<SourcePriority>,
+        errors: MutableMap<SourcePriority, String>,
+        cfHosts: MutableSet<String>
+    ): CascadeResult.Success? {
+        if (outcome.cfHost != null) {
+            cfHosts.add(outcome.cfHost)
+        }
+        if (outcome.error != null) {
+            errors[outcome.source] = outcome.error
+            return null
+        }
+        if (outcome.candidates.isNotEmpty()) {
+            SourceCircuitBreaker.recordSuccess(outcome.source)
+            putRawCache(cacheKey, outcome.candidates, System.currentTimeMillis())
+        }
+        val usable = rankCandidates(outcome.candidates, qualityOrder, allowBatchFallback)
+        val resolvedList = raceExtractCandidates(usable, maxResults = 2)
+        if (resolvedList.isNotEmpty()) {
+            return CascadeResult.Success(
+                selected = resolvedList.first(),
+                alternatives = resolvedList.drop(1),
+                diagnostics = CascadeDiagnostics(attempted, errors, cfHosts)
+            )
+        }
+        errors[outcome.source] = "Tidak ada tautan MKV 480p/720p/1080p yang berhasil diekstrak"
+        return null
+    }
+
+    private fun putRawCache(cacheKey: String, candidates: List<RawMkvCandidate>, nowMs: Long) {
+        synchronized(rawCache) {
+            if (rawCache.size > 64) rawCache.clear()
+            rawCache[cacheKey] = CachedEpisodeCandidates(nowMs, candidates)
+        }
+    }
+
+    private fun rankCandidates(
+        candidates: List<RawMkvCandidate>,
+        qualityOrder: List<MkvQuality>,
+        allowBatchFallback: Boolean
+    ): List<RawMkvCandidate> {
+        return candidates
+            .filter { allowBatchFallback || !it.isBatchArchive }
+            .sortedWith(
+                compareBy<RawMkvCandidate> { qualityOrder.indexOf(it.quality) }
+                    .thenByDescending { EndpointHealthScorer.score(it.hosterLabel) }
+                    .thenBy { HosterFilter.rank(it.hosterLabel, it.rawUrl) }
+            )
+    }
+
+    private fun raceExtractCandidates(
+        candidates: List<RawMkvCandidate>,
+        maxResults: Int = 2
+    ): List<ResolvedMkvMedia> {
+        val batch = candidates.take(6)
+        if (batch.isEmpty()) return emptyList()
+        val cs = ExecutorCompletionService<ResolvedMkvMedia?>(sharedExtractionPool)
+        val futures = ArrayList<Future<ResolvedMkvMedia?>>(batch.size)
+        val results = mutableListOf<ResolvedMkvMedia>()
+        try {
+            for (candidate in batch) {
+                futures.add(
+                    cs.submit {
+                        runCatching {
+                            val finalUrl = unshortener.unshorten(candidate.rawUrl, candidate.pageReferer, maxHops = 5)
+                            val media = extractorRegistry.extract(finalUrl, candidate.pageReferer)
+                            if (media == null) {
+                                EndpointHealthScorer.recordFailure(candidate.hosterLabel)
+                                return@runCatching null
+                            }
+                            if (!media.isArchive && !extractorRegistry.verifyPlayableMedia(media)) {
+                                EndpointHealthScorer.recordFailure(media.hoster)
+                                return@runCatching null
+                            }
+                            EndpointHealthScorer.recordSuccess(media.hoster)
+                            ResolvedMkvMedia(
+                                source = candidate.source,
+                                quality = candidate.quality,
+                                hoster = media.hoster,
+                                directUrl = media.directUrl,
+                                referer = media.referer,
+                                supportsRange = media.supportsRange,
+                                sizeLabel = candidate.sizeLabel,
+                                isBatchArchive = candidate.isBatchArchive || media.isArchive
+                            )
+                        }.getOrNull()
+                    }
+                )
+            }
+            val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(12L)
+            repeat(batch.size) {
+                val remainingNs = deadlineNs - System.nanoTime()
+                if (remainingNs <= 0L) return@repeat
+                val fut = runCatching { cs.poll(remainingNs, TimeUnit.NANOSECONDS) }.getOrNull() ?: return@repeat
+                val item = runCatching { fut.get() }.getOrNull()
+                if (item != null) {
+                    results.add(item)
+                    if (results.size >= maxResults) return@repeat
+                }
+            }
+        } finally {
+            futures.forEach { if (!it.isDone) it.cancel(true) }
+        }
+        return results
+    }
+
+    companion object {
+        private const val RAW_CACHE_TTL_MS = 20L * 60L * 1000L
+        private const val HEDGE_DELAY_MS = 1_200L
+
+        private val extractSeq = AtomicInteger(1)
+        private val sharedExtractionPool: ExecutorService = Executors.newFixedThreadPool(4) { r ->
+            Thread(r, "milkglass-extract-${extractSeq.getAndIncrement()}").apply {
+                isDaemon = true
+            }
+        }
+
+        private val providerSeq = AtomicInteger(1)
+        private val sharedProviderPool: ExecutorService = Executors.newFixedThreadPool(4) { r ->
+            Thread(r, "milkglass-provider-${providerSeq.getAndIncrement()}").apply {
+                isDaemon = true
+            }
+        }
     }
 }

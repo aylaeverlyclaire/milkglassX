@@ -1,5 +1,6 @@
 package com.milkglass.app.core.remote
 
+import id.my.milkglass.EngineHttpTextClient
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -18,11 +19,14 @@ interface SkipSource {
     suspend fun load(malId: Int, episode: Int): SkipTimes?
 }
 
-class AniSkipSource(private val timeoutMs: Int = 10_000) : SkipSource {
+class AniSkipSource(
+    private val timeoutMs: Int = 10_000,
+    private val httpClient: EngineHttpTextClient? = null,
+) : SkipSource {
     override suspend fun load(malId: Int, episode: Int): SkipTimes? {
         if (malId <= 0 || episode <= 0) return SkipTimes.NONE
         val url = "https://api.aniskip.com/v2/skip-times/$malId/$episode?types=op&types=ed&episodeLength=0"
-        return httpGetJson(url, timeoutMs, notFound = SkipTimes.NONE, parse = ::parseAniSkip)
+        return httpGetJson(url, timeoutMs, notFound = SkipTimes.NONE, httpClient = httpClient, parse = ::parseAniSkip)
     }
 }
 

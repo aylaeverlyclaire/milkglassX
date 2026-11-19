@@ -4,6 +4,7 @@ import { catalogRoutes } from './routes/catalog.routes';
 import { systemRoutes } from './routes/system.routes';
 import { ingestRoutes } from './routes/ingest.routes';
 import { authRoutes } from './routes/auth.routes';
+import { cfRoutes } from './routes/cf.routes';
 import { aggregateSourceHealthCron } from './services/health.service';
 import { syncAniListCatalog } from './services/anilist.service';
 
@@ -13,6 +14,8 @@ export interface AppBindings {
   JWT_SECRET: string;
   GOOGLE_CLIENT_ID: string;
   MASTER_APP_SECRET?: string;
+  CF_HANDLER_URL?: string;
+  CF_HANDLER_TOKEN?: string;
 }
 
 const app = new Hono<{ Bindings: AppBindings }>();
@@ -35,6 +38,7 @@ app.notFound((c) => {
 });
 
 app.route('/v1/catalog', catalogRoutes);
+app.route('/v1/cf', cfRoutes);
 app.route('/v1', systemRoutes);
 app.route('/v1/internal', ingestRoutes);
 app.route('/v1', authRoutes);
@@ -42,7 +46,6 @@ app.route('/v1', authRoutes);
 export default {
   fetch: app.fetch,
 
-  
   async scheduled(event: ScheduledEvent, env: AppBindings, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       (async () => {

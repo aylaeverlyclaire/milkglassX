@@ -22,7 +22,8 @@ data class IndexedAnimeEntry(
 class SourceAvailabilityIndex(
     context: Context?,
     private val clients: IsolatedHttpClients = IsolatedHttpClients(context),
-    private val slugCache: SourceSlugCache = SourceSlugCache(context)
+    private val slugCache: SourceSlugCache = SourceSlugCache(context),
+    private val baseUrlProvider: (SourcePriority) -> String = { it.defaultBaseUrl }
 ) {
     private val prefs: SharedPreferences? = context?.applicationContext
         ?.getSharedPreferences("milkglass_availability_index", Context.MODE_PRIVATE)
@@ -57,16 +58,19 @@ class SourceAvailabilityIndex(
 
         val executor = Executors.newFixedThreadPool(4)
         val collected = mutableListOf<IndexedAnimeEntry>()
-        val futures = listOf(
-            executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchOtakudesuIndex() }.getOrDefault(emptyList()) },
-            executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchSamehadakuIndex() }.getOrDefault(emptyList()) },
-            executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchOploverzIndex() }.getOrDefault(emptyList()) },
-            executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchKusonimeIndex() }.getOrDefault(emptyList()) }
-        )
-        for (f in futures) {
-            runCatching { f.get(20, TimeUnit.SECONDS) }.getOrNull()?.let { collected.addAll(it) }
+        try {
+            val futures = listOf(
+                executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchOtakudesuIndex() }.getOrDefault(emptyList()) },
+                executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchSamehadakuIndex() }.getOrDefault(emptyList()) },
+                executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchOploverzIndex() }.getOrDefault(emptyList()) },
+                executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchKusonimeIndex() }.getOrDefault(emptyList()) }
+            )
+            for (f in futures) {
+                runCatching { f.get(20, TimeUnit.SECONDS) }.getOrNull()?.let { collected.addAll(it) }
+            }
+        } finally {
+            executor.shutdownNow()
         }
-        executor.shutdownNow()
 
         if (collected.size >= MIN_VALID_ENTRIES) {
             applyEntries(collected)
@@ -131,7 +135,7 @@ class SourceAvailabilityIndex(
     }
 
     private fun fetchOtakudesuIndex(): List<IndexedAnimeEntry> {
-        val base = SourcePriority.OTAKUDESU.defaultBaseUrl
+        val base = baseUrlProvider(SourcePriority.OTAKUDESU).trimEnd('/')
         val html = fetchHtml("$base/anime-list/", "$base/") ?: return emptyList()
         val doc = Jsoup.parse(html, base)
         return doc.select("a.hodebgst[href], .jdlbar ul li a[href]").mapNotNull { a ->
@@ -140,7 +144,7 @@ class SourceAvailabilityIndex(
     }
 
     private fun fetchSamehadakuIndex(): List<IndexedAnimeEntry> {
-        val base = SourcePriority.SAMEHADAKU.defaultBaseUrl
+        val base = baseUrlProvider(SourcePriority.SAMEHADAKU).trimEnd('/')
         val html = fetchHtml("$base/daftar-anime-2/?list", "$base/") ?: return emptyList()
         val doc = Jsoup.parse(html, base)
         return doc.select(".listpst a[href], .animposx a[href], .jdlbar a[href]").mapNotNull { a ->
@@ -150,7 +154,7 @@ class SourceAvailabilityIndex(
     }
 
     private fun fetchOploverzIndex(): List<IndexedAnimeEntry> {
-        val base = SourcePriority.OPLOVERZ.defaultBaseUrl
+        val base = baseUrlProvider(SourcePriority.OPLOVERZ).trimEnd('/')
         val html = fetchHtml("$base/anime/list-mode/", "$base/")
         val htmlList = if (!html.isNullOrBlank()) {
             val doc = Jsoup.parse(html, base)
@@ -178,7 +182,7 @@ class SourceAvailabilityIndex(
     }
 
     private fun fetchKusonimeIndex(): List<IndexedAnimeEntry> {
-        val base = SourcePriority.KUSONIME.defaultBaseUrl
+        val base = baseUrlProvider(SourcePriority.KUSONIME).trimEnd('/')
         val html = fetchHtml("$base/list-anime-batch-sub-indo/", "$base/") ?: return emptyList()
         val doc = Jsoup.parse(html, base)
         return doc.select("#abtext a[href], .jdlbar a[href]").mapNotNull { a ->

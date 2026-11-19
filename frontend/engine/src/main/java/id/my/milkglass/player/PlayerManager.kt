@@ -17,11 +17,11 @@ import androidx.media3.database.DatabaseProvider
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -29,6 +29,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
+import id.my.milkglass.EngineRuntime
 import id.my.milkglass.resolver.LocalStreamSession
 import id.my.milkglass.resolver.ResolvedStream
 import id.my.milkglass.resolver.StreamResolver
@@ -97,17 +98,24 @@ sealed class PlayerState {
 }
 
 object MPVLibBridge {
+    private val mpvClass: Class<*>? by lazy {
+        runCatching { Class.forName("is.xyz.mpv.MPVLib") }.getOrNull()
+    }
+
+    val isAvailable: Boolean
+        get() = mpvClass != null
+
     fun setOptionString(name: String, value: String) {
+        val clazz = mpvClass ?: return
         runCatching {
-            val clazz = Class.forName("is.xyz.mpv.MPVLib")
             val method = clazz.getMethod("setOptionString", String::class.java, String::class.java)
             method.invoke(null, name, value)
         }
     }
 
     fun command(cmd: Array<String>) {
+        val clazz = mpvClass ?: return
         runCatching {
-            val clazz = Class.forName("is.xyz.mpv.MPVLib")
             val method = clazz.getMethod("command", Array<String>::class.java)
             method.invoke(null, cmd as Any)
         }
@@ -120,12 +128,16 @@ class PlayerManager(
     private val backendBaseUrl: String = StreamResolver.DEFAULT_BACKEND_BASE_URL,
     private val masterAppSecret: ByteArray = ByteArray(0),
     private val authTokenProvider: () -> String? = { null },
-    private val resolver: StreamResolver = StreamResolver(
-        context = context,
-        backendBaseUrl = backendBaseUrl,
-        masterAppSecret = masterAppSecret,
-        authTokenProvider = authTokenProvider
-    )
+    private val resolver: StreamResolver = if (backendBaseUrl == StreamResolver.DEFAULT_BACKEND_BASE_URL) {
+        EngineRuntime.get(context).streamResolver
+    } else {
+        StreamResolver(
+            context = context,
+            backendBaseUrl = backendBaseUrl,
+            masterAppSecret = masterAppSecret,
+            authTokenProvider = authTokenProvider
+        )
+    }
 ) {
     private var exoPlayer: ExoPlayer? = null
     private var trackSelector: DefaultTrackSelector? = null
@@ -336,7 +348,9 @@ class PlayerManager(
                     )
                 }
 
-                configureMpvForSequentialPipe(session.localHttpUrl)
+                if (MPVLibBridge.isAvailable) {
+                    configureMpvForSequentialPipe(session.localHttpUrl)
+                }
                 prepareMedia(
                     mediaUrl = session.localHttpUrl,
                     headers = emptyMap(),
@@ -414,12 +428,10 @@ class PlayerManager(
         cacheKey: String?
     ) {
         val playerInstance = exoPlayer ?: return
-        val httpFactory = DefaultHttpDataSource.Factory()
+        val sharedOkHttp = EngineRuntime.get(context).clients.mediaAndApiClient
+        val httpFactory = OkHttpDataSource.Factory(sharedOkHttp)
             .setUserAgent(headers["User-Agent"] ?: DEFAULT_USER_AGENT)
             .setDefaultRequestProperties(headers)
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(20_000)
 
         val upstreamFactory = DefaultDataSource.Factory(context, httpFactory)
         val isLocalFile = mediaUrl.startsWith("file://", ignoreCase = true)

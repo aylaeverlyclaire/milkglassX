@@ -1,5 +1,6 @@
 package com.milkglass.app.core.remote
 
+import id.my.milkglass.EngineHttpTextClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -15,7 +16,6 @@ import kotlin.coroutines.cancellation.CancellationException
 data class AniListExtras(val recommendedIds: List<Int>, val airingAtMs: Map<Int, Long>)
 
 interface AniListExtrasSource {
-    
     suspend fun load(anilistId: Int): AniListExtras?
 }
 
@@ -23,9 +23,20 @@ private const val EXTRAS_QUERY = "query(\$id:Int){Media(id:\$id,type:ANIME){" +
     "recommendations(sort:RATING_DESC,perPage:15){nodes{rating mediaRecommendation{id}}}" +
     "airingSchedule(notYetAired:true,perPage:50){nodes{episode airingAt}}}}"
 
-class AniListExtrasHttpSource(private val timeoutMs: Int = 10_000) : AniListExtrasSource {
+class AniListExtrasHttpSource(
+    private val timeoutMs: Int = 10_000,
+    private val httpClient: EngineHttpTextClient? = null,
+) : AniListExtrasSource {
     override suspend fun load(anilistId: Int): AniListExtras? = withContext(Dispatchers.IO) {
         try {
+            val body = "{\"query\":\"" + EXTRAS_QUERY.replace("\\", "\\\\").replace("\"", "\\\"") +
+                "\",\"variables\":{\"id\":$anilistId}}"
+            if (httpClient != null) {
+                val resp = httpClient.postJson("https://graphql.anilist.co", body)
+                if (resp.code == 404) return@withContext AniListExtras(emptyList(), emptyMap())
+                if (resp.code !in 200..299) return@withContext null
+                return@withContext parseAniListExtras(resp.body)
+            }
             val conn = URL("https://graphql.anilist.co").openConnection() as HttpURLConnection
             try {
                 conn.connectTimeout = timeoutMs
@@ -34,8 +45,6 @@ class AniListExtrasHttpSource(private val timeoutMs: Int = 10_000) : AniListExtr
                 conn.doOutput = true
                 conn.setRequestProperty("Content-Type", "application/json")
                 conn.setRequestProperty("Accept", "application/json")
-                val body = "{\"query\":\"" + EXTRAS_QUERY.replace("\\", "\\\\").replace("\"", "\\\"") +
-                    "\",\"variables\":{\"id\":$anilistId}}"
                 conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
                 val code = conn.responseCode
                 if (code == 404) return@withContext AniListExtras(emptyList(), emptyMap())
@@ -57,7 +66,7 @@ internal fun parseAniListExtras(json: String): AniListExtras? {
     val media = ((root["data"] as? JsonObject)?.get("Media")) as? JsonObject ?: return AniListExtras(emptyList(), emptyMap())
     fun nodes(key: String): List<JsonObject> =
         (((media[key] as? JsonObject)?.get("nodes")) as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
-    
+
     val rec = nodes("recommendations")
         .filter { ((it["rating"] as? JsonPrimitive)?.doubleOrNull ?: 0.0) > 0.0 }
         .mapNotNull { ((it["mediaRecommendation"] as? JsonObject)?.get("id") as? JsonPrimitive)?.intOrNull }

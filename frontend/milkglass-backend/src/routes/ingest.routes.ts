@@ -8,7 +8,11 @@ import {
   ensureAnimeExistsFastInD1,
   syncAniListCatalogDetailed,
 } from '../services/anilist.service';
-import { purgeEdgeCacheForIngest, purgeHomeCache } from '../middleware/edgeCache';
+import {
+  purgeEdgeCacheForIngest,
+  purgeHomeCache,
+  purgeSourcesCache,
+} from '../middleware/edgeCache';
 import { AppBindings } from '../index';
 
 export const ingestRoutes = new Hono<{ Bindings: AppBindings }>();
@@ -59,7 +63,6 @@ export function isSafeHttpsUrlForType(
     if (u.protocol !== 'https:') return false;
     const host = u.hostname.toLowerCase();
 
-    
     if (
       host === 'localhost' ||
       host.endsWith('.local') ||
@@ -264,7 +267,10 @@ ingestRoutes.post('/sync-anilist', async (c) => {
 });
 
 ingestRoutes.post('/catalog-import', async (c) => {
-  const body = await c.req.json().catch(() => null) as { media?: unknown; scope?: unknown } | null;
+  const body = (await c.req.json().catch(() => null)) as {
+    media?: unknown;
+    scope?: unknown;
+  } | null;
   if (!body || !Array.isArray(body.media) || body.media.length === 0 || body.media.length > 100) {
     return c.json({ status: 'error', message: 'media harus array 1-100 item.' }, 400);
   }
@@ -281,21 +287,24 @@ ingestRoutes.post('/catalog-import', async (c) => {
 });
 
 const sourceDomainSchema = z.object({
+  source: z.enum(['otakudesu', 'samehadaku', 'oploverz', 'kusonime']).default('otakudesu'),
   base_url: z.string().url().refine((u) => u.startsWith('https://'), {
     message: 'Harus HTTPS',
   }),
 });
 
 ingestRoutes.post('/source-domain', zValidator('json', sourceDomainSchema), async (c) => {
-  const { base_url } = c.req.valid('json');
+  const { source, base_url } = c.req.valid('json');
+  const key = `${source}_base_url`;
   const cleanUrl = base_url.trim().replace(/\/+$/, '');
   const now = Math.floor(Date.now() / 1000);
   await c.env.DB.prepare(
     `INSERT INTO catalog_meta (key, value, updated_at)
-     VALUES ('otakudesu_base_url', ?1, ?2)
+     VALUES (?1, ?2, ?3)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
   )
-    .bind(cleanUrl, now)
+    .bind(key, cleanUrl, now)
     .run();
-  return c.json({ status: 'ok', key: 'otakudesu_base_url', base_url: cleanUrl });
+  await purgeSourcesCache(c.req.url);
+  return c.json({ status: 'ok', source, key, base_url: cleanUrl });
 });

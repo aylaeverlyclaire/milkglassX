@@ -40,7 +40,9 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.foundation.ScrollState
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import id.my.milkglass.EngineRuntime
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.flow.first
 import com.milkglass.app.ui.common.ArtBackdrop
@@ -102,6 +104,13 @@ fun DetailScreen(ctl: AppController, id: Int) {
     val accent = androidx.compose.runtime.remember(a.id, c.surface) { accentFor(a, c.surface) }
     LaunchedEffect(a.id) { ctl.loadEpisodeMeta(a) }
     LaunchedEffect(a.id) { ctl.loadExtras(a) }
+    val detailCtx = LocalContext.current.applicationContext
+    LaunchedEffect(a.id, resume?.episode) {
+        val targetEp = resume?.episode ?: 1
+        if (ctl.online && ctl.episodeAccess(a, targetEp) == Access.Ok) {
+            EngineRuntime.get(detailCtx).prefetchEpisode(a.title, a.romaji, targetEp)
+        }
+    }
 
     Column(Modifier.fillMaxSize().background(c.surface)) {
         TopBar("", bare = true, leading = { MilkIconButton(MilkIcons.Back, { ctl.goBack() }) }) {

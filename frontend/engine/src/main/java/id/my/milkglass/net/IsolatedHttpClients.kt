@@ -3,6 +3,7 @@ package id.my.milkglass.net
 import android.content.Context
 import android.webkit.CookieManager
 import android.webkit.WebSettings
+import okhttp3.ConnectionPool
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.Dns
@@ -17,6 +18,7 @@ import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.UnknownHostException
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -26,6 +28,11 @@ class CloudflareChallengeException(
     val targetUrl: String,
     message: String = "Verifikasi Cloudflare diperlukan untuk $host"
 ) : IOException(message)
+
+data class RemoteClearance(
+    val cookies: Map<String, String>,
+    val userAgent: String
+)
 
 object WebViewUserAgentProvider {
     private const val FALLBACK_UA =
@@ -53,6 +60,8 @@ class WebViewCookieBridge(
     private val unreplayablePrefixes: Set<String> = setOf("cf_chl_")
 ) : CookieJar {
 
+    private val memoryOverrides = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
+
     private fun managerOrNull(): CookieManager? =
         runCatching { CookieManager.getInstance() }.getOrNull()
 
@@ -62,11 +71,20 @@ class WebViewCookieBridge(
     }
 
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
-        val raw = managerOrNull()?.getCookie(url.toString()) ?: return emptyList()
-        if (raw.isBlank()) return emptyList()
-        return raw.split(';')
-            .mapNotNull { Cookie.parse(url, it.trim()) }
-            .filterNot { isUnreplayable(it.name) }
+        val merged = linkedMapOf<String, Cookie>()
+        val raw = managerOrNull()?.getCookie(url.toString()).orEmpty()
+        if (raw.isNotBlank()) {
+            raw.split(';')
+                .mapNotNull { Cookie.parse(url, it.trim()) }
+                .filterNot { isUnreplayable(it.name) }
+                .forEach { merged[it.name] = it }
+        }
+        memoryOverrides[url.host.lowercase()]?.forEach { (name, value) ->
+            if (!isUnreplayable(name)) {
+                Cookie.parse(url, "$name=$value")?.let { merged[it.name] = it }
+            }
+        }
+        return merged.values.toList()
     }
 
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
@@ -78,12 +96,29 @@ class WebViewCookieBridge(
         manager.flush()
     }
 
+    fun injectCookies(url: HttpUrl, cookies: Map<String, String>) {
+        if (cookies.isEmpty()) return
+        val hostMap = memoryOverrides.computeIfAbsent(url.host.lowercase()) { ConcurrentHashMap() }
+        val manager = managerOrNull()
+        val urlStr = url.toString()
+        cookies.forEach { (name, value) ->
+            if (name.isNotBlank() && !isUnreplayable(name)) {
+                hostMap[name] = value
+                manager?.setCookie(urlStr, "$name=$value; Path=/; Secure")
+            }
+        }
+        manager?.flush()
+    }
+
     fun hasClearance(url: String): Boolean {
         val raw = managerOrNull()?.getCookie(url).orEmpty()
-        return raw.contains("cf_clearance=")
+        if (raw.contains("cf_clearance=")) return true
+        val host = runCatching { url.toHttpUrl().host.lowercase() }.getOrNull() ?: return false
+        return memoryOverrides[host]?.containsKey("cf_clearance") == true
     }
 
     fun clearHostCookies(url: HttpUrl) {
+        memoryOverrides.remove(url.host.lowercase())
         val manager = managerOrNull() ?: return
         val raw = manager.getCookie(url.toString()) ?: return
         raw.split(';').forEach { entry ->
@@ -130,7 +165,13 @@ object CloudflareChallengeCoordinator {
         val finished = runCatching { pending.latch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS) }
             .getOrDefault(false)
         if (!finished) {
-            complete(key, false)
+            synchronized(lock) {
+                if (active[key] === pending) {
+                    active.remove(key)
+                    pending.succeeded = false
+                    pending.latch.countDown()
+                }
+            }
             return false
         }
         return pending.succeeded
@@ -145,7 +186,9 @@ object CloudflareChallengeCoordinator {
 }
 
 class CloudflareInterceptor(
-    private val cookieBridge: WebViewCookieBridge
+    private val cookieBridge: WebViewCookieBridge,
+    private val remoteSolver: ((host: String, url: String) -> RemoteClearance?)? = null,
+    private val onUserAgentOverride: ((host: String, userAgent: String) -> Unit)? = null
 ) : Interceptor {
 
     private fun isCloudflareChallenge(response: Response): Boolean {
@@ -166,7 +209,32 @@ class CloudflareInterceptor(
         response.close()
         cookieBridge.clearHostCookies(request.url)
 
-        val verified = CloudflareChallengeCoordinator.verify(host, urlStr)
+        // Fast path: try automated remote cf-handler (Edge-cached ~20ms or headless Brave pool)
+        val remote = runCatching { remoteSolver?.invoke(host, urlStr) }.getOrNull()
+        if (remote != null && remote.cookies.isNotEmpty()) {
+            cookieBridge.injectCookies(request.url, remote.cookies)
+            val retryReq = if (remote.userAgent.isNotBlank()) {
+                onUserAgentOverride?.invoke(host.lowercase(), remote.userAgent)
+                request.newBuilder().header("User-Agent", remote.userAgent).build()
+            } else {
+                request
+            }
+            val retryResp = chain.proceed(retryReq)
+            if (!isCloudflareChallenge(retryResp)) {
+                return retryResp
+            }
+            retryResp.close()
+            cookieBridge.clearHostCookies(request.url)
+        }
+
+        // Fallback path: interactive WebView verification overlay
+        val verified = try {
+            CloudflareChallengeCoordinator.verify(host, urlStr)
+        } catch (e: IOException) {
+            throw e
+        } catch (e: Exception) {
+            throw IOException("Gagal menjalankan verifikasi Cloudflare untuk $host", e)
+        }
         if (!verified) {
             throw CloudflareChallengeException(host, urlStr)
         }
@@ -178,25 +246,49 @@ class CloudflareDohDns(
     private val dohEndpoint: String = "https://1.1.1.1/dns-query"
 ) : Dns {
     private val cache = ConcurrentHashMap<String, Pair<Long, List<InetAddress>>>()
+    private val inFlight = ConcurrentHashMap<String, CompletableFuture<List<InetAddress>>>()
     private val dohClient = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
+        .connectionPool(ConnectionPool(4, 5, TimeUnit.MINUTES))
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(3, TimeUnit.SECONDS)
+        .callTimeout(4, TimeUnit.SECONDS)
         .build()
 
     override fun lookup(hostname: String): List<InetAddress> {
-        if (hostname == "127.0.0.1" || hostname == "localhost" || hostname == "1.1.1.1") {
+        val host = hostname.lowercase()
+        if (host == "127.0.0.1" || host == "localhost" || host == "1.1.1.1") {
             return Dns.SYSTEM.lookup(hostname)
         }
         val now = System.currentTimeMillis()
-        cache[hostname]?.let { (expiresAt, addrs) ->
+        cache[host]?.let { (expiresAt, addrs) ->
             if (expiresAt > now && addrs.isNotEmpty()) return addrs
         }
-        val resolved = runCatching { resolveViaDoh(hostname) }.getOrDefault(emptyList())
-        if (resolved.isNotEmpty()) {
-            cache[hostname] = (now + 300_000L) to resolved
-            return resolved
+
+        val mine = CompletableFuture<List<InetAddress>>()
+        val existing = inFlight.putIfAbsent(host, mine)
+        if (existing != null) {
+            val shared = runCatching { existing.get(4, TimeUnit.SECONDS) }.getOrDefault(emptyList())
+            if (shared.isNotEmpty()) return shared
+            return Dns.SYSTEM.lookup(hostname)
         }
-        return Dns.SYSTEM.lookup(hostname)
+
+        return try {
+            val resolved = runCatching { resolveViaDoh(host) }.getOrDefault(emptyList())
+            if (resolved.isNotEmpty()) {
+                cache[host] = (System.currentTimeMillis() + 300_000L) to resolved
+                mine.complete(resolved)
+                resolved
+            } else {
+                val fallback = runCatching { Dns.SYSTEM.lookup(hostname) }.getOrDefault(emptyList())
+                mine.complete(fallback)
+                if (fallback.isNotEmpty()) fallback else throw UnknownHostException(hostname)
+            }
+        } catch (e: UnknownHostException) {
+            mine.complete(emptyList())
+            throw e
+        } finally {
+            inFlight.remove(host, mine)
+        }
     }
 
     private fun resolveViaDoh(hostname: String): List<InetAddress> {
@@ -260,45 +352,132 @@ object PublicIpGuard {
     }
 }
 
+class CrossOriginRefererInterceptor : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val originalHost = chain.call().request().url.host
+        val hop = chain.request()
+        val cleaned = if (hop.header("Referer") != null && hop.url.host != originalHost) {
+            hop.newBuilder().removeHeader("Referer").build()
+        } else {
+            hop
+        }
+        return chain.proceed(cleaned)
+    }
+}
+
+class UncaughtExceptionInterceptor : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        return try {
+            chain.proceed(chain.request())
+        } catch (e: IOException) {
+            throw e
+        } catch (e: Exception) {
+            throw IOException(e)
+        }
+    }
+}
+
+class HostRateLimitInterceptor(
+    private val maxPermitsPerWindow: Int = 4,
+    private val windowMs: Long = 1000L
+) : Interceptor {
+    private val hostQueues = ConcurrentHashMap<String, ArrayDeque<Long>>()
+
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val call = chain.call()
+        if (call.isCanceled()) throw IOException("Canceled")
+        val host = chain.request().url.host.lowercase()
+        val queue = hostQueues.computeIfAbsent(host) { ArrayDeque() }
+
+        while (true) {
+            val sleepMs = synchronized(queue) {
+                val now = System.nanoTime() / 1_000_000L
+                val cutoff = now - windowMs
+                while (queue.isNotEmpty() && queue.first() <= cutoff) {
+                    queue.removeFirst()
+                }
+                if (queue.size < maxPermitsPerWindow) {
+                    queue.addLast(now)
+                    0L
+                } else {
+                    (queue.first() + windowMs - now).coerceAtLeast(10L)
+                }
+            }
+            if (sleepMs == 0L) break
+            if (call.isCanceled()) throw IOException("Canceled")
+            try {
+                Thread.sleep(sleepMs)
+            } catch (e: InterruptedException) {
+                throw IOException(e)
+            }
+        }
+        return chain.proceed(chain.request())
+    }
+}
+
 class IsolatedHttpClients(
     context: Context?,
     val dns: Dns = CloudflareDohDns(),
-    val cookieBridge: WebViewCookieBridge = WebViewCookieBridge()
+    val cookieBridge: WebViewCookieBridge = WebViewCookieBridge(),
+    remoteClearanceSolver: ((host: String, url: String) -> RemoteClearance?)? = null
 ) {
     val webViewUserAgent: String = WebViewUserAgentProvider.resolve(context)
 
+    private val sharedConnectionPool = ConnectionPool(12, 5, TimeUnit.MINUTES)
+    private val hostUserAgents = ConcurrentHashMap<String, String>()
+
     val sourceClient: OkHttpClient = OkHttpClient.Builder()
         .dns(dns)
+        .connectionPool(sharedConnectionPool)
+        .addInterceptor(UncaughtExceptionInterceptor())
+        .addInterceptor(HostRateLimitInterceptor(maxPermitsPerWindow = 4, windowMs = 1000L))
         .cookieJar(cookieBridge)
         .addInterceptor { chain ->
-            val req = chain.request().newBuilder()
-                .header("User-Agent", webViewUserAgent)
+            val orig = chain.request()
+            val ua = hostUserAgents[orig.url.host.lowercase()] ?: webViewUserAgent
+            val req = orig.newBuilder()
+                .header("User-Agent", ua)
                 .header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
                 .build()
             chain.proceed(req)
         }
-        .addInterceptor(CloudflareInterceptor(cookieBridge))
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
+        .addInterceptor(
+            CloudflareInterceptor(
+                cookieBridge = cookieBridge,
+                remoteSolver = remoteClearanceSolver,
+                onUserAgentOverride = { h, ua -> hostUserAgents[h] = ua }
+            )
+        )
+        .addNetworkInterceptor(CrossOriginRefererInterceptor())
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .callTimeout(18, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
 
     val mediaAndApiClient: OkHttpClient = OkHttpClient.Builder()
         .dns(dns)
+        .connectionPool(sharedConnectionPool)
+        .addInterceptor(UncaughtExceptionInterceptor())
         .addInterceptor { chain ->
-            val req = chain.request().newBuilder()
-                .header("User-Agent", webViewUserAgent)
-                .build()
-            chain.proceed(req)
+            val orig = chain.request()
+            val b = orig.newBuilder()
+            if (orig.header("User-Agent") == null) b.header("User-Agent", webViewUserAgent)
+            if (orig.header("Accept-Language") == null) b.header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
+            chain.proceed(b.build())
         }
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
+        .addNetworkInterceptor(CrossOriginRefererInterceptor())
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
 
     val noRedirectClient: OkHttpClient = mediaAndApiClient.newBuilder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS)
         .followRedirects(false)
         .followSslRedirects(false)
         .build()

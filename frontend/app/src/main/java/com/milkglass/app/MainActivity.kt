@@ -1,6 +1,10 @@
 package com.milkglass.app
 
+import android.content.Context
 import android.graphics.Color as AndroidColor
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -9,27 +13,24 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import com.milkglass.app.core.app.AppController
-import id.my.milkglass.source.SourceAvailabilityIndex
 import com.milkglass.app.core.data.AppData
 import com.milkglass.app.core.design.Milk
-import com.milkglass.app.core.remote.CatalogRepository
-import com.milkglass.app.core.remote.FileCatalogCache
-import com.milkglass.app.core.remote.FileSnapshotStore
-import com.milkglass.app.core.remote.HttpUrlTransport
 import com.milkglass.app.core.design.MilkTheme
 import com.milkglass.app.core.design.ThemeMode
 import com.milkglass.app.core.poster.PosterBitmaps
 import com.milkglass.app.core.poster.PosterStore
+import com.milkglass.app.core.remote.AniListExtrasHttpSource
+import com.milkglass.app.core.remote.AniSkipSource
+import com.milkglass.app.core.remote.AniZipMetaSource
+import com.milkglass.app.core.remote.CatalogRepository
+import com.milkglass.app.core.remote.FileCatalogCache
+import com.milkglass.app.core.remote.FileSnapshotStore
+import com.milkglass.app.core.remote.HttpUrlTransport
 import com.milkglass.app.core.storage.StateStore
 import com.milkglass.app.ui.shell.AppRoot
-import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
+import id.my.milkglass.EngineRuntime
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -40,48 +41,55 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
         val gridOverlay = intent.getBooleanExtra("grid", false)
-        
-        
+
         val loaded = mutableStateOf<Loaded?>(null)
         val appCtx = applicationContext
         val density = resources.displayMetrics.density
         Thread {
+            val runtime = EngineRuntime.get(appCtx)
+            val sharedHttp = runtime.httpTextClient
+            val availabilityIndex = runtime.availabilityIndex
+
+            val warmupThread = Thread {
+                runCatching { runtime.sourceConfig.refreshIfNeeded() }
+                val count = runCatching { availabilityIndex.refreshIfNeeded() }.getOrDefault(0)
+                if (count > 0) {
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed) controller?.notifyAvailabilityUpdated()
+                    }
+                }
+            }.apply { start() }
+
             val data = AppData.load(appCtx)
-            
             val posters = PosterStore(emptyMap())
             PosterBitmaps.prewarm(posters, density)
-            
+
             val repo = CatalogRepository(
-                HttpUrlTransport(), FileCatalogCache(File(cacheDir, "catalog_home.json")),
+                HttpUrlTransport(httpClient = sharedHttp),
+                FileCatalogCache(File(cacheDir, "catalog_home.json")),
                 snapshots = FileSnapshotStore(File(filesDir, "catalog")),
             )
-            val availabilityIndex = SourceAvailabilityIndex(appCtx)
             val c = AppController(
                 data, posters, StateStore(File(filesDir, StateStore.FILE_NAME)),
                 catalogRepo = repo,
                 initialCatalog = repo.cachedSnapshot(),
-                metaSource = com.milkglass.app.core.remote.AniZipMetaSource(),
-                skipSource = com.milkglass.app.core.remote.AniSkipSource(),
-                extrasSource = com.milkglass.app.core.remote.AniListExtrasHttpSource(),
+                metaSource = AniZipMetaSource(httpClient = sharedHttp),
+                skipSource = AniSkipSource(httpClient = sharedHttp),
+                extrasSource = AniListExtrasHttpSource(httpClient = sharedHttp),
                 availabilityChecker = { anime ->
                     availabilityIndex.isAvailable(listOf(anime.romaji, anime.title))
                 },
             )
-            Thread {
-                val count = runCatching { availabilityIndex.refreshIfNeeded() }.getOrDefault(0)
-                if (count > 0) {
-                    runOnUiThread {
-                        if (!isFinishing && !isDestroyed) c.notifyAvailabilityUpdated()
-                    }
-                }
-            }.start()
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 controller = c
                 watchConnectivity(c)
                 loaded.value = Loaded(data, posters, c)
+                if (!warmupThread.isAlive && availabilityIndex.isReady) {
+                    c.notifyAvailabilityUpdated()
+                }
             }
         }.start()
         setContent {
@@ -110,7 +118,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    
     private fun watchConnectivity(controller: AppController) {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         fun isOnline(): Boolean = cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
@@ -124,7 +131,6 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        
         netCallback?.let { cb ->
             runCatching { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(cb) }
         }

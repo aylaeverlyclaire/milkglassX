@@ -1,7 +1,6 @@
 import { Context, Next } from 'hono';
 
 export interface EdgeCacheOptions {
-  
   immutable?: boolean;
 }
 
@@ -52,9 +51,11 @@ export function edgeCache(
 
     const cachedResponse = await cache.match(cacheKey);
     if (cachedResponse) {
-      
       if (etagMatches(c.req.header('If-None-Match'), cachedResponse.headers.get('ETag'))) {
-        return notModified(cachedResponse.headers.get('ETag') as string, cachedResponse.headers.get('Cache-Control'));
+        return notModified(
+          cachedResponse.headers.get('ETag') as string,
+          cachedResponse.headers.get('Cache-Control')
+        );
       }
       const hitHeaders = new Headers(cachedResponse.headers);
       hitHeaders.set('X-Milkglass-Cache', 'HIT');
@@ -66,7 +67,6 @@ export function edgeCache(
 
     await next();
 
-    
     const skipCache = c.res.headers.get('X-Milkglass-NoCache') === '1';
     if (skipCache) {
       const h = new Headers(c.res.headers);
@@ -87,7 +87,6 @@ export function edgeCache(
       mutableHeaders.set('ETag', etag);
       mutableHeaders.set('X-Milkglass-Cache', 'MISS');
 
-      
       c.executionCtx.waitUntil(
         cache.put(cacheKey, new Response(bodyText, { status: 200, headers: mutableHeaders }))
       );
@@ -115,7 +114,7 @@ export async function purgeEdgeCacheForIngest(
       urlsToPurge.map((u) => cache.delete(new Request(u, { method: 'GET' })))
     );
   } catch {
-    
+    // Best-effort purge
   }
 }
 
@@ -129,6 +128,16 @@ export async function purgeHomeCache(requestUrl: string): Promise<void> {
       )
     );
   } catch {
-    
+    // Best-effort purge
+  }
+}
+
+export async function purgeSourcesCache(requestUrl: string): Promise<void> {
+  try {
+    const origin = new URL(requestUrl).origin;
+    const cache = (caches as unknown as { default: Cache }).default;
+    await cache.delete(new Request(`${origin}/v1/catalog/sources`, { method: 'GET' }));
+  } catch {
+    // Best-effort purge
   }
 }

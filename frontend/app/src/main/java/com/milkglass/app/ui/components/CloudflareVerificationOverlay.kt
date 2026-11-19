@@ -4,9 +4,11 @@ import android.annotation.SuppressLint
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.BasicText
-import androidx.compose.foundation.clickable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -43,10 +44,15 @@ fun CloudflareVerificationOverlay(
 
     LaunchedEffect(host, targetUrl) {
         val cookieManager = CookieManager.getInstance()
+        fun extractClearance(raw: String): String? =
+            raw.split(';').map { it.trim() }.firstOrNull { it.startsWith("cf_clearance=") }
+                ?.substringAfter("=")?.takeIf { it.isNotBlank() }
+
+        val initialClearance = extractClearance(cookieManager.getCookie(targetUrl).orEmpty())
         while (!verified) {
             delay(500L)
-            val cookie = cookieManager.getCookie(targetUrl).orEmpty()
-            if (cookie.contains("cf_clearance=")) {
+            val currentClearance = extractClearance(cookieManager.getCookie(targetUrl).orEmpty())
+            if (currentClearance != null && currentClearance != initialClearance) {
                 cookieManager.flush()
                 verified = true
                 CloudflareChallengeCoordinator.complete(host, true)
@@ -57,6 +63,7 @@ fun CloudflareVerificationOverlay(
 
     DisposableEffect(host) {
         onDispose {
+            runCatching { CookieManager.getInstance().flush() }
             if (!verified) {
                 CloudflareChallengeCoordinator.complete(host, false)
             }
@@ -99,6 +106,7 @@ fun CloudflareVerificationOverlay(
                     settings.domStorageEnabled = true
                     settings.allowFileAccess = false
                     settings.allowContentAccess = false
+                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                     webChromeClient = WebChromeClient()
                     webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(

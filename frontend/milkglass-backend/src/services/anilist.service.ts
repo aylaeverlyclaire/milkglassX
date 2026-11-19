@@ -1,6 +1,4 @@
 const ANILIST_GRAPHQL_URL = 'https://graphql.anilist.co';
-const MIN_EPISODE_BYTES = 15 * 1024 * 1024;      
-const MAX_SINGLE_EP_BYTES = 3_950 * 1024 * 1024; 
 
 export type AniListMediaItem = AniListRawMedia;
 
@@ -34,6 +32,32 @@ export interface AniListRawMedia {
     episode?: number | null;
   } | null;
 }
+
+export interface AniListSearchMetadata {
+  id: number;
+  titleEnglish: string;
+  titleRomaji: string;
+  posterUrl: string;
+  bannerUrl: string | null;
+  synopsis: string;
+  episodes: number | null;
+  averageScore: number | null;
+  status: string;
+}
+
+export interface SourceBaseUrls {
+  otakudesu: string;
+  samehadaku: string;
+  oploverz: string;
+  kusonime: string;
+}
+
+export const DEFAULT_SOURCE_BASE_URLS: Readonly<SourceBaseUrls> = {
+  otakudesu: 'https://otakudesu.blog',
+  samehadaku: 'https://v2.samehadaku.how',
+  oploverz: 'https://oploverz.ch',
+  kusonime: 'https://kusonime.com',
+};
 
 const MEDIA_FIELDS = `
   id
@@ -369,306 +393,41 @@ export async function enrichSingleAnimeFromAniListAsync(
       }
     }
   } catch {
-    
+    // Best-effort enrichment
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
-export interface OtakudesuStreamNode {
-  provider: 'pdrain' | 'kfiles';
-  url: string;
-  resolution: '1080p' | '720p' | '480p';
-  bitrate_rank: number;
-  container: 'mkv';
-}
-
-const DEFAULT_OTAKUDESU_BASE_URL = 'https://otakudesu.blog';
-const FALLBACK_OTAKUDESU_CANDIDATES = [
-  'https://otakudesu.or.at',
-  'https://otakudesu.best',
-  'https://otakudesu.blog',
-  'https://otakudesu.cloud',
-];
-
-async function saveOtakudesuBaseUrl(db: D1Database, baseUrl: string): Promise<void> {
-  const now = Math.floor(Date.now() / 1000);
+export async function getSourceBaseUrls(db: D1Database): Promise<SourceBaseUrls> {
+  const resolved: SourceBaseUrls = { ...DEFAULT_SOURCE_BASE_URLS };
   try {
-    await db
+    const { results } = await db
       .prepare(
-        `INSERT INTO catalog_meta (key, value, updated_at)
-         VALUES ('otakudesu_base_url', ?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+        `SELECT key, value FROM catalog_meta
+         WHERE key IN ('otakudesu_base_url', 'samehadaku_base_url', 'oploverz_base_url', 'kusonime_base_url')`
       )
-      .bind(baseUrl, now)
-      .run();
+      .all<{ key: string; value: string }>();
+
+    for (const row of results ?? []) {
+      const clean = (row.value || '').trim().replace(/\/+$/, '');
+      if (!clean.startsWith('https://')) continue;
+      if (row.key === 'otakudesu_base_url') resolved.otakudesu = clean;
+      else if (row.key === 'samehadaku_base_url') resolved.samehadaku = clean;
+      else if (row.key === 'oploverz_base_url') resolved.oploverz = clean;
+      else if (row.key === 'kusonime_base_url') resolved.kusonime = clean;
+    }
   } catch {
+    // Fallback to defaults
   }
+  return resolved;
 }
 
 export async function getOtakudesuBaseUrl(db: D1Database): Promise<string> {
-  try {
-    const row = await db
-      .prepare(`SELECT value FROM catalog_meta WHERE key = 'otakudesu_base_url'`)
-      .first<{ value: string }>();
-    const raw = (row?.value || '').trim().replace(/\/+$/, '');
-    if (raw.startsWith('https://')) return raw;
-  } catch {
-  }
-  return DEFAULT_OTAKUDESU_BASE_URL;
+  return (await getSourceBaseUrls(db)).otakudesu;
 }
 
-async function fetchHtmlWithRedirectCheck(
-  url: string,
-  referer?: string
-): Promise<{ html: string; finalOrigin: string } | null> {
-  try {
-    const res = await fetch(url, {
-      redirect: 'follow',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126.0.0.0 Mobile Safari/537.36',
-        Accept: 'text/html,application/xhtml+xml',
-        ...(referer ? { Referer: referer } : {}),
-      },
-      signal: AbortSignal.timeout(4500),
-    });
-    if (!res.ok) return null;
-    const html = await res.text();
-    const finalOrigin = new URL(res.url).origin;
-    return { html, finalOrigin };
-  } catch {
-    return null;
-  }
-}
-
-async function discoverOtakudesuBaseUrl(db: D1Database, currentBase: string): Promise<string | null> {
-  const candidates = new Set<string>();
-  const ddg = await fetchHtmlWithRedirectCheck('https://html.duckduckgo.com/html/?q=otakudesu+subtitle+indonesia');
-  if (ddg) {
-    const matches = ddg.html.match(/https?:\/\/[a-z0-9.-]*otakudesu[a-z0-9.-]*\.[a-z]{2,}/gi) || [];
-    for (const m of matches) {
-      const normalized = m.replace(/^http:\/\//i, 'https://').replace(/\/+$/, '');
-      if (normalized !== currentBase) candidates.add(normalized);
-    }
-  }
-  for (const fb of FALLBACK_OTAKUDESU_CANDIDATES) {
-    if (fb !== currentBase) candidates.add(fb);
-  }
-
-  for (const cand of Array.from(candidates).slice(0, 4)) {
-    const probe = await fetchHtmlWithRedirectCheck(`${cand}/`);
-    if (probe && /otakudesu/i.test(probe.html)) {
-      await saveOtakudesuBaseUrl(db, probe.finalOrigin);
-      return probe.finalOrigin;
-    }
-  }
-  return null;
-}
-
-function detectResolutionTag(text: string): '1080p' | '720p' | '480p' | null {
-  if (/1080p|fullhd|fhd/i.test(text)) return '1080p';
-  if (/720p|hd/i.test(text)) return '720p';
-  if (/480p|sd/i.test(text)) return '480p';
-  return null;
-}
-
-function rankForNode(provider: 'pdrain' | 'kfiles', res: OtakudesuStreamNode['resolution']): number {
-  const resScore = res === '1080p' ? 400 : res === '720p' ? 300 : 200;
-  const provScore = provider === 'pdrain' ? 20 : 10;
-  return resScore + provScore;
-}
-
-function extractHosterLinksFromHtml(html: string): OtakudesuStreamNode[] {
-  const nodes: OtakudesuStreamNode[] = [];
-  const seen = new Set<string>();
-  const tokenRegex =
-    /(?:\b(mkv|mp4)\s*(1080p|720p|480p|360p|240p)\b|\b(1080p|720p|480p|360p|240p)\s*(mkv|mp4)\b|https?:\/\/(?:pixeldrain\.com\/(?:u|api\/file)\/[A-Za-z0-9_-]+|krakenfiles\.com\/view\/[A-Za-z0-9_-]+(?:\/file\.html)?))/gi;
-
-  let activeFormat: 'mkv' | 'mp4' | null = null;
-  let activeRes: '1080p' | '720p' | '480p' | null = null;
-  let match: RegExpExecArray | null;
-
-  while ((match = tokenRegex.exec(html)) !== null) {
-    if (match[1] && match[2]) {
-      activeFormat = match[1].toLowerCase() === 'mkv' ? 'mkv' : 'mp4';
-      activeRes = detectResolutionTag(match[2]);
-      continue;
-    }
-    if (match[3] && match[4]) {
-      activeFormat = match[4].toLowerCase() === 'mkv' ? 'mkv' : 'mp4';
-      activeRes = detectResolutionTag(match[3]);
-      continue;
-    }
-
-    const url = match[0].replace(/^http:\/\//i, 'https://');
-    if (seen.has(url)) continue;
-
-    let fmt = activeFormat;
-    let res = activeRes;
-    if (!fmt || !res) {
-      const ctxStart = Math.max(0, match.index - 400);
-      const ctxEnd = Math.min(html.length, match.index + match[0].length + 120);
-      const ctx = html.slice(ctxStart, ctxEnd).replace(/<[^>]+>/g, ' ');
-      if (/mkv/i.test(ctx)) fmt = 'mkv';
-      res = detectResolutionTag(ctx);
-    }
-
-    if (fmt !== 'mkv' || !res) continue;
-    seen.add(url);
-
-    const provider: 'pdrain' | 'kfiles' = /pixeldrain\.com/i.test(url) ? 'pdrain' : 'kfiles';
-    nodes.push({
-      provider,
-      url,
-      resolution: res,
-      bitrate_rank: rankForNode(provider, res),
-      container: 'mkv',
-    });
-  }
-
-  return nodes.sort((a, b) => b.bitrate_rank - a.bitrate_rank);
-}
-
-function findAnimeUrlInHtml(html: string, activeOrigin: string): string | null {
-  const escaped = activeOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = html.match(new RegExp(`href=["'](${escaped}/anime/[^"']+)["']`, 'i'))
-    || html.match(/href=["'](https?:\/\/[^"']*otakudesu[^"']*\/anime\/[^"']+)["']/i);
-  return match ? match[1] : null;
-}
-
-function findEpisodeUrlInHtml(html: string, episode: number): string | null {
-  const epUrlMatch = html.match(new RegExp(`href=["']([^"']*episode-${episode}(?:-|/|["'])[^"']*)["']`, 'i'));
-  if (epUrlMatch) return epUrlMatch[1];
-
-  const anchorRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = anchorRegex.exec(html)) !== null) {
-    const text = m[2].replace(/<[^>]+>/g, ' ').trim();
-    if (new RegExp(`\bepisode\s*${episode}\b`, 'i').test(text)) {
-      return m[1];
-    }
-  }
-  return null;
-}
-
-export async function sweepOtakudesuStreams(
-  db: D1Database,
-  titles: string[],
-  episode: number
-): Promise<OtakudesuStreamNode[]> {
-  let baseUrl = await getOtakudesuBaseUrl(db);
-  const uniqueQueries = Array.from(new Set(titles.filter(Boolean))).slice(0, 2);
-
-  for (const query of uniqueQueries) {
-    const searchUrl = `${baseUrl}/?s=${encodeURIComponent(query)}&post_type=anime`;
-    let searchRes = await fetchHtmlWithRedirectCheck(searchUrl, baseUrl);
-    if (!searchRes) {
-      const discovered = await discoverOtakudesuBaseUrl(db, baseUrl);
-      if (!discovered) continue;
-      baseUrl = discovered;
-      searchRes = await fetchHtmlWithRedirectCheck(`${baseUrl}/?s=${encodeURIComponent(query)}&post_type=anime`, baseUrl);
-    }
-    if (!searchRes) continue;
-
-    if (searchRes.finalOrigin !== baseUrl) {
-      baseUrl = searchRes.finalOrigin;
-      await saveOtakudesuBaseUrl(db, baseUrl);
-    }
-
-    const animeUrl = findAnimeUrlInHtml(searchRes.html, baseUrl);
-    if (!animeUrl) continue;
-
-    const animeRes = await fetchHtmlWithRedirectCheck(animeUrl, searchUrl);
-    if (!animeRes) continue;
-
-    const epUrl = findEpisodeUrlInHtml(animeRes.html, episode);
-    if (!epUrl) continue;
-
-    const epRes = await fetchHtmlWithRedirectCheck(epUrl, animeUrl);
-    if (!epRes) continue;
-
-    const nodes = extractHosterLinksFromHtml(epRes.html);
-    if (nodes.length > 0) return nodes;
-  }
-
-  return [];
-}
-
-
-function normalizeTitleTokens(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function extractOtakudesuAnimeMatches(html: string, activeOrigin: string): Array<{ title: string; url: string }> {
-  const results: Array<{ title: string; url: string }> = [];
-  const seen = new Set<string>();
-  const anchorRegex = /<a\s+[^>]*href=["']([^"']*\/anime\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = anchorRegex.exec(html)) !== null) {
-    const url = m[1].trim();
-    const rawTitle = m[2].replace(/<[^>]+>/g, ' ').trim();
-    if (!url.startsWith(activeOrigin) && !/otakudesu/i.test(url)) continue;
-    if (!rawTitle || seen.has(url)) continue;
-    seen.add(url);
-    results.push({ title: normalizeTitleTokens(rawTitle), url });
-  }
-  return results;
-}
-
-export async function crossCheckOtakudesuCatalog(
-  db: D1Database,
-  query: string
-): Promise<Array<{ title: string; url: string }>> {
-  let baseUrl = await getOtakudesuBaseUrl(db);
-  let res = await fetchHtmlWithRedirectCheck(`${baseUrl}/?s=${encodeURIComponent(query)}&post_type=anime`, baseUrl);
-  if (!res) {
-    const discovered = await discoverOtakudesuBaseUrl(db, baseUrl);
-    if (!discovered) return [];
-    baseUrl = discovered;
-    res = await fetchHtmlWithRedirectCheck(`${baseUrl}/?s=${encodeURIComponent(query)}&post_type=anime`, baseUrl);
-  }
-  if (!res) return [];
-  if (res.finalOrigin !== baseUrl) {
-    baseUrl = res.finalOrigin;
-    await saveOtakudesuBaseUrl(db, baseUrl);
-  }
-  return extractOtakudesuAnimeMatches(res.html, baseUrl);
-}
-
-export function matchAnimeAgainstOtakudesu(
-  titles: Array<string | null | undefined>,
-  otakudesuMatches: Array<{ title: string; url: string }>
-): string | null {
-  if (otakudesuMatches.length === 0) return null;
-  for (const raw of titles) {
-    if (!raw) continue;
-    const norm = normalizeTitleTokens(raw);
-    if (norm.length < 3) continue;
-    const hit = otakudesuMatches.find(
-      (m) => m.title.includes(norm) || norm.includes(m.title)
-    );
-    if (hit) return hit.url;
-  }
-  return null;
-}
-
-export function buildHttpCouponRecipe(node: OtakudesuStreamNode, baseUrl: string) {
-  return {
-    mode: 'HTTP_RANGE_PROXY',
-    provider: node.provider,
-    target_url: node.url,
-    referer: baseUrl,
-    resolution: node.resolution,
-    container: node.container,
-    supports_range: true,
-  };
-}
-
-export async function searchAniListMetadata(searchQuery: string): Promise<AniListMediaItem[]> {
+export async function searchAniListMetadata(searchQuery: string): Promise<AniListSearchMetadata[]> {
   const graphqlQuery = `
     query ($search: String) {
       Page(page: 1, perPage: 12) {
@@ -691,6 +450,7 @@ export async function searchAniListMetadata(searchQuery: string): Promise<AniLis
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ query: graphqlQuery, variables: { search: searchQuery } }),
+      signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return [];
     const json = (await res.json()) as {
@@ -727,7 +487,7 @@ export async function searchAniListMetadata(searchQuery: string): Promise<AniLis
   }
 }
 
-export async function fetchTrendingAniList(): Promise<AniListMediaItem[]> {
+export async function fetchTrendingAniList(): Promise<AniListSearchMetadata[]> {
   const graphqlQuery = `
     query {
       Page(page: 1, perPage: 20) {
@@ -750,6 +510,7 @@ export async function fetchTrendingAniList(): Promise<AniListMediaItem[]> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ query: graphqlQuery }),
+      signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return [];
     const json = (await res.json()) as {

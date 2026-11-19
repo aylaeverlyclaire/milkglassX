@@ -10,16 +10,16 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
 import androidx.work.WorkerParameters
+import id.my.milkglass.EngineRuntime
 import id.my.milkglass.net.CloudflareChallengeException
-import id.my.milkglass.net.IsolatedHttpClients
 import id.my.milkglass.net.PublicIpGuard
 import id.my.milkglass.source.CascadeResult
-import id.my.milkglass.source.MkvCascadeResolver
 import id.my.milkglass.source.MkvQuality
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -28,7 +28,10 @@ import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlin.math.min
+import kotlin.random.Random
 
 enum class DownloadDrainOutcome {
     SUCCESS,
@@ -36,7 +39,6 @@ enum class DownloadDrainOutcome {
     BLOCKED_CHALLENGE,
     FAILED_PERMANENT
 }
-
 
 data class MkvDownloadStatus(
     val isRunning: Boolean = false,
@@ -53,6 +55,42 @@ data class MkvDownloadRequest(
     val preferredQuality: MkvQuality = MkvQuality.P1080,
     val allowBatchFallback: Boolean = true
 )
+
+object RetryBackoff {
+    fun nextDelayMs(
+        attempt: Int,
+        baseMs: Long = 800L,
+        maxMs: Long = 15_000L,
+        jitterRatio: Double = 0.25,
+        randomUnit: Double = Random.nextDouble()
+    ): Long {
+        val shift = attempt.coerceIn(0, 10)
+        val exp = min(maxMs, baseMs shl shift)
+        val jitterSpan = (exp * jitterRatio).toLong().coerceAtLeast(1L)
+        val delta = ((randomUnit.coerceIn(0.0, 1.0) * 2.0 - 1.0) * jitterSpan).toLong()
+        return (exp + delta).coerceIn(baseMs / 2, maxMs)
+    }
+}
+
+object EndpointHealthScorer {
+    private val scores = ConcurrentHashMap<String, Int>()
+
+    fun score(hoster: String): Int = scores[hoster.lowercase()] ?: 0
+
+    fun recordSuccess(hoster: String) {
+        val key = hoster.lowercase()
+        scores.compute(key) { _, cur -> ((cur ?: 0) + 2).coerceAtMost(20) }
+    }
+
+    fun recordFailure(hoster: String) {
+        val key = hoster.lowercase()
+        scores.compute(key) { _, cur -> ((cur ?: 0) - 3).coerceAtLeast(-20) }
+    }
+
+    fun reset() {
+        scores.clear()
+    }
+}
 
 object MkvDownloadConcurrency {
     const val MAX_CONCURRENT_DOWNLOADS = 2
@@ -90,7 +128,6 @@ class MkvDownloadManager(
         wm.enqueueUniqueWork(uniqueName, ExistingWorkPolicy.KEEP, workRequest)
         return uniqueName
     }
-
 
     fun observeDownload(uniqueName: String): Flow<MkvDownloadStatus> {
         val wm = workManager ?: return kotlinx.coroutines.flow.flowOf(MkvDownloadStatus())
@@ -150,11 +187,12 @@ class MkvDownloadWorker(
         }
 
         MkvDownloadConcurrency.semaphore.withPermit {
-            val clients = IsolatedHttpClients(applicationContext)
-            val cascade = MkvCascadeResolver(clients)
+            val runtime = EngineRuntime.get(applicationContext)
+            val clients = runtime.clients
+            val cascade = runtime.cascadeResolver
 
-            val resolved = when (val res = cascade.resolve(title, episode, quality, allowBatch)) {
-                is CascadeResult.Success -> res.selected
+            val candidates = when (val res = cascade.resolve(title, episode, quality, allowBatch)) {
+                is CascadeResult.Success -> (listOf(res.selected) + res.alternatives).sortedByDescending { EndpointHealthScorer.score(it.hoster) }
                 is CascadeResult.Failure -> {
                     val outcome = if (res.diagnostics.cloudflareBlockedHosts.isNotEmpty()) {
                         DownloadDrainOutcome.BLOCKED_CHALLENGE
@@ -169,102 +207,120 @@ class MkvDownloadWorker(
                 }
             }
 
-            val host = resolved.directUrl.toHttpUrlOrNull()?.host
-                ?: return@withPermit Result.failure()
-            runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host) }
-                .onFailure { return@withPermit Result.failure() }
-
-            val ext = if (resolved.isBatchArchive) "zip" else "mkv"
-            val dir = File(applicationContext.getExternalFilesDir("downloads") ?: applicationContext.filesDir, slug)
-            if (!dir.exists()) dir.mkdirs()
-            val targetFile = File(dir, "${slug}_ep${episode}_${resolved.quality.label}.$ext")
-            val partFile = File(dir, "${targetFile.name}.part")
-            val existingBytes = if (partFile.exists()) partFile.length() else 0L
-
-            try {
-                val reqBuilder = Request.Builder().url(resolved.directUrl)
-                if (!resolved.referer.isNullOrBlank()) {
-                    reqBuilder.header("Referer", resolved.referer)
-                }
-                if (existingBytes > 0L && resolved.supportsRange) {
-                    reqBuilder.header("Range", "bytes=$existingBytes-")
+            var lastRetryable = false
+            for (resolved in candidates) {
+                val host = resolved.directUrl.toHttpUrlOrNull()?.host ?: continue
+                if (runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host); true }.getOrDefault(false).not()) {
+                    continue
                 }
 
-                clients.mediaAndApiClient.newCall(reqBuilder.build()).execute().use { resp ->
-                    if (resp.code == 403 && resp.header("cf-mitigated") == "challenge") {
-                        return@withPermit Result.failure(
-                            Data.Builder()
-                                .putString(KEY_OUTCOME, DownloadDrainOutcome.BLOCKED_CHALLENGE.name)
-                                .build()
-                        )
+                val ext = if (resolved.isBatchArchive) "zip" else "mkv"
+                val dir = File(applicationContext.getExternalFilesDir("downloads") ?: applicationContext.filesDir, slug)
+                if (!dir.exists()) dir.mkdirs()
+                val targetFile = File(dir, "${slug}_ep${episode}_${resolved.quality.label}.$ext")
+                val partFile = File(dir, "${targetFile.name}.part")
+                val existingBytes = if (partFile.exists()) partFile.length() else 0L
+
+                try {
+                    val reqBuilder = Request.Builder().url(resolved.directUrl)
+                    if (!resolved.referer.isNullOrBlank()) {
+                        reqBuilder.header("Referer", resolved.referer)
                     }
-                    if (!resp.isSuccessful && resp.code != 206) {
-                        return@withPermit if (resp.code in 500..599 || resp.code == 429) {
-                            Result.retry()
-                        } else {
-                            Result.failure(
+                    if (existingBytes > 0L && resolved.supportsRange) {
+                        reqBuilder.header("Range", "bytes=$existingBytes-")
+                    }
+
+                    clients.mediaAndApiClient.newCall(reqBuilder.build()).execute().use { resp ->
+                        if (resp.code == 416 && existingBytes > 0L) {
+                            partFile.delete()
+                            lastRetryable = true
+                            return@use
+                        }
+                        if (resp.code == 403 && resp.header("cf-mitigated") == "challenge") {
+                            return@withPermit Result.failure(
                                 Data.Builder()
-                                    .putString(KEY_OUTCOME, DownloadDrainOutcome.FAILED_PERMANENT.name)
+                                    .putString(KEY_OUTCOME, DownloadDrainOutcome.BLOCKED_CHALLENGE.name)
                                     .build()
                             )
                         }
-                    }
+                        if (!resp.isSuccessful && resp.code != 206) {
+                            if (resp.code in 500..599 || resp.code == 429) lastRetryable = true
+                            return@use
+                        }
 
-                    val append = resp.code == 206 && existingBytes > 0L
-                    val body = resp.body ?: throw IOException("Response body kosong")
-                    val contentLength = body.contentLength()
-                    val totalBytes = if (contentLength > 0) {
-                        if (append) existingBytes + contentLength else contentLength
-                    } else -1L
+                        val append = resp.code == 206 && existingBytes > 0L
+                        val body = resp.body ?: throw IOException("Response body kosong")
+                        val rangeTotal = resp.header("Content-Range")
+                            ?.substringAfter("/", "")
+                            ?.toLongOrNull()
+                        val contentLength = body.contentLength()
+                        val totalBytes = rangeTotal ?: if (contentLength > 0) {
+                            if (append) existingBytes + contentLength else contentLength
+                        } else -1L
 
-                    var downloaded = if (append) existingBytes else 0L
-                    var lastPct = -1
+                        var downloaded = if (append) existingBytes else 0L
+                        var lastPct = -1
 
-                    body.byteStream().use { input ->
-                        FileOutputStream(partFile, append).use { output ->
-                            val buf = ByteArray(64 * 1024)
-                            while (true) {
-                                if (isStopped) throw IOException("Unduhan dihentikan oleh sistem/user")
-                                val read = input.read(buf)
-                                if (read == -1) break
-                                output.write(buf, 0, read)
-                                downloaded += read
-                                if (totalBytes > 0) {
-                                    val pct = ((downloaded * 100L) / totalBytes).toInt().coerceIn(0, 100)
-                                    if (pct != lastPct && (pct % 2 == 0 || pct == 100)) {
-                                        lastPct = pct
-                                        setProgressAsync(
-                                            Data.Builder().putInt(KEY_PROGRESS, pct).build()
-                                        )
+                        body.byteStream().use { input ->
+                            FileOutputStream(partFile, append).use { output ->
+                                val buf = ByteArray(64 * 1024)
+                                while (true) {
+                                    if (isStopped) throw IOException("Unduhan dihentikan oleh sistem/user")
+                                    val read = input.read(buf)
+                                    if (read == -1) break
+                                    output.write(buf, 0, read)
+                                    downloaded += read
+                                    if (totalBytes > 0) {
+                                        val pct = ((downloaded * 100L) / totalBytes).toInt().coerceIn(0, 100)
+                                        if (pct != lastPct && (pct % 2 == 0 || pct == 100)) {
+                                            lastPct = pct
+                                            setProgressAsync(
+                                                Data.Builder().putInt(KEY_PROGRESS, pct).build()
+                                            )
+                                        }
                                     }
                                 }
+                                output.flush()
                             }
-                            output.flush()
                         }
                     }
-                }
 
-                if (targetFile.exists()) targetFile.delete()
-                if (!partFile.renameTo(targetFile)) {
-                    throw IOException("Gagal memindahkan file unduhan final")
+                    if (partFile.exists() && partFile.length() > 1024L) {
+                        if (targetFile.exists()) targetFile.delete()
+                        if (!partFile.renameTo(targetFile)) {
+                            throw IOException("Gagal memindahkan file unduhan final")
+                        }
+                        EndpointHealthScorer.recordSuccess(resolved.hoster)
+                        return@withPermit Result.success(
+                            Data.Builder()
+                                .putString(KEY_OUTCOME, DownloadDrainOutcome.SUCCESS.name)
+                                .putString(KEY_OUTPUT_PATH, targetFile.absolutePath)
+                                .putString(KEY_SOURCE, resolved.source.id)
+                                .putString(KEY_HOSTER, resolved.hoster)
+                                .build()
+                        )
+                    }
+                } catch (_: CloudflareChallengeException) {
+                    return@withPermit Result.failure(
+                        Data.Builder()
+                            .putString(KEY_OUTCOME, DownloadDrainOutcome.BLOCKED_CHALLENGE.name)
+                            .build()
+                    )
+                } catch (_: IOException) {
+                    EndpointHealthScorer.recordFailure(resolved.hoster)
+                    lastRetryable = true
+                    delay(RetryBackoff.nextDelayMs(runAttemptCount))
                 }
+            }
 
-                Result.success(
-                    Data.Builder()
-                        .putString(KEY_OUTCOME, DownloadDrainOutcome.SUCCESS.name)
-                        .putString(KEY_OUTPUT_PATH, targetFile.absolutePath)
-                        .putString(KEY_SOURCE, resolved.source.id)
-                        .putString(KEY_HOSTER, resolved.hoster)
-                        .build()
-                )
-            } catch (_: CloudflareChallengeException) {
+            if (lastRetryable) {
+                Result.retry()
+            } else {
                 Result.failure(
                     Data.Builder()
-                        .putString(KEY_OUTCOME, DownloadDrainOutcome.BLOCKED_CHALLENGE.name)
+                        .putString(KEY_OUTCOME, DownloadDrainOutcome.FAILED_PERMANENT.name)
                         .build()
                 )
-            } catch (_: IOException) {
-                Result.retry()
             }
         }
     }

@@ -1,5 +1,6 @@
 package com.milkglass.app.core.remote
 
+import id.my.milkglass.EngineHttpTextClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
@@ -16,15 +17,34 @@ interface EpisodeMetaSource {
     suspend fun load(anilistId: Int): Map<Int, EpisodeMeta>?
 }
 
-class AniZipMetaSource(private val timeoutMs: Int = 10_000) : EpisodeMetaSource {
+class AniZipMetaSource(
+    private val timeoutMs: Int = 10_000,
+    private val httpClient: EngineHttpTextClient? = null,
+) : EpisodeMetaSource {
     override suspend fun load(anilistId: Int): Map<Int, EpisodeMeta>? = httpGetJson(
-        "https://api.ani.zip/mappings?anilist_id=$anilistId", timeoutMs, notFound = emptyMap(), parse = ::parseAniZipEpisodes,
+        "https://api.ani.zip/mappings?anilist_id=$anilistId",
+        timeoutMs,
+        notFound = emptyMap(),
+        httpClient = httpClient,
+        parse = ::parseAniZipEpisodes,
     )
 }
 
-internal suspend fun <T : Any> httpGetJson(url: String, timeoutMs: Int, notFound: T, parse: (String) -> T?): T? =
+internal suspend fun <T : Any> httpGetJson(
+    url: String,
+    timeoutMs: Int,
+    notFound: T,
+    httpClient: EngineHttpTextClient? = null,
+    parse: (String) -> T?,
+): T? =
     withContext(Dispatchers.IO) {
         try {
+            if (httpClient != null) {
+                val resp = httpClient.get(url)
+                if (resp.code == 404) return@withContext notFound
+                if (resp.code !in 200..299) return@withContext null
+                return@withContext parse(resp.body)
+            }
             val conn = URL(url).openConnection() as HttpURLConnection
             try {
                 conn.connectTimeout = timeoutMs

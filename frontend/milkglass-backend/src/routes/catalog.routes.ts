@@ -5,7 +5,7 @@ import { edgeCache } from '../middleware/edgeCache';
 import { rateLimit } from '../middleware/rateLimit';
 import { recheckAfterSec } from '../services/sync-schedule';
 import {
-  getOtakudesuBaseUrl,
+  getSourceBaseUrls,
   searchAniListMetadata,
   fetchTrendingAniList,
 } from '../services/anilist.service';
@@ -57,52 +57,6 @@ function catalogVersion(
 
 function escapeSqlLike(input: string): string {
   return input.replace(/[\\%_]/g, '\\$&');
-}
-
-async function encryptRecipeHkdf(
-  recipeJson: string,
-  masterSecret: string,
-  slugContext: string
-): Promise<{ salt_b64: string; nonce_b64: string; payload_b64: string }> {
-  const enc = new TextEncoder();
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-
-  const baseKey = await crypto.subtle.importKey(
-    'raw',
-    enc.encode(masterSecret || 'milkglass-default-32byte-secret!'),
-    'HKDF',
-    false,
-    ['deriveKey']
-  );
-
-  const aesKey = await crypto.subtle.deriveKey(
-    {
-      name: 'HKDF',
-      hash: 'SHA-256',
-      salt,
-      info: enc.encode(`milkglass-ticket:${slugContext}`),
-    },
-    baseKey,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt']
-  );
-
-  const cipherBuf = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: nonce },
-    aesKey,
-    enc.encode(recipeJson)
-  );
-
-  const toB64 = (buf: ArrayBuffer | Uint8Array) =>
-    btoa(String.fromCharCode(...new Uint8Array(buf)));
-
-  return {
-    salt_b64: toB64(salt),
-    nonce_b64: toB64(nonce),
-    payload_b64: toB64(cipherBuf),
-  };
 }
 
 catalogRoutes.get('/home', edgeCache(300, 600, false), async (c) => {
@@ -187,10 +141,18 @@ catalogRoutes.get(
   async (c) => {
     const db = c.env.DB;
     const { v } = c.req.valid('query');
-    const [metaRes, countRes] = await db.batch([
+    const statements: D1PreparedStatement[] = [
       db.prepare(META_QUERY),
       db.prepare(`SELECT COUNT(*) AS total FROM animes`),
-    ]);
+    ];
+    if (v) {
+      statements.push(
+        db.prepare(`SELECT ${LIST_COLUMNS} FROM animes ORDER BY popularity DESC LIMIT 1000`)
+      );
+    }
+    const batchRes = await db.batch(statements);
+    const metaRes = batchRes[0];
+    const countRes = batchRes[1];
     const marker = readSyncMarker(metaRes.results as Array<{ key: string; value: string }>);
     const total = Number((countRes.results?.[0] as { total?: number } | undefined)?.total ?? 0);
     const version = catalogVersion(marker, total);
@@ -203,9 +165,7 @@ catalogRoutes.get(
     if (total === 0) {
       c.header('X-Milkglass-NoCache', '1');
     }
-    const { results } = await db
-      .prepare(`SELECT ${LIST_COLUMNS} FROM animes ORDER BY popularity DESC LIMIT 1000`)
-      .all<Record<string, unknown>>();
+    const results = (batchRes[2]?.results ?? []) as Array<Record<string, unknown>>;
     return c.json({
       status: 'ok',
       data: shapeRows(results),
@@ -287,35 +247,28 @@ catalogRoutes.get(
   async (c) => {
     const { id } = c.req.valid('param');
     const db = c.env.DB;
-    const anime = await db
-      .prepare(`SELECT * FROM animes WHERE id = ?1`)
-      .bind(id)
-      .first<Record<string, unknown>>();
+    const [animeRes, episodesRes] = await db.batch([
+      db.prepare(`SELECT * FROM animes WHERE id = ?1`).bind(id),
+      db
+        .prepare(
+          `SELECT id, anime_id, episode_number, name, op_start, op_end, ed_start, ed_end, created_at, updated_at
+           FROM episodes
+           WHERE anime_id = ?1
+           ORDER BY episode_number DESC`
+        )
+        .bind(id),
+    ]);
+
+    const anime = animeRes.results?.[0] as Record<string, unknown> | undefined;
     if (!anime) {
       return c.json({ status: 'error', message: 'Anime tidak ditemukan.' }, 404);
     }
-    const { results: episodes } = await db
-      .prepare(
-        `SELECT id, anime_id, episode_number, name, op_start, op_end, ed_start, ed_end, created_at, updated_at
-         FROM episodes
-         WHERE anime_id = ?1
-         ORDER BY episode_number DESC`
-      )
-      .bind(id)
-      .all();
 
-    let genres: string[] = [];
-    try {
-      genres = JSON.parse(String(anime.genres_json || '[]'));
-    } catch {
-      genres = [];
-    }
     return c.json({
       status: 'ok',
       data: {
-        ...anime,
-        genres,
-        episodes: episodes ?? [],
+        ...shapeAnimeRow(anime),
+        episodes: episodesRes.results ?? [],
       },
     });
   }
@@ -329,37 +282,41 @@ catalogRoutes.get(
     const { id } = c.req.valid('param');
     const nowSec = Math.floor(Date.now() / 1000);
     const db = c.env.DB;
-    const episode = await db
-      .prepare(
-        `SELECT id, anime_id, episode_number, name, op_start, op_end, ed_start, ed_end, created_at, updated_at
-         FROM episodes
-         WHERE id = ?1`
-      )
-      .bind(id)
-      .first<{
-        id: number;
-        anime_id: number;
-        episode_number: number;
-        name: string;
-        op_start: number | null;
-        op_end: number | null;
-        ed_start: number | null;
-        ed_end: number | null;
-      }>();
+    const [episodeRes, sourcesRes] = await db.batch([
+      db
+        .prepare(
+          `SELECT id, anime_id, episode_number, name, op_start, op_end, ed_start, ed_end, created_at, updated_at
+           FROM episodes
+           WHERE id = ?1`
+        )
+        .bind(id),
+      db
+        .prepare(
+          `SELECT id, episode_id, type, quality, url_payload, release_group,
+                  sub_kind, duration_sec, file_size_bytes, fail_count, cooldown_until
+           FROM stream_sources
+           WHERE episode_id = ?1 AND is_active = 1
+           ORDER BY (cooldown_until > ?2) ASC, fail_count ASC, quality DESC`
+        )
+        .bind(id, nowSec),
+    ]);
+
+    const episode = episodeRes.results?.[0] as
+      | {
+          id: number;
+          anime_id: number;
+          episode_number: number;
+          name: string;
+          op_start: number | null;
+          op_end: number | null;
+          ed_start: number | null;
+          ed_end: number | null;
+        }
+      | undefined;
 
     if (!episode) {
       return c.json({ status: 'error', message: 'Episode tidak ditemukan.' }, 404);
     }
-    const { results: sources } = await db
-      .prepare(
-        `SELECT id, episode_id, type, quality, url_payload, release_group,
-                sub_kind, duration_sec, file_size_bytes, fail_count, cooldown_until
-         FROM stream_sources
-         WHERE episode_id = ?1 AND is_active = 1
-         ORDER BY (cooldown_until > ?2) ASC, fail_count ASC, quality DESC`
-      )
-      .bind(id, nowSec)
-      .all();
 
     return c.json({
       status: 'ok',
@@ -378,7 +335,7 @@ catalogRoutes.get(
               ? { start: episode.ed_start, end: episode.ed_end }
               : null,
         },
-        stream_sources: sources ?? [],
+        stream_sources: sourcesRes.results ?? [],
       },
     });
   }
@@ -398,23 +355,18 @@ catalogRoutes.get('/', edgeCache(300), async (c) => {
 });
 
 catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
-  const otakudesuUrl = await getOtakudesuBaseUrl(c.env.DB);
-  const metaRows = await c.env.DB.prepare(
-    `SELECT key, value FROM catalog_meta WHERE key IN ('samehadaku_base_url', 'oploverz_base_url', 'kusonime_base_url')`
-  ).all<{ key: string; value: string }>();
-  const map = new Map<string, string>();
-  for (const r of metaRows.results ?? []) map.set(r.key, r.value);
-
+  const urls = await getSourceBaseUrls(c.env.DB);
   return c.json({
     status: 'ok',
     resolution_mode: 'CLIENT_CASCADE_MKV',
     target_format: 'MKV',
     target_resolutions: ['1080p', '720p', '480p'],
+    cf_handler_available: Boolean(c.env.CF_HANDLER_URL && c.env.CF_HANDLER_URL.trim().startsWith('http')),
     sources: [
-      { rank: 1, id: 'otakudesu', base_url: otakudesuUrl },
-      { rank: 2, id: 'samehadaku', base_url: map.get('samehadaku_base_url') || 'https://v2.samehadaku.how' },
-      { rank: 3, id: 'oploverz', base_url: map.get('oploverz_base_url') || 'https://oploverz.ch' },
-      { rank: 4, id: 'kusonime', base_url: map.get('kusonime_base_url') || 'https://kusonime.com' },
+      { rank: 1, id: 'otakudesu', base_url: urls.otakudesu },
+      { rank: 2, id: 'samehadaku', base_url: urls.samehadaku },
+      { rank: 3, id: 'oploverz', base_url: urls.oploverz },
+      { rank: 4, id: 'kusonime', base_url: urls.kusonime },
     ],
   });
 });
@@ -453,7 +405,7 @@ catalogRoutes.use('/play/*', rateLimit(20, 60));
 
 catalogRoutes.get('/play/:slug', async (c) => {
   const slug = c.req.param('slug');
-  const otakudesuUrl = await getOtakudesuBaseUrl(c.env.DB);
+  const urls = await getSourceBaseUrls(c.env.DB);
   return c.json({
     status: 'ok',
     slug,
@@ -461,7 +413,8 @@ catalogRoutes.get('/play/:slug', async (c) => {
     target_format: 'MKV',
     resolutions: ['1080p', '720p', '480p'],
     source_cascade: ['otakudesu', 'samehadaku', 'oploverz', 'kusonime'],
-    otakudesu_base_url: otakudesuUrl,
+    otakudesu_base_url: urls.otakudesu,
+    source_urls: urls,
     sub_state: 'MKV_EMBEDDED',
     seek_capability: 'HTTP_RANGE',
   });

@@ -1,5 +1,7 @@
 package com.milkglass.app.core.remote
 
+import id.my.milkglass.EngineHttpTextClient
+import id.my.milkglass.MilkglassEndpoints
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -13,12 +15,11 @@ import java.net.URL
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
 
-const val DEFAULT_CATALOG_BASE_URL = "https://milkglass-backend.milkyliquid.workers.dev"
+const val DEFAULT_CATALOG_BASE_URL = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL
 
 const val CATALOG_STALE_AFTER_SEC = 18L * 3600L
 
 interface CatalogTransport {
-    
     suspend fun get(pathAndQuery: String): String
 }
 
@@ -29,9 +30,16 @@ class CatalogUnavailable(message: String) : Exception(message)
 class HttpUrlTransport(
     private val baseUrl: String = DEFAULT_CATALOG_BASE_URL,
     private val timeoutMs: Int = 15_000,
+    private val httpClient: EngineHttpTextClient? = null,
 ) : CatalogTransport {
     override suspend fun get(pathAndQuery: String): String = withContext(Dispatchers.IO) {
-        val conn = URL(baseUrl.trimEnd('/') + pathAndQuery).openConnection() as HttpURLConnection
+        val targetUrl = baseUrl.trimEnd('/') + pathAndQuery
+        if (httpClient != null) {
+            val resp = httpClient.get(targetUrl)
+            if (resp.code !in 200..299) throw CatalogHttpException(resp.code)
+            return@withContext resp.body
+        }
+        val conn = URL(targetUrl).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = timeoutMs
             conn.readTimeout = timeoutMs
@@ -58,7 +66,6 @@ class FileCatalogCache(private val file: File) : CatalogCache {
         null
     }
 
-    
     override fun write(json: String) {
         try {
             file.parentFile?.mkdirs()
@@ -69,7 +76,7 @@ class FileCatalogCache(private val file: File) : CatalogCache {
                 tmp.renameTo(file)
             }
         } catch (e: Exception) {
-            
+            // Best-effort cache write
         }
     }
 }
@@ -81,10 +88,8 @@ data class CatalogHome(
     val popular: List<CatalogEntry>,
     val completed: List<CatalogEntry>,
     val extras: List<CatalogEntry>,
-    
     val syncedAtSec: Long?,
     val source: CatalogSource,
-    
     val stale: Boolean,
 )
 
@@ -92,15 +97,11 @@ class CatalogRepository(
     private val transport: CatalogTransport,
     private val cache: CatalogCache,
     private val nowMs: () -> Long = { System.currentTimeMillis() },
-    
     private val snapshots: SnapshotStore? = null,
 ) {
-    
-
     private var stateMemo: SnapshotState? = null
     private var stateRead = false
 
-    
     private fun state(store: SnapshotStore): SnapshotState? {
         if (!stateRead) {
             stateMemo = store.readState()?.takeIf { it.schema == SNAPSHOT_SCHEMA }
@@ -115,7 +116,6 @@ class CatalogRepository(
         store.writeState(s)
     }
 
-    
     fun cachedSnapshot(): CachedSnapshot? {
         val store = snapshots ?: return null
         val st = state(store) ?: return null
@@ -123,12 +123,11 @@ class CatalogRepository(
         return CachedSnapshot(resp.data.map(RemoteMapper::toEntry), st.complete)
     }
 
-    
     suspend fun refreshSnapshot(force: Boolean = false): RefreshOutcome {
         val store = snapshots ?: return RefreshOutcome.Unsupported
         val now = nowMs()
         val st = state(store)?.takeIf { store.readBody() != null }
-        
+
         if (!force && st != null && now >= st.fetchedAtMs && now < st.validUntilMs) return RefreshOutcome.Skipped
 
         val statusFetch = fetch("/v1/catalog/status")
@@ -142,7 +141,7 @@ class CatalogRepository(
         }
         if (status.status != "ok") return failed(store, st, now)
         val data = status.data ?: return RefreshOutcome.Unsupported
-        val version = data.version ?: return RefreshOutcome.Unsupported 
+        val version = data.version ?: return RefreshOutcome.Unsupported
         val recheckMs = (data.recheckAfterSec ?: RECHECK_DEFAULT_SEC).coerceIn(RECHECK_MIN_SEC, RECHECK_MAX_SEC) * 1000L
 
         if (st != null && st.version == version) {
@@ -156,7 +155,7 @@ class CatalogRepository(
         }
         val resp = decodeSnapshot(snapFetch.body) ?: return failed(store, st, now)
         val complete = resp.meta.count in 1..resp.data.size
-        
+
         store.writeBody(snapFetch.body)
         saveState(
             store,
@@ -179,7 +178,6 @@ class CatalogRepository(
         return RefreshOutcome.Failed
     }
 
-    
     private fun decodeSnapshot(json: String): SnapshotResponse? = try {
         RemoteJson.decodeFromString(SnapshotResponse.serializer(), json).takeIf { it.status == "ok" && it.data.isNotEmpty() }
     } catch (e: Exception) {
@@ -197,8 +195,6 @@ class CatalogRepository(
     } catch (e: Exception) {
         Fetched(null, null)
     }
-
-    
 
     suspend fun home(): Result<CatalogHome> {
         val net = fetchOrNull("/v1/catalog/home")
@@ -233,7 +229,6 @@ class CatalogRepository(
         }
     }
 
-    
     suspend fun searchUniversal(q: String, ep: Int = 1): List<CatalogEntry> {
         val clean = q.trim()
         if (clean.length < 2) return emptyList()
@@ -291,7 +286,6 @@ class CatalogRepository(
         }
     }
 
-    
     private suspend fun fetchOrNull(path: String): String? = try {
         transport.get(path)
     } catch (e: CancellationException) {
@@ -300,7 +294,6 @@ class CatalogRepository(
         null
     }
 
-    
     private fun parseHome(json: String): HomeResponse? = try {
         val resp = RemoteJson.decodeFromString(HomeResponse.serializer(), json)
         if (resp.status == "ok" && resp.data != null && resp.data.popular.isNotEmpty()) resp else null

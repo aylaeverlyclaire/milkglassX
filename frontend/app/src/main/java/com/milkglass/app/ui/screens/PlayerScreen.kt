@@ -81,6 +81,7 @@ import com.milkglass.app.ui.common.MilkButton
 import com.milkglass.app.ui.common.MilkText
 import com.milkglass.app.ui.common.SectionHeader
 import com.milkglass.app.ui.common.milkClickable
+import id.my.milkglass.EngineRuntime
 import id.my.milkglass.player.PlayerManager
 import id.my.milkglass.player.PlaybackPhase
 import id.my.milkglass.player.PlaybackRequest
@@ -172,6 +173,13 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
 
     LaunchedEffect(e) { ctl.loadSkipTimes(e) }
     LaunchedEffect(e.anime.id) { ctl.loadEpisodeMeta(e.anime) }
+    LaunchedEffect(snap.isReady, e.anime.id, e.episode) {
+        if (snap.isReady && ctl.online) {
+            ctl.nextPlayableEpisode(e.anime, e.episode)?.let { nextEp ->
+                EngineRuntime.get(context.applicationContext).prefetchEpisode(e.anime.title, e.anime.romaji, nextEp)
+            }
+        }
+    }
     
     LaunchedEffect(e, playerManager) {
         owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {

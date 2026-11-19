@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import id.my.milkglass.MilkglassEndpoints
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,10 +31,8 @@ private val Context.sessionDataStore: DataStore<Preferences> by preferencesDataS
     name = "milkglass_session_datastore"
 )
 
-internal fun isTrustedBackendHost(host: String): Boolean {
-    return host.equals("milkglass.my.id", ignoreCase = true) ||
-        host.endsWith(".milkglass.my.id", ignoreCase = true)
-}
+internal fun isTrustedBackendHost(host: String): Boolean =
+    MilkglassEndpoints.isTrustedBackendHost(host)
 
 class SessionTokenStore(
     context: Context,
@@ -52,7 +51,6 @@ class SessionTokenStore(
     @Volatile
     private var isLoadedFromDisk: Boolean = false
 
-    
     fun hasActiveSession(): Boolean {
         if (!accessToken.isNullOrBlank() || !cachedRefreshToken.isNullOrBlank()) {
             return true
@@ -157,7 +155,7 @@ class AuthBearerInterceptor(
 class SynchronizedTokenAuthenticator(
     private val tokenStore: SessionTokenStore,
     refreshHttpClient: OkHttpClient,
-    private val apiBaseUrl: String = "https://milkglass.my.id",
+    private val apiBaseUrl: String = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL,
     private val onRequireReLogin: () -> Unit = {}
 ) : Authenticator {
 
@@ -190,7 +188,6 @@ class SynchronizedTokenAuthenticator(
                         val savedRefreshToken = tokenStore.getRefreshTokenBlocking()
                         if (savedRefreshToken.isNullOrBlank()) {
                             tokenStore.clearSession()
-                            
                             if (!failedBearer.isNullOrBlank()) {
                                 onRequireReLogin()
                             }
@@ -202,7 +199,7 @@ class SynchronizedTokenAuthenticator(
                             .toString()
 
                         val refreshReq = Request.Builder()
-                            .url("$apiBaseUrl/v1/auth/refresh")
+                            .url("${apiBaseUrl.trimEnd('/')}/v1/auth/refresh")
                             .post(payload.toRequestBody("application/json".toMediaType()))
                             .build()
 
