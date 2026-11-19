@@ -155,7 +155,18 @@ internal object TitleMatcher {
     private val roman2Regex = Regex("""\bII\b""")
     private val roman4Regex = Regex("""\bIV\b""")
 
+    private val parseCache = java.util.concurrent.ConcurrentHashMap<String, ParsedTitle>()
+
+    /** Memoized: judul indeks diparse berulang kali saat pencocokan; regex-nya mahal. */
     fun parse(input: String): ParsedTitle {
+        parseCache[input]?.let { return it }
+        val p = parseUncached(input)
+        if (parseCache.size >= 20_000) parseCache.clear()
+        parseCache[input] = p
+        return p
+    }
+
+    private fun parseUncached(input: String): ParsedTitle {
         val noBrackets = brackets.replace(input, " ")
         var season: Int? = null
         for (p in seasonPatterns) {
@@ -209,8 +220,10 @@ internal object TitleMatcher {
         val pq = parse(query)
         val pc = parse(candidate)
         if (pq.tokens.isEmpty() || pc.tokens.isEmpty()) return 0.0
-        val inter = pq.tokens.intersect(pc.tokens).size.toDouble()
-        val union = pq.tokens.union(pc.tokens).size.toDouble()
+        var interCount = 0
+        for (t in pq.tokens) if (t in pc.tokens) interCount++
+        val inter = interCount.toDouble()
+        val union = (pq.tokens.size + pc.tokens.size - interCount).toDouble()
         var sc = inter / union
         if (pq.canonicalBase.length >= 3 && pc.canonicalBase.contains(pq.canonicalBase)) {
             sc += 0.25

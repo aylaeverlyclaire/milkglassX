@@ -88,6 +88,7 @@ class MainActivity : ComponentActivity() {
                     availabilityIndex.isAvailable(listOf(anime.romaji, anime.title))
                 },
             )
+            c.warmAvailability()
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 controller = c

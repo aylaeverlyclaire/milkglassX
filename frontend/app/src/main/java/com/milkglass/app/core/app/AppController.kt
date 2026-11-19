@@ -121,17 +121,55 @@ class AppController(
     private var lastRefreshFailed = false
     private val searchedQueries = HashSet<String>()
 
-    private var availabilityRevision by mutableStateOf(0)
+    /**
+     * Hasil cek ketersediaan per anime. Dihitung di thread latar (pencocokan judul mahal) dan
+     * hanya DIBACA di sini; jangan pernah memanggil availabilityChecker dari komposisi/derivedStateOf.
+     * Anime yang belum dihitung dianggap tersedia.
+     */
+    private var availability by mutableStateOf<Map<Int, Boolean>>(emptyMap())
+    private val availabilityDirty = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val availabilityRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val availabilityExec by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "milkglass-availability").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
+        }
+    }
+
+    private fun rawCatalog(): List<Anime> =
+        if (remoteEntries.isEmpty()) seedCatalog else seedCatalog + remoteEntries.values.map { it.anime }
+
+    /** Hitung ulang ketersediaan di thread pemanggil. HANYA panggil dari thread latar. */
+    fun warmAvailability() {
+        val checker = availabilityChecker ?: return
+        val list = rawCatalog()
+        val fresh = HashMap<Int, Boolean>(list.size * 2)
+        for (a in list) fresh[a.id] = runCatching { checker(a) }.getOrDefault(true)
+        availability = fresh
+    }
+
+    private fun requestAvailability() {
+        if (availabilityChecker == null) return
+        availabilityDirty.set(true)
+        if (!availabilityRunning.compareAndSet(false, true)) return
+        availabilityExec.execute {
+            try {
+                while (availabilityDirty.getAndSet(false)) warmAvailability()
+            } finally {
+                availabilityRunning.set(false)
+                if (availabilityDirty.get()) requestAvailability()
+            }
+        }
+    }
 
     fun notifyAvailabilityUpdated() {
-        availabilityRevision++
+        requestAvailability()
     }
 
     val catalog: List<Anime> by derivedStateOf {
-        val rev = availabilityRevision
-        val raw = if (remoteEntries.isEmpty()) seedCatalog else seedCatalog + remoteEntries.values.map { it.anime }
-        val checker = availabilityChecker
-        if (checker == null || rev < 0) raw else raw.filter(checker).ifEmpty { raw }
+        val raw = rawCatalog()
+        val avail = availability
+        if (availabilityChecker == null || avail.isEmpty()) raw
+        else raw.filter { avail[it.id] ?: true }.ifEmpty { raw }
     }
     private val catalogIndex: Map<Int, Anime> by derivedStateOf { catalog.associateBy { it.id } }
 
@@ -199,7 +237,10 @@ class AppController(
     }
 
     private fun mergeRemote(entries: List<CatalogEntry>) {
-        if (entries.isNotEmpty()) remoteEntries = remoteEntries + entries.associateBy { it.anime.id }
+        if (entries.isNotEmpty()) {
+            remoteEntries = remoteEntries + entries.associateBy { it.anime.id }
+            requestAvailability()
+        }
     }
 
     suspend fun loadRemoteCatalog(force: Boolean = false) {
