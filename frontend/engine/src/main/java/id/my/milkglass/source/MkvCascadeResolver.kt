@@ -376,7 +376,7 @@ abstract class BaseHtmlMkvProvider(
         (baseUrlProvider?.invoke() ?: baseUrl).trimEnd('/')
 
     protected fun lookupCachedOrIndexedUrl(animeTitle: String): String? {
-        lookupCachedOrIndexedUrl(animeTitle)?.let { return it }
+        slugCache?.get(priority, animeTitle)?.let { return it }
         val indexed = runCatching { indexLookup?.invoke(priority, animeTitle) }.getOrNull()
         if (!indexed.isNullOrBlank()) {
             slugCache?.put(priority, animeTitle, indexed)
