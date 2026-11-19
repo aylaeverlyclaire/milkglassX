@@ -33,20 +33,23 @@ object CrashReporter {
 
     fun pendingReport(ctx: Context): String? {
         val exit = exitReason(ctx)
-        val f = File(ctx.filesDir, FILE)
-        if (f.exists()) {
-            val text = runCatching { f.readText() }.getOrNull()
-            runCatching { f.delete() }
-            if (!text.isNullOrBlank()) return text
-        }
-        return exit
+        val crash = takeFile(File(ctx.filesDir, FILE))
+        val stall = takeFile(File(ctx.filesDir, StallWatchdog.FILE))
+        return listOfNotNull(crash, stall, exit).joinToString("\n---\n").ifBlank { null }
+    }
+
+    private fun takeFile(f: File): String? {
+        if (!f.exists()) return null
+        val text = runCatching { f.readText() }.getOrNull()
+        runCatching { f.delete() }
+        return text?.takeIf { it.isNotBlank() }
     }
 
     fun show(activity: Activity, report: String) {
         runCatching {
             AlertDialog.Builder(activity)
                 .setTitle("Milkglass sempat berhenti")
-                .setMessage("Mohon screenshot layar ini dan kirim ke pengembang.\n\n" + report.take(2200))
+                .setMessage("Mohon screenshot layar ini dan kirim ke pengembang.\n\n" + report.take(3400))
                 .setPositiveButton("OK", null)
                 .show()
         }

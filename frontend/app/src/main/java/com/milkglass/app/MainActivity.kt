@@ -43,6 +43,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         CrashReporter.install(applicationContext)
+        com.milkglass.app.core.app.StallWatchdog.start(applicationContext)
         CrashReporter.pendingReport(this)?.let { CrashReporter.show(this, it) }
 
         val gridOverlay = intent.getBooleanExtra("grid", false)
@@ -56,6 +57,7 @@ class MainActivity : ComponentActivity() {
             val availabilityIndex = runtime.availabilityIndex
 
             val warmupThread = Thread {
+                runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
                 runCatching { runtime.sourceConfig.refreshIfNeeded() }
                 val count = runCatching { availabilityIndex.refreshIfNeeded() }.getOrDefault(0)
                 if (count > 0) {

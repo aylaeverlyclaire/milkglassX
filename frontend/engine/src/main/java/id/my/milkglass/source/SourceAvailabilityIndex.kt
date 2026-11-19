@@ -42,7 +42,10 @@ class SourceAvailabilityIndex(
 
     init {
         if (prefs != null) {
-            Thread { loadFromDisk() }.start()
+            Thread {
+                runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
+                loadFromDisk()
+            }.start()
         }
     }
 

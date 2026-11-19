@@ -1358,14 +1358,20 @@ class MkvCascadeResolver(
 
         private val extractSeq = AtomicInteger(1)
         private val sharedExtractionPool: ExecutorService = Executors.newFixedThreadPool(4) { r ->
-            Thread(r, "milkglass-extract-${extractSeq.getAndIncrement()}").apply {
+            Thread({
+                runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
+                r.run()
+            }, "milkglass-extract-${extractSeq.getAndIncrement()}").apply {
                 isDaemon = true
             }
         }
 
         private val providerSeq = AtomicInteger(1)
         private val sharedProviderPool: ExecutorService = Executors.newFixedThreadPool(8) { r ->
-            Thread(r, "milkglass-provider-${providerSeq.getAndIncrement()}").apply {
+            Thread({
+                runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
+                r.run()
+            }, "milkglass-provider-${providerSeq.getAndIncrement()}").apply {
                 isDaemon = true
             }
         }
