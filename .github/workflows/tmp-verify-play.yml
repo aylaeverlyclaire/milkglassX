@@ -1,0 +1,17 @@
+name: tmp verify play
+on: workflow_dispatch
+jobs:
+  v:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          U=https://milkglass-backend.milkyliquid.workers.dev
+          {
+            echo "== health";  curl -sS -m 20 -w ' HTTP %{http_code}\n' $U/v1/health
+            echo "== resolve tanpa token (harus 401, bukan 404)"; curl -sS -m 20 -w ' HTTP %{http_code}\n' "$U/v1/play/resolve?title=frieren&ep=1&q=1080p"
+            echo "== hint tanpa token (harus 401)"; curl -sS -m 20 -w ' HTTP %{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{"title":"frieren","ep":1,"candidates":[{"source":"otakudesu","quality":"1080p","hoster":"Pixeldrain","raw_url":"https://pixeldrain.com/u/abc"}]}' $U/v1/play/hint
+            echo "== hint body rusak (harus 400)"; curl -sS -m 20 -o /dev/null -w 'HTTP %{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{"title":"x"}' $U/v1/play/hint
+          } > out.txt 2>&1
+          cat out.txt
+          MSG=$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' out.txt | head -c 3000)
+          echo "::notice title=verify::$MSG"
