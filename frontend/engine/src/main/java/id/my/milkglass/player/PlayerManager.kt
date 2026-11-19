@@ -256,7 +256,7 @@ class PlayerManager(
             val friendly = ErrorMapper.mapExoPlayerError(error, context)
             val req = lastRequest
             if (req != null && !req.preferCompatibleContainer &&
-                (friendly.reason == FailureReason.CODEC || friendly.reason == FailureReason.NETWORK || friendly.reason == FailureReason.HTTP_403)
+                (friendly.reason == FailureReason.CODEC || friendly.reason == FailureReason.TIMEOUT || friendly.reason == FailureReason.DNS || friendly.reason == FailureReason.HTTP_403)
             ) {
                 resolver.invalidateCache(req.slug)
                 val resumeMs = getCurrentPosition().takeIf { it > 0L } ?: _snapshot.value.positionMs

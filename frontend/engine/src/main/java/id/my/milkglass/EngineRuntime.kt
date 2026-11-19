@@ -147,7 +147,7 @@ class SourceConfigStore(
             if (!parsed.userInfo.isNullOrBlank()) return false
             val host = parsed.host?.trim()?.lowercase() ?: return false
             if (host.isBlank() || host == "localhost" || host.endsWith(".local") || host.contains(':')) return false
-            if (Regex("^\d+\.\d+\.\d+\.\d+$").matches(host)) return false
+            if (Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+$").matches(host)) return false
             return host.contains('.')
         }
 
