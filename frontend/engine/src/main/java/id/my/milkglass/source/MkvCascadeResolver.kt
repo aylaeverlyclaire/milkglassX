@@ -533,7 +533,7 @@ class OtakudesuSourceProvider(
         var epUrl = SeriesEpisodeMapCache.get(priority, bestAnimeUrl, episodeNumber)
         if (epUrl == null) {
             val animeDoc = runCatching { fetchDoc(bestAnimeUrl, searchUrl) }.getOrElse {
-                slugCache?.invalidate(priority, animeTitle)
+                if (!Thread.currentThread().isInterrupted) slugCache?.invalidate(priority, animeTitle)
                 throw it
             }
             val epBoxes = animeDoc.select("div.episodelist")
@@ -560,7 +560,7 @@ class OtakudesuSourceProvider(
         }
 
         val epDoc = runCatching { fetchDoc(epUrl, bestAnimeUrl) }.getOrElse {
-            SeriesEpisodeMapCache.invalidate(priority, bestAnimeUrl)
+            if (!Thread.currentThread().isInterrupted) SeriesEpisodeMapCache.invalidate(priority, bestAnimeUrl)
             throw it
         }
         val results = mutableListOf<RawMkvCandidate>()
@@ -642,7 +642,7 @@ class SamehadakuSourceProvider(
         var epUrl = if (seriesUrl.contains("/anime/")) SeriesEpisodeMapCache.get(priority, seriesUrl, episodeNumber) else null
         if (epUrl == null) {
             var animeDoc = runCatching { fetchDoc(seriesUrl, searchUrl) }.getOrElse {
-                slugCache?.invalidate(priority, animeTitle)
+                if (!Thread.currentThread().isInterrupted) slugCache?.invalidate(priority, animeTitle)
                 throw it
             }
             if (!seriesUrl.contains("/anime/")) {
@@ -681,7 +681,7 @@ class SamehadakuSourceProvider(
         }
 
         val epDoc = runCatching { fetchDoc(epUrl, seriesUrl) }.getOrElse {
-            SeriesEpisodeMapCache.invalidate(priority, seriesUrl)
+            if (!Thread.currentThread().isInterrupted) SeriesEpisodeMapCache.invalidate(priority, seriesUrl)
             throw it
         }
         val results = mutableListOf<RawMkvCandidate>()
@@ -774,7 +774,7 @@ class OploverzSourceProvider(
         var epUrl = if (seriesUrl.contains("/series/")) SeriesEpisodeMapCache.get(priority, seriesUrl, episodeNumber) else null
         if (epUrl == null) {
             var animeDoc = runCatching { fetchDoc(seriesUrl, searchUrl) }.getOrElse {
-                slugCache?.invalidate(priority, animeTitle)
+                if (!Thread.currentThread().isInterrupted) slugCache?.invalidate(priority, animeTitle)
                 throw it
             }
             if (!seriesUrl.contains("/series/")) {
@@ -990,7 +990,7 @@ class KusonimeSourceProvider(
         slugCache?.put(priority, animeTitle, bestPostUrl)
 
         val postDoc = runCatching { fetchDoc(bestPostUrl, searchUrl) }.getOrElse {
-            slugCache?.invalidate(priority, animeTitle)
+            if (!Thread.currentThread().isInterrupted) slugCache?.invalidate(priority, animeTitle)
             throw it
         }
         val results = mutableListOf<RawMkvCandidate>()
