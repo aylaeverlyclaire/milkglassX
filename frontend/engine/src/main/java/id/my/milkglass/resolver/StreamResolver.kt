@@ -41,6 +41,8 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -117,6 +119,12 @@ class StreamResolver(
         Thread(r, "milkglass-hint").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
     }
     private val hintReportedAt = ConcurrentHashMap<String, Long>()
+    private val failoverMediaClient by lazy {
+        clients.mediaAndApiClient.newBuilder()
+            .connectTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .build()
+    }
 
     /**
      * Laporkan tautan hoster mentah yang terbukti bisa diekstrak ke Cloudflare (tabel hint bersama), supaya
@@ -168,6 +176,198 @@ class StreamResolver(
         } catch (_: Exception) {
             null
         }
+
+    // ---------------------------------------------------------------------------------------------
+    // Balapan server (Cloudflare hint) vs cascade lokal.
+    // Dulu: server dulu (sampai 3,5 dtk), BARU cascade. Server hampir selalu miss untuk episode yang belum pernah
+    // diputar siapa pun, jadi jalur dingin selalu membayar waktu mati itu. Sekarang keduanya jalan bersamaan:
+    // yang pertama memberi kandidat valid menang, yang kalah diinterupsi (dan pembatalan tidak dihitung sebagai
+    // kegagalan sumber). Prefetch yang sedang berjalan untuk episode yang sama ikut jadi peserta ketiga.
+    // ---------------------------------------------------------------------------------------------
+    private sealed interface RaceOutcome {
+        class Candidates(val list: List<ResolvedMkvMedia>) : RaceOutcome
+        class Failed(val reason: FailureReason, val message: String) : RaceOutcome
+    }
+
+    private sealed interface RaceMsg {
+        class FromServer(val list: List<ResolvedMkvMedia>) : RaceMsg
+        class FromJoin(val list: List<ResolvedMkvMedia>) : RaceMsg
+        class FromCascade(val result: CascadeResult?) : RaceMsg
+    }
+
+    private val raceSeq = AtomicInteger(1)
+    private val raceExecutor = Executors.newCachedThreadPool { r ->
+        Thread(r, "milkglass-race-${raceSeq.getAndIncrement()}").apply { isDaemon = true }
+    }
+
+    @Volatile
+    private var serverMissStreak: Int = 0
+
+    @Volatile
+    private var serverQuietUntilMs: Long = 0L
+
+    private fun shouldAskServer(): Boolean {
+        if (!hasAuthSession()) return false
+        val now = System.currentTimeMillis()
+        return now >= serverResolverDisabledUntilMs && now >= serverQuietUntilMs
+    }
+
+    /** Server yang terus miss (tak ada hint) tidak perlu ditanya tiap kali: istirahat 10 menit setelah 3 miss beruntun. */
+    private fun noteServerOutcome(hit: Boolean) {
+        if (hit) {
+            serverMissStreak = 0
+            return
+        }
+        serverMissStreak += 1
+        if (serverMissStreak >= SERVER_MISS_STREAK_LIMIT) {
+            serverMissStreak = 0
+            serverQuietUntilMs = System.currentTimeMillis() + SERVER_QUIET_MS
+        }
+    }
+
+    private fun publicOnly(list: List<ResolvedMkvMedia>): List<ResolvedMkvMedia> =
+        list.filter { cand ->
+            val h = cand.directUrl.toHttpUrlOrNull()?.host ?: return@filter false
+            runCatching { PublicIpGuard.verifyPublicHost(clients.dns, h); true }.getOrDefault(false)
+        }.distinctBy { it.directUrl }
+
+    private fun cacheEntryFor(list: List<ResolvedMkvMedia>): CachedResolvedCandidates {
+        val chosen = list.first()
+        val avail = list.map { it.quality.label }.distinct().ifEmpty { listOf(chosen.quality.label) }
+        return CachedResolvedCandidates(
+            cachedAtMs = System.currentTimeMillis(),
+            candidates = list,
+            availableResolutions = avail,
+            activeResolution = chosen.quality.label,
+            resolvedSourceId = chosen.source.id,
+            resolvedHoster = chosen.hoster
+        )
+    }
+
+    private fun startFromEntry(e: CachedResolvedCandidates, scope: CoroutineScope): LocalStreamSession =
+        startSessionForCandidates(
+            candidates = e.candidates,
+            availableResolutions = e.availableResolutions,
+            activeResolution = e.activeResolution,
+            resolvedSourceId = e.resolvedSourceId,
+            resolvedHoster = e.resolvedHoster,
+            scope = scope
+        )
+
+    private fun raceResolve(
+        searchTitle: String,
+        altTitle: String,
+        episodeNum: Int,
+        preferredQuality: MkvQuality,
+        preferCompatibleContainer: Boolean,
+        joined: CompletableFuture<CachedResolvedCandidates?>?
+    ): RaceOutcome {
+        val queue = LinkedBlockingQueue<RaceMsg>()
+        val futures = ArrayList<Future<*>>(3)
+        var pending = 0
+        try {
+            if (shouldAskServer()) {
+                pending++
+                futures.add(
+                    raceExecutor.submit(Runnable {
+                        var msg = RaceMsg.FromServer(emptyList())
+                        try {
+                            val list = resolveViaServerSplitPlane(searchTitle, episodeNum, preferredQuality, preferCompatibleContainer)
+                            noteServerOutcome(list.isNotEmpty())
+                            msg = RaceMsg.FromServer(list)
+                        } catch (_: InterruptedException) {
+                            // kalah balapan / dibatalkan: bukan kegagalan server
+                        } catch (_: Throwable) {
+                        }
+                        queue.offer(msg)
+                    })
+                )
+            }
+            if (joined != null) {
+                pending++
+                futures.add(
+                    raceExecutor.submit(Runnable {
+                        var list: List<ResolvedMkvMedia> = emptyList()
+                        try {
+                            list = joined.awaitOrNull(JOIN_INFLIGHT_MAX_MS)?.candidates.orEmpty()
+                        } catch (_: InterruptedException) {
+                        }
+                        queue.offer(RaceMsg.FromJoin(list))
+                    })
+                )
+            }
+            pending++
+            futures.add(
+                raceExecutor.submit(Runnable {
+                    var result: CascadeResult? = null
+                    try {
+                        var r = cascadeResolver.resolve(
+                            animeTitle = searchTitle,
+                            episodeNumber = episodeNum,
+                            preferredQuality = preferredQuality,
+                            allowBatchFallback = false,
+                            preferCompatibleContainer = preferCompatibleContainer
+                        )
+                        if (r is CascadeResult.Failure && altTitle.isNotBlank() &&
+                            !altTitle.equals(searchTitle, ignoreCase = true) && !Thread.currentThread().isInterrupted
+                        ) {
+                            r = cascadeResolver.resolve(
+                                animeTitle = altTitle,
+                                episodeNumber = episodeNum,
+                                preferredQuality = preferredQuality,
+                                allowBatchFallback = false,
+                                preferCompatibleContainer = preferCompatibleContainer
+                            )
+                        }
+                        result = r
+                    } catch (_: Throwable) {
+                    }
+                    queue.offer(RaceMsg.FromCascade(result))
+                })
+            )
+
+            var cascadeFailure: CascadeResult.Failure? = null
+            var hosterRejected = false
+            while (pending > 0) {
+                // take() melempar InterruptedException bila pemanggil dibatalkan (ganti episode): finally membatalkan semua peserta.
+                when (val msg = queue.take()) {
+                    is RaceMsg.FromServer -> {
+                        pending--
+                        if (msg.list.isNotEmpty()) return RaceOutcome.Candidates(msg.list.distinctBy { it.directUrl })
+                    }
+                    is RaceMsg.FromJoin -> {
+                        pending--
+                        if (msg.list.isNotEmpty()) {
+                            val ok = publicOnly(msg.list)
+                            if (ok.isNotEmpty()) return RaceOutcome.Candidates(ok)
+                        }
+                    }
+                    is RaceMsg.FromCascade -> {
+                        pending--
+                        val r = msg.result
+                        if (r is CascadeResult.Success) {
+                            val ok = publicOnly(listOf(r.selected) + r.alternatives)
+                            if (ok.isNotEmpty()) return RaceOutcome.Candidates(ok)
+                            hosterRejected = true
+                        } else if (r is CascadeResult.Failure) {
+                            cascadeFailure = r
+                        }
+                    }
+                }
+            }
+            val cf = cascadeFailure
+            return when {
+                hosterRejected -> RaceOutcome.Failed(FailureReason.NOT_FOUND, "Semua URL hoster ditolak oleh validasi IP publik")
+                cf != null -> RaceOutcome.Failed(
+                    if (cf.diagnostics.cloudflareBlockedHosts.isNotEmpty()) FailureReason.HTTP_403 else FailureReason.NOT_FOUND,
+                    cf.reason
+                )
+                else -> RaceOutcome.Failed(FailureReason.NOT_FOUND, "Sumber tidak menghasilkan tautan")
+            }
+        } finally {
+            futures.forEach { if (!it.isDone) it.cancel(true) }
+        }
+    }
 
     private fun resolveViaServerSplitPlane(
         searchTitle: String,
@@ -324,57 +524,19 @@ class StreamResolver(
             return existing.awaitOrNull(25_000L) != null
         }
         return try {
-            val serverCandidates = resolveViaServerSplitPlane(
+            val outcome = raceResolve(
                 searchTitle = searchTitle,
+                altTitle = "",
                 episodeNum = episodeNum,
                 preferredQuality = preferredQuality,
-                preferCompatibleContainer = false
+                preferCompatibleContainer = false,
+                joined = null
             )
-            if (serverCandidates.isNotEmpty()) {
-                val chosen = serverCandidates.first()
-                val avail = serverCandidates.map { it.quality.label }.distinct()
-                    .ifEmpty { listOf(chosen.quality.label) }
-                val entry = CachedResolvedCandidates(
-                    cachedAtMs = System.currentTimeMillis(),
-                    candidates = serverCandidates,
-                    availableResolutions = avail,
-                    activeResolution = chosen.quality.label,
-                    resolvedSourceId = chosen.source.id,
-                    resolvedHoster = chosen.hoster
-                )
-                if (resolvedCache.size > 32) resolvedCache.clear()
-                resolvedCache[sessionCacheKey] = entry
-                mine.complete(entry)
-                return true
-            }
-            val outcome = cascadeResolver.resolve(
-                animeTitle = searchTitle,
-                episodeNumber = episodeNum,
-                preferredQuality = preferredQuality,
-                allowBatchFallback = false,
-                preferCompatibleContainer = false
-            )
-            if (outcome !is CascadeResult.Success) {
+            if (outcome !is RaceOutcome.Candidates || outcome.list.isEmpty()) {
                 mine.complete(null)
                 return false
             }
-            val allCandidates = (listOf(outcome.selected) + outcome.alternatives).filter { cand ->
-                val h = cand.directUrl.toHttpUrlOrNull()?.host ?: return@filter false
-                runCatching { PublicIpGuard.verifyPublicHost(clients.dns, h); true }.getOrDefault(false)
-            }.distinctBy { it.directUrl }
-            if (allCandidates.isEmpty()) {
-                mine.complete(null)
-                return false
-            }
-            val avail = allCandidates.map { it.quality.label }.distinct().ifEmpty { listOf(outcome.selected.quality.label) }
-            val entry = CachedResolvedCandidates(
-                cachedAtMs = System.currentTimeMillis(),
-                candidates = allCandidates,
-                availableResolutions = avail,
-                activeResolution = outcome.selected.quality.label,
-                resolvedSourceId = outcome.selected.source.id,
-                resolvedHoster = outcome.selected.hoster
-            )
+            val entry = cacheEntryFor(outcome.list)
             if (resolvedCache.size > 32) resolvedCache.clear()
             resolvedCache[sessionCacheKey] = entry
             mine.complete(entry)
@@ -438,125 +600,36 @@ class StreamResolver(
         val sessionCacheKey = "${slug.lowercase()}#${preferredQuality.label}#${if (preferCompatibleContainer) "compat" else "std"}"
         val nowMs = System.currentTimeMillis()
         resolvedCache[sessionCacheKey]?.takeIf { nowMs - it.cachedAtMs <= RESOLVED_CACHE_TTL_MS }?.let { cached ->
-            return startSessionForCandidates(
-                candidates = cached.candidates,
-                availableResolutions = cached.availableResolutions,
-                activeResolution = cached.activeResolution,
-                resolvedSourceId = cached.resolvedSourceId,
-                resolvedHoster = cached.resolvedHoster,
-                scope = scope
-            )
+            return startFromEntry(cached, scope)
         }
 
-        inFlightResolutions[sessionCacheKey]?.let { inflight ->
-            // Bergabung dengan prefetch yang sedang jalan, tapi dibatasi: prefetch yang macet tidak boleh
-            // menahan pemutaran lebih dari ini (setelahnya resolve sendiri berjalan paralel).
-            val joined = inflight.awaitOrNull(JOIN_INFLIGHT_MAX_MS)
-            if (joined != null) {
-                return startSessionForCandidates(
-                    candidates = joined.candidates,
-                    availableResolutions = joined.availableResolutions,
-                    activeResolution = joined.activeResolution,
-                    resolvedSourceId = joined.resolvedSourceId,
-                    resolvedHoster = joined.resolvedHoster,
-                    scope = scope
-                )
-            }
+        // Prefetch yang sedang jalan: tunggu sebentar saja. Bila belum selesai, resolve sendiri dimulai SEKARANG dan
+        // prefetch tetap ikut berlomba (dulu: menunggu sampai 12 dtk lalu mengulang dari nol).
+        val inflight = inFlightResolutions[sessionCacheKey]
+        if (inflight != null) {
+            val joinedEntry = inflight.awaitOrNull(JOIN_FAST_MS)
+            if (joinedEntry != null) return startFromEntry(joinedEntry, scope)
         }
 
-        val serverCandidates = resolveViaServerSplitPlane(
+        val altTitle = if (searchTitle == romajiTitle) title else romajiTitle
+        val outcome = raceResolve(
             searchTitle = searchTitle,
+            altTitle = altTitle,
             episodeNum = episodeNum,
             preferredQuality = preferredQuality,
-            preferCompatibleContainer = preferCompatibleContainer
+            preferCompatibleContainer = preferCompatibleContainer,
+            joined = inflight
         )
-        if (serverCandidates.isNotEmpty()) {
-            val chosen = serverCandidates.first()
-            val availableRes = serverCandidates.map { it.quality.label }.distinct()
-                .ifEmpty { listOf("1080p", "720p", "480p") }
-            if (resolvedCache.size > 32) resolvedCache.clear()
-            resolvedCache[sessionCacheKey] = CachedResolvedCandidates(
-                cachedAtMs = System.currentTimeMillis(),
-                candidates = serverCandidates,
-                availableResolutions = availableRes,
-                activeResolution = chosen.quality.label,
-                resolvedSourceId = chosen.source.id,
-                resolvedHoster = chosen.hoster
-            )
-            return startSessionForCandidates(
-                candidates = serverCandidates,
-                availableResolutions = availableRes,
-                activeResolution = chosen.quality.label,
-                resolvedSourceId = chosen.source.id,
-                resolvedHoster = chosen.hoster,
-                scope = scope
-            )
-        }
-
-        val primaryOutcome = cascadeResolver.resolve(
-            animeTitle = searchTitle,
-            episodeNumber = episodeNum,
-            preferredQuality = preferredQuality,
-            allowBatchFallback = false,
-            preferCompatibleContainer = preferCompatibleContainer
-        )
-        if (Thread.currentThread().isInterrupted) throw InterruptedException()
-        val altTitle = if (searchTitle == romajiTitle) title else romajiTitle
-        val outcome = if (primaryOutcome is CascadeResult.Failure && altTitle.isNotBlank() && !altTitle.equals(searchTitle, ignoreCase = true)) {
-            cascadeResolver.resolve(
-                animeTitle = altTitle,
-                episodeNumber = episodeNum,
-                preferredQuality = preferredQuality,
-                allowBatchFallback = false,
-                preferCompatibleContainer = preferCompatibleContainer
-            )
-        } else {
-            primaryOutcome
-        }
-
         return when (outcome) {
-            is CascadeResult.Failure -> {
-                val reason = if (outcome.diagnostics.cloudflareBlockedHosts.isNotEmpty()) {
-                    FailureReason.HTTP_403
-                } else {
-                    FailureReason.NOT_FOUND
-                }
-                throw StreamResolutionException(reason, outcome.reason)
-            }
-            is CascadeResult.Success -> {
-                val chosen = outcome.selected
-                val candidates = (listOf(chosen) + outcome.alternatives).filter { cand ->
-                    val h = cand.directUrl.toHttpUrlOrNull()?.host ?: return@filter false
-                    runCatching { PublicIpGuard.verifyPublicHost(clients.dns, h); true }.getOrDefault(false)
-                }
-                if (candidates.isEmpty()) {
-                    throw StreamResolutionException(FailureReason.NOT_FOUND, "Semua URL hoster ditolak oleh validasi IP publik")
-                }
-
-                val availableRes = candidates.map { it.quality.label }.distinct()
-                    .ifEmpty { listOf("1080p", "720p", "480p") }
-
+            is RaceOutcome.Failed -> throw StreamResolutionException(outcome.reason, outcome.message)
+            is RaceOutcome.Candidates -> {
+                val entry = cacheEntryFor(outcome.list)
                 if (resolvedCache.size > 32) resolvedCache.clear()
-                resolvedCache[sessionCacheKey] = CachedResolvedCandidates(
-                    cachedAtMs = System.currentTimeMillis(),
-                    candidates = candidates,
-                    availableResolutions = availableRes,
-                    activeResolution = chosen.quality.label,
-                    resolvedSourceId = chosen.source.id,
-                    resolvedHoster = chosen.hoster
-                )
-
-                startSessionForCandidates(
-                    candidates = candidates,
-                    availableResolutions = availableRes,
-                    activeResolution = chosen.quality.label,
-                    resolvedSourceId = chosen.source.id,
-                    resolvedHoster = chosen.hoster,
-                    scope = scope
-                )
+                resolvedCache[sessionCacheKey] = entry
+                startFromEntry(entry, scope)
             }
         }
-        }
+    }
 
     private fun startSessionForCandidates(
         candidates: List<ResolvedMkvMedia>,
@@ -705,8 +778,10 @@ class StreamResolver(
                     if (method == "HEAD") reqBuilder.head()
 
                     var headersSent = false
+                    // Kandidat yang masih punya cadangan di belakangnya gagal-cepat (host mati tak lagi menahan 8-20 dtk).
+                    val callClient = if (isLast) clients.mediaAndApiClient else failoverMediaClient
                     val outcome = runCatching {
-                        clients.mediaAndApiClient.newCall(reqBuilder.build()).execute().use { resp ->
+                        callClient.newCall(reqBuilder.build()).execute().use { resp ->
                             if (isMidStreamSeek && resp.code == 200) {
                                 return@use Pair(false, false)
                             }
@@ -786,6 +861,9 @@ class StreamResolver(
         const val DEFAULT_BACKEND_BASE_URL = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL
         private const val RESOLVED_CACHE_TTL_MS = 10L * 60L * 1000L
         private const val JOIN_INFLIGHT_MAX_MS = 12_000L
+        private const val JOIN_FAST_MS = 1_500L
+        private const val SERVER_MISS_STREAK_LIMIT = 3
+        private const val SERVER_QUIET_MS = 10L * 60L * 1000L
         private const val SERVER_HINT_TIMEOUT_MS = 3_500L
 
         fun buildEpisodeSlug(romajiOrTitle: String, episode: Int): String {

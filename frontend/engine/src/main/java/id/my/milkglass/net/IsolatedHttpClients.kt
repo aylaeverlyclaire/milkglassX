@@ -268,10 +268,17 @@ class CloudflareDohDns(
     private val inFlight = ConcurrentHashMap<String, CompletableFuture<List<InetAddress>>>()
     private val dohClient = OkHttpClient.Builder()
         .connectionPool(ConnectionPool(4, 5, TimeUnit.MINUTES))
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(3, TimeUnit.SECONDS)
-        .callTimeout(4, TimeUnit.SECONDS)
+        .connectTimeout(1500, TimeUnit.MILLISECONDS)
+        .readTimeout(2, TimeUnit.SECONDS)
+        .callTimeout(2500, TimeUnit.MILLISECONDS)
         .build()
+
+    /**
+     * Bila DoH (1.1.1.1) gagal/timeout (mis. diblokir ISP), JANGAN dicoba lagi untuk setiap host baru: dulu tiap host
+     * dingin menahan sampai 4 dtk sebelum jatuh ke DNS sistem. Sekarang DoH diistirahatkan 2 menit.
+     */
+    @Volatile
+    private var dohBrokenUntilMs: Long = 0L
 
     override fun lookup(hostname: String): List<InetAddress> {
         val host = hostname.lowercase()
@@ -292,7 +299,17 @@ class CloudflareDohDns(
         }
 
         return try {
-            val resolved = runCatching { resolveViaDoh(host) }.getOrDefault(emptyList())
+            val dohAllowed = System.currentTimeMillis() >= dohBrokenUntilMs
+            val resolved = if (dohAllowed) {
+                try {
+                    resolveViaDoh(host)
+                } catch (_: Exception) {
+                    dohBrokenUntilMs = System.currentTimeMillis() + 120_000L
+                    emptyList()
+                }
+            } else {
+                emptyList()
+            }
             if (resolved.isNotEmpty()) {
                 cache[host] = (System.currentTimeMillis() + 300_000L) to resolved
                 mine.complete(resolved)
@@ -300,7 +317,13 @@ class CloudflareDohDns(
             } else {
                 val fallback = runCatching { Dns.SYSTEM.lookup(hostname) }.getOrDefault(emptyList())
                 mine.complete(fallback)
-                if (fallback.isNotEmpty()) fallback else throw UnknownHostException(hostname)
+                if (fallback.isNotEmpty()) {
+                    // Hasil DNS sistem juga di-cache (dulu tidak), supaya host yang sama tak mengulang lookup.
+                    cache[host] = (System.currentTimeMillis() + 120_000L) to fallback
+                    fallback
+                } else {
+                    throw UnknownHostException(hostname)
+                }
             }
         } catch (e: UnknownHostException) {
             mine.complete(emptyList())
@@ -320,7 +343,8 @@ class CloudflareDohDns(
             .header("Accept", "application/dns-json")
             .build()
         dohClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return emptyList()
+            // Respons non-2xx = DoH bermasalah (bukan "domain tidak ada"): lempar supaya pemutus sirkuit aktif.
+            if (!resp.isSuccessful) throw IOException("DoH HTTP ${resp.code}")
             val body = resp.body?.string() ?: return emptyList()
             val answers = JSONObject(body).optJSONArray("Answer") ?: return emptyList()
             val ips = mutableListOf<InetAddress>()

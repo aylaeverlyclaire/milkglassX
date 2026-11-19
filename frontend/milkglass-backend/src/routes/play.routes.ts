@@ -250,7 +250,8 @@ playRoutes.get(
       const upstream = await fetch(`${handlerBase}/resolve?${params.toString()}`, {
         method: 'GET',
         headers,
-        signal: AbortSignal.timeout(25_000),
+        // Klien menyerah di ~3,5 dtk dan kini balapan dengan cascade lokal; menahan Worker 25 dtk hanya buang kuota.
+        signal: AbortSignal.timeout(3_000),
       });
       if (!upstream.ok) {
         c.header('X-Milkglass-NoCache', '1');
