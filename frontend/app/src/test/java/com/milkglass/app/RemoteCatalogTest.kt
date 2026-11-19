@@ -145,7 +145,7 @@ class RemoteCatalogTest {
     }
 
     private fun repo(t: CatalogTransport, c: CatalogCache, nowMs: Long = 1794714396_000L + 3_600_000L) =
-        CatalogRepository(t, c) { nowMs }
+        CatalogRepository(t, c, { nowMs })
 
     @Test fun networkSuccessIsCachedAndFresh() = runBlocking {
         val cache = MemCache()
