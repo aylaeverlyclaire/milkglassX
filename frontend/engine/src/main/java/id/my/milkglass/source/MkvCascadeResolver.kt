@@ -1120,6 +1120,46 @@ class MkvCascadeResolver(
     }
 
     /**
+     * Verifikasi URL direct dari server (probe Range paralel, maks 3 dtk). URL yang kedaluwarsa/terikat IP
+     * penyetor dibuang di sini, bukan baru gagal saat ExoPlayer memutar. Urutan asli dipertahankan.
+     */
+    fun verifyDirect(list: List<ResolvedMkvMedia>): List<ResolvedMkvMedia> {
+        if (list.isEmpty()) return emptyList()
+        val batch = list.take(4)
+        val futures = batch.map { m ->
+            sharedExtractionPool.submit<ResolvedMkvMedia?> {
+                val ok = runCatching {
+                    extractorRegistry.verifyPlayableMedia(
+                        id.my.milkglass.extractor.ExtractedDirectMedia(
+                            hoster = m.hoster,
+                            directUrl = m.directUrl,
+                            referer = m.referer,
+                            supportsRange = m.supportsRange,
+                            isArchive = m.isBatchArchive,
+                            isHls = m.isHls
+                        )
+                    )
+                }.getOrDefault(false)
+                if (ok) m else null
+            }
+        }
+        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L)
+        try {
+            return futures.mapNotNull { f ->
+                try {
+                    f.get((deadlineNs - System.nanoTime()).coerceAtLeast(0L), TimeUnit.NANOSECONDS)
+                } catch (e: InterruptedException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        } finally {
+            futures.forEach { if (!it.isDone) it.cancel(true) }
+        }
+    }
+
+    /**
      * Ekstrak kandidat mentah dari luar (hint bersama di Cloudflare) secara PARALEL dengan aturan ranking,
      * dead-cache, deadline, dan pembatalan yang sama seperti jalur cascade biasa.
      */

@@ -7,6 +7,7 @@ import id.my.milkglass.resolver.StreamResolver
 import id.my.milkglass.source.MkvCascadeResolver
 import id.my.milkglass.source.MkvQuality
 import id.my.milkglass.source.MkvSourceProvider
+import id.my.milkglass.source.ResolvedMkvMedia
 import id.my.milkglass.source.RawMkvCandidate
 import id.my.milkglass.source.SourceCircuitBreaker
 import id.my.milkglass.source.SourcePriority
@@ -81,5 +82,18 @@ class RaceResolveTest {
         assertTrue("pembatalan harus berhenti cepat (${elapsedMs}ms)", elapsedMs < 3_000L)
         assertTrue(!SourceCircuitBreaker.isOpen(SourcePriority.OTAKUDESU))
         assertTrue(!SourceCircuitBreaker.isOpen(SourcePriority.SAMEHADAKU))
+    }
+
+    @Test
+    fun serverDirectUrlsThatFailVerificationAreDropped() {
+        val clients = IsolatedHttpClients(null)
+        val resolver = MkvCascadeResolver(clients = clients, providers = emptyList())
+        // Host loopback/privat ditolak guard anti-SSRF sebelum ada koneksi: URL titipan server tak boleh lolos.
+        val bad = ResolvedMkvMedia(
+            source = SourcePriority.OTAKUDESU, quality = MkvQuality.P1080, hoster = "Pixeldrain",
+            directUrl = "https://127.0.0.1/api/file/x", referer = null, supportsRange = true
+        )
+        assertTrue(resolver.verifyDirect(listOf(bad)).isEmpty())
+        assertTrue(resolver.verifyDirect(emptyList()).isEmpty())
     }
 }

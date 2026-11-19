@@ -134,6 +134,16 @@ CREATE TABLE IF NOT EXISTS play_hints (
   report_count INTEGER NOT NULL DEFAULT 1
 );
 
+-- URL direct hoster yang SUDAH terverifikasi bisa diputar oleh klien lain (dilaporkan otomatis oleh klien).
+-- Berumur pendek: banyak hoster memakai URL kedaluwarsa/terikat IP, jadi klien tetap memverifikasi sebelum memakai.
+CREATE TABLE IF NOT EXISTS play_direct (
+  key TEXT PRIMARY KEY,
+  payload TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  report_count INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_play_direct_updated ON play_direct(updated_at);
+
 CREATE INDEX IF NOT EXISTS idx_animes_status_pop ON animes(status, popularity DESC);
 CREATE INDEX IF NOT EXISTS idx_animes_sched_pop ON animes(schedule_day, popularity DESC);
 CREATE INDEX IF NOT EXISTS idx_animes_updated ON animes(updated_at DESC);

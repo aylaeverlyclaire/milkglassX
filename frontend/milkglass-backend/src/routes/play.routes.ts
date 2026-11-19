@@ -154,6 +154,107 @@ async function lookupHint(db: D1Database, title: string, ep: number): Promise<St
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// URL direct terverifikasi (D1 play_direct). Klien melaporkan otomatis setelah ekstraksi + verifikasi berhasil.
+// Umur pendek (30 mnt) karena URL hoster bisa kedaluwarsa/terikat IP; klien penerima SELALU memverifikasi ulang
+// (probe Range) sebelum memakainya dan jatuh ke scraping lokal bila gagal.
+// ---------------------------------------------------------------------------------------------
+const DIRECT_MAX_AGE_SEC = 30 * 60;
+const DIRECT_REFRESH_AFTER_SEC = 5 * 60;
+const DIRECT_MAX_CANDIDATES = 4;
+
+const directBodySchema = z.object({
+  title: z.string().trim().min(2).max(160),
+  ep: z.number().int().min(1).max(2000),
+  candidates: z
+    .array(
+      z.object({
+        source: z.enum(['otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
+        quality: z.enum(['1080p', '720p', '480p', '360p']),
+        hoster: z.string().trim().min(1).max(40),
+        direct_url: z.string().max(2048),
+        referer: z.string().max(2048).optional(),
+        supports_range: z.boolean().default(true),
+        container: z.enum(['MKV', 'MP4', 'HLS', 'UNKNOWN']).default('UNKNOWN'),
+        is_hls: z.boolean().default(false),
+      })
+    )
+    .min(1)
+    .max(DIRECT_MAX_CANDIDATES),
+});
+
+type StoredDirect = {
+  source: string;
+  quality: string;
+  hoster: string;
+  direct_url: string;
+  referer?: string;
+  supports_range: boolean;
+  container: string;
+  is_hls: boolean;
+};
+
+function isAcceptableDirect(c: { hoster: string; direct_url: string }): boolean {
+  const u = isPublicHttpsUrl(c.direct_url);
+  if (!u) return false;
+  // Hanya hoster dikenal (lewat label atau host), supaya klien tak bisa menyuntik URL sembarang ke pengguna lain.
+  const label = c.hoster.toLowerCase();
+  const host = u.hostname.toLowerCase();
+  return HOSTER_TOKENS.some((t) => label.includes(t) || host.includes(t));
+}
+
+playRoutes.post('/direct', rateLimit(20, 60), zValidator('json', directBodySchema), async (c) => {
+  const { deny } = await requireVerifiedUser(c);
+  if (deny) return deny;
+  const { title, ep, candidates } = c.req.valid('json');
+  const clean: StoredDirect[] = [];
+  const seen = new Set<string>();
+  for (const cand of candidates) {
+    if (!isAcceptableDirect(cand) || seen.has(cand.direct_url)) continue;
+    const ref = cand.referer && isPublicHttpsUrl(cand.referer) ? cand.referer : '';
+    seen.add(cand.direct_url);
+    clean.push({
+      source: cand.source,
+      quality: cand.quality,
+      hoster: cand.hoster,
+      direct_url: cand.direct_url,
+      referer: ref,
+      supports_range: cand.supports_range,
+      container: cand.container,
+      is_hls: cand.is_hls,
+    });
+  }
+  if (clean.length === 0) return c.json({ status: 'ok', stored: false });
+
+  const key = hintKey(title, ep);
+  const now = Math.floor(Date.now() / 1000);
+  const existing = await c.env.DB.prepare('SELECT updated_at FROM play_direct WHERE key = ?1').bind(key).first<{ updated_at: number }>();
+  if (existing && now - existing.updated_at < DIRECT_REFRESH_AFTER_SEC) {
+    return c.json({ status: 'ok', stored: false, fresh: true });
+  }
+  await c.env.DB.prepare(
+    `INSERT INTO play_direct (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
+     ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1`
+  ).bind(key, JSON.stringify(clean), now).run();
+  return c.json({ status: 'ok', stored: true });
+});
+
+async function lookupDirect(db: D1Database, title: string, ep: number): Promise<StoredDirect[] | null> {
+  try {
+    const row = await db
+      .prepare('SELECT payload, updated_at FROM play_direct WHERE key = ?1')
+      .bind(hintKey(title, ep))
+      .first<{ payload: string; updated_at: number }>();
+    if (!row) return null;
+    if (Math.floor(Date.now() / 1000) - row.updated_at > DIRECT_MAX_AGE_SEC) return null;
+    const arr = JSON.parse(row.payload) as StoredDirect[];
+    const ok = (Array.isArray(arr) ? arr : []).filter((d) => d && isAcceptableDirect({ hoster: d.hoster || '', direct_url: d.direct_url }));
+    return ok.length ? ok : null;
+  } catch {
+    return null;
+  }
+}
+
 const resolveQuerySchema = z.object({
   title: z.string().trim().min(2).max(160),
   ep: z.coerce.number().int().min(1).max(2000),
@@ -214,12 +315,16 @@ playRoutes.get(
   async (c) => {
     const { title, ep, q } = c.req.valid('query');
 
-    // 1) Jalur cepat: hint bersama dari D1 (tanpa scrape, tanpa Cloudflare-challenge).
-    const hinted = await lookupHint(c.env.DB, title, ep);
-    if (hinted) {
+    // 1) Jalur cepat dari D1 (tanpa scrape, tanpa Cloudflare-challenge): URL direct terverifikasi + hint hoster mentah.
+    const [direct, hinted] = await Promise.all([lookupDirect(c.env.DB, title, ep), lookupHint(c.env.DB, title, ep)]);
+    if (direct || hinted) {
       return c.json({
         status: 'ok',
-        data: { direct_candidates: [], client_extract_candidates: hinted, source: 'hint' },
+        data: {
+          direct_candidates: direct ?? [],
+          client_extract_candidates: hinted ?? [],
+          source: direct ? 'direct' : 'hint',
+        },
       });
     }
 

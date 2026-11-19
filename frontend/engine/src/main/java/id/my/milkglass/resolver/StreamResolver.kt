@@ -167,6 +167,48 @@ class StreamResolver(
         }
     }
 
+    private val directReportedAt = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Laporkan URL direct yang SUDAH terverifikasi ke Cloudflare (tabel play_direct), fire-and-forget.
+     * Throttle 5 menit per judul+episode (server juga melewati tulis bila masih segar).
+     */
+    fun reportDirect(title: String, ep: Int, list: List<ResolvedMkvMedia>) {
+        if (list.isEmpty() || ep <= 0 || title.trim().length < 2 || !hasAuthSession()) return
+        val now = System.currentTimeMillis()
+        if (now < serverResolverDisabledUntilMs) return
+        val key = "${title.lowercase().trim()}#$ep"
+        val last = directReportedAt[key]
+        if (last != null && now - last < 5L * 60L * 1000L) return
+        if (directReportedAt.size > 64) directReportedAt.clear()
+        directReportedAt[key] = now
+        val usable = list.filter { !it.isBatchArchive && it.directUrl.startsWith("https://") }.take(4)
+        if (usable.isEmpty()) return
+        hintExecutor.execute {
+            runCatching {
+                val arr = JSONArray()
+                usable.forEach { m ->
+                    arr.put(
+                        JSONObject().put("source", m.source.id).put("quality", m.quality.label)
+                            .put("hoster", m.hoster.take(40)).put("direct_url", m.directUrl)
+                            .put("referer", m.referer ?: "").put("supports_range", m.supportsRange)
+                            .put("container", m.container.name).put("is_hls", m.isHls)
+                    )
+                }
+                val body = JSONObject().put("title", title.trim()).put("ep", ep).put("candidates", arr).toString()
+                val req = Request.Builder()
+                    .url("${backendBaseUrl.trimEnd('/')}/v1/play/direct")
+                    .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                serverHintClient.newCall(req).execute().use { resp ->
+                    if (resp.code == 404 || resp.code == 503) {
+                        serverResolverDisabledUntilMs = System.currentTimeMillis() + 6L * 60L * 60L * 1000L
+                    }
+                }
+            }
+        }
+    }
+
     /** Menunggu future tanpa menelan interupsi (pembatalan harus merambat), timeout/kegagalan -> null. */
     private fun <T> CompletableFuture<T>.awaitOrNull(ms: Long): T? =
         try {
@@ -347,7 +389,11 @@ class StreamResolver(
                         val r = msg.result
                         if (r is CascadeResult.Success) {
                             val ok = publicOnly(listOf(r.selected) + r.alternatives)
-                            if (ok.isNotEmpty()) return RaceOutcome.Candidates(ok)
+                            if (ok.isNotEmpty()) {
+                                // Simpan otomatis di Cloudflare supaya pengguna lain tak perlu scraping + ekstraksi.
+                                reportDirect(searchTitle, episodeNum, ok)
+                                return RaceOutcome.Candidates(ok)
+                            }
                             hosterRejected = true
                         } else if (r is CascadeResult.Failure) {
                             cascadeFailure = r
@@ -439,6 +485,13 @@ class StreamResolver(
                     )
                 )
             }
+        }
+
+        // URL direct dari server wajib lolos probe sebelum dipakai (bisa kedaluwarsa / terikat IP penyetor).
+        if (resolved.isNotEmpty()) {
+            val verified = cascadeResolver.verifyDirect(resolved)
+            resolved.clear()
+            resolved.addAll(verified)
         }
 
         val needClientExtract = resolved.isEmpty() || preferCompatibleContainer
