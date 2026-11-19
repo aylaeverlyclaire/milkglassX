@@ -40,7 +40,8 @@ enum class FailureReason(val wireName: String, val reportToServer: Boolean) {
     NOT_FOUND("not_found", true),
     TIMEOUT("timeout", false),
     CODEC("codec", false),
-    DNS("dns", false)
+    DNS("dns", false),
+    NETWORK("network", false)
 }
 
 class StreamResolutionException(

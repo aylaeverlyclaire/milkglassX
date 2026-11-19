@@ -127,21 +127,23 @@ object MPVLibBridge {
 
 @OptIn(UnstableApi::class)
 class PlayerManager(
-    private val context: Context,
+    context: Context,
     private val backendBaseUrl: String = StreamResolver.DEFAULT_BACKEND_BASE_URL,
     private val masterAppSecret: ByteArray = ByteArray(0),
     private val authTokenProvider: () -> String? = { null },
     private val resolver: StreamResolver = if (backendBaseUrl == StreamResolver.DEFAULT_BACKEND_BASE_URL) {
-        EngineRuntime.get(context).streamResolver
+        EngineRuntime.get(context.applicationContext).streamResolver
     } else {
         StreamResolver(
-            context = context,
+            context = context.applicationContext,
             backendBaseUrl = backendBaseUrl,
             masterAppSecret = masterAppSecret,
             authTokenProvider = authTokenProvider
         )
     }
 ) {
+    private val appContext: Context = context.applicationContext
+
     private var exoPlayer: ExoPlayer? = null
     private var trackSelector: DefaultTrackSelector? = null
     private var attachedTextureView: TextureView? = null
@@ -253,10 +255,13 @@ class PlayerManager(
                     EndpointHealthScorer.recordFailure(sess.resolvedHoster)
                 }
             }
-            val friendly = ErrorMapper.mapExoPlayerError(error, context)
+            val friendly = ErrorMapper.mapExoPlayerError(error, appContext)
             val req = lastRequest
             if (req != null && !req.preferCompatibleContainer &&
-                (friendly.reason == FailureReason.CODEC || friendly.reason == FailureReason.TIMEOUT || friendly.reason == FailureReason.DNS || friendly.reason == FailureReason.HTTP_403)
+                (friendly.reason == FailureReason.CODEC ||
+                    friendly.reason == FailureReason.NETWORK ||
+                    friendly.reason == FailureReason.HTTP_403 ||
+                    friendly.reason == FailureReason.EXPIRED)
             ) {
                 resolver.invalidateCache(req.slug)
                 val resumeMs = getCurrentPosition().takeIf { it > 0L } ?: _snapshot.value.positionMs
@@ -271,9 +276,9 @@ class PlayerManager(
     fun initialize() {
         if (released || exoPlayer != null) return
 
-        val bandwidthMeter = DefaultBandwidthMeter.Builder(context).build()
+        val bandwidthMeter = DefaultBandwidthMeter.Builder(appContext).build()
         val videoTrackSelectionFactory = AdaptiveTrackSelection.Factory()
-        trackSelector = DefaultTrackSelector(context, videoTrackSelectionFactory).apply {
+        trackSelector = DefaultTrackSelector(appContext, videoTrackSelectionFactory).apply {
             setParameters(
                 buildUponParameters()
                     .clearVideoSizeConstraints()
@@ -288,7 +293,7 @@ class PlayerManager(
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
-        val renderersFactory = DefaultRenderersFactory(context)
+        val renderersFactory = DefaultRenderersFactory(appContext)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             .setEnableDecoderFallback(true)
 
@@ -297,7 +302,7 @@ class PlayerManager(
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        exoPlayer = ExoPlayer.Builder(context, renderersFactory)
+        exoPlayer = ExoPlayer.Builder(appContext, renderersFactory)
             .setTrackSelector(trackSelector!!)
             .setLoadControl(loadControl)
             .setBandwidthMeter(bandwidthMeter)
@@ -376,6 +381,14 @@ class PlayerManager(
 
                 if (MPVLibBridge.isAvailable) {
                     configureMpvForSequentialPipe(session.localHttpUrl)
+                    _playerState.value = PlayerState.Playing(true)
+                    _snapshot.update {
+                        if (it.sessionId != sid) it else it.copy(
+                            phase = PlaybackPhase.PLAYING,
+                            error = null
+                        )
+                    }
+                    return@launch
                 }
                 prepareMedia(
                     mediaUrl = session.localHttpUrl,
@@ -388,7 +401,7 @@ class PlayerManager(
                 throw e
             } catch (e: Throwable) {
                 if (released || activeSessionId != sid) return@launch
-                val friendly = ErrorMapper.mapResolverError(e, context)
+                val friendly = ErrorMapper.mapResolverError(e, appContext)
                 _playerState.value = PlayerState.Error(friendly)
                 _snapshot.update {
                     if (it.sessionId != sid) it else it.copy(
@@ -446,6 +459,36 @@ class PlayerManager(
     ) {
         if (released) return
         if (exoPlayer == null) initialize()
+
+        val sid = sessionCounter.incrementAndGet()
+        activeSessionId = sid
+        loadJob?.cancel()
+        exoPlayer?.stop()
+        exoPlayer?.clearMediaItems()
+        stopStreamSession()
+
+        val qualityLabel = if (resolvedStream.source.quality > 0) {
+            "${resolvedStream.source.quality}p"
+        } else {
+            _snapshot.value.activeResolution
+        }
+        _subtitleLines.value = emptyList()
+        _playerState.value = PlayerState.Buffering
+        _snapshot.value = PlayerSnapshot(
+            sessionId = sid,
+            phase = PlaybackPhase.LOADING,
+            positionMs = startPositionMs.coerceAtLeast(0L),
+            durationMs = 0L,
+            bufferedPositionMs = 0L,
+            videoAspectRatio = _videoAspectRatio.value,
+            activeResolution = qualityLabel,
+            availableResolutions = _availableResolutions.value,
+            resolvedSourceId = resolvedStream.source.type,
+            resolvedHoster = resolvedStream.source.releaseGroup,
+            subtitleLines = emptyList(),
+            error = null
+        )
+
         prepareMedia(
             mediaUrl = resolvedStream.directUrl,
             headers = resolvedStream.headers,
@@ -463,15 +506,16 @@ class PlayerManager(
         cacheKey: String?
     ) {
         val playerInstance = exoPlayer ?: return
-        val sharedOkHttp = EngineRuntime.get(context).clients.mediaAndApiClient
+        val sharedOkHttp = EngineRuntime.get(appContext).clients.mediaAndApiClient
         val httpFactory = OkHttpDataSource.Factory(sharedOkHttp)
             .setUserAgent(headers["User-Agent"] ?: DEFAULT_USER_AGENT)
             .setDefaultRequestProperties(headers)
 
-        val upstreamFactory = DefaultDataSource.Factory(context, httpFactory)
+        val upstreamFactory = DefaultDataSource.Factory(appContext, httpFactory)
         val isLocalFile = mediaUrl.startsWith("file://", ignoreCase = true)
-        val finalFactory: DataSource.Factory = if (!isLocalFile && !isHls) {
-            val streamCache = getStreamCache(context)
+        val isLocalProxy = mediaUrl.startsWith("http://127.0.0.1:", ignoreCase = true)
+        val finalFactory: DataSource.Factory = if (!isLocalFile && !isHls && !isLocalProxy) {
+            val streamCache = getStreamCache(appContext)
             if (streamCache != null) {
                 CacheDataSource.Factory()
                     .setCache(streamCache)
@@ -488,11 +532,11 @@ class PlayerManager(
         if (isHls || mediaUrl.lowercase().contains(".m3u8")) {
             mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
         }
-        if (!cacheKey.isNullOrBlank() && !isLocalFile && !isHls) {
+        if (!cacheKey.isNullOrBlank() && !isLocalFile && !isHls && !isLocalProxy) {
             mediaItemBuilder.setCustomCacheKey(cacheKey)
         }
 
-        val mediaSource = DefaultMediaSourceFactory(context)
+        val mediaSource = DefaultMediaSourceFactory(appContext)
             .setDataSourceFactory(finalFactory)
             .createMediaSource(mediaItemBuilder.build())
 
@@ -593,9 +637,21 @@ class PlayerManager(
 
     fun getDuration(): Long = exoPlayer?.duration?.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
 
-    fun stopStreamSession() {
-        activeStreamSession?.closeSession?.invoke()
+    private fun stopStreamSession(syncClose: Boolean = false) {
+        val current = activeStreamSession
         activeStreamSession = null
+        if (current != null) {
+            if (syncClose) {
+                runCatching { current.closeSession.invoke() }
+            } else {
+                Thread({
+                    runCatching { current.closeSession.invoke() }
+                }, "milkglass-proxy-close").apply {
+                    isDaemon = true
+                    start()
+                }
+            }
+        }
     }
 
     fun release() {
@@ -606,6 +662,7 @@ class PlayerManager(
         loadJob = null
         tickerJob?.cancel()
         tickerJob = null
+        stopStreamSession(syncClose = true)
         playerScope.cancel()
         exoPlayer?.setVideoTextureView(null)
         attachedTextureView = null
@@ -614,7 +671,6 @@ class PlayerManager(
         exoPlayer?.release()
         exoPlayer = null
         trackSelector = null
-        stopStreamSession()
         _playerState.value = PlayerState.Idle
     }
 
