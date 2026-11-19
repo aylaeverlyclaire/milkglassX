@@ -23,7 +23,10 @@ import com.milkglass.app.core.poster.PosterBitmaps
 import com.milkglass.app.core.poster.PosterStore
 import com.milkglass.app.core.remote.AniListExtrasHttpSource
 import com.milkglass.app.core.remote.AniSkipSource
+import com.milkglass.app.core.remote.AniListBannerSource
+import com.milkglass.app.core.remote.AniListJikanMetaSource
 import com.milkglass.app.core.remote.AniZipMetaSource
+import com.milkglass.app.core.remote.ChainedEpisodeMetaSource
 import com.milkglass.app.core.remote.CatalogRepository
 import com.milkglass.app.core.remote.FileCatalogCache
 import com.milkglass.app.core.remote.FileSnapshotStore
@@ -75,9 +78,13 @@ class MainActivity : ComponentActivity() {
                 data, posters, StateStore(File(filesDir, StateStore.FILE_NAME)),
                 catalogRepo = repo,
                 initialCatalog = repo.cachedSnapshot(),
-                metaSource = AniZipMetaSource(httpClient = sharedHttp),
+                metaSource = ChainedEpisodeMetaSource(
+                    primary = AniZipMetaSource(httpClient = sharedHttp),
+                    fallback = AniListJikanMetaSource(httpClient = sharedHttp),
+                ),
                 skipSource = AniSkipSource(httpClient = sharedHttp),
                 extrasSource = AniListExtrasHttpSource(httpClient = sharedHttp),
+                bannerSource = AniListBannerSource(httpClient = sharedHttp),
                 availabilityChecker = { anime ->
                     availabilityIndex.isAvailable(listOf(anime.romaji, anime.title))
                 },

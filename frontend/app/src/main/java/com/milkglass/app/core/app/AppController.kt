@@ -101,6 +101,7 @@ class AppController(
     private val skipSource: com.milkglass.app.core.remote.SkipSource? = null,
     
     private val extrasSource: com.milkglass.app.core.remote.AniListExtrasSource? = null,
+    private val bannerSource: com.milkglass.app.core.remote.BannerSource? = null,
     private val availabilityChecker: ((Anime) -> Boolean)? = null,
     
     seedState: ((com.milkglass.app.core.data.Translator, Long) -> com.milkglass.app.core.storage.PersistedState)? = null,
@@ -141,8 +142,49 @@ class AppController(
     fun animeOf(id: Int): Anime? = catalogIndex[id]
 
     
-    fun posterSpec(a: Anime, wide: Boolean): PosterSpec =
-        if (a.id in seedIds) posters.spec(a.id, wide) else posters.blank(wide, remoteEntries[a.id]?.posterUrl)
+    /**
+     * [wide] = slot 16:9. Anime remote dipasangi banner lanskap asli (AniList) bila ada. Kalau belum/tidak ada
+     * banner, poster portrait TIDAK di-crop ke 16:9 melainkan jadi latar ambient ([PosterSpec.ambient]).
+     */
+    fun posterSpec(a: Anime, wide: Boolean): PosterSpec {
+        if (a.id in seedIds) return posters.spec(a.id, wide)
+        val poster = remoteEntries[a.id]?.posterUrl
+        if (!wide) return posters.blank(false, poster)
+        banners[a.id]?.let { return posters.blank(true, it) }
+        requestBanner(a.id)
+        return posters.blank(true, poster).copy(ambient = poster != null)
+    }
+
+    private var banners by mutableStateOf<Map<Int, String>>(emptyMap())
+    private val bannerPending = LinkedHashSet<Int>()
+    private val bannerDone = HashSet<Int>()
+    private var bannerJob: kotlinx.coroutines.Job? = null
+    private val bannerScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
+
+    /** Dipanggil dari komposisi: hanya mencatat id, lalu satu job kecil mengambil banner dalam batch (maks 50 id / request). */
+    private fun requestBanner(id: Int) {
+        val src = bannerSource ?: return
+        synchronized(bannerPending) {
+            if (id in bannerDone || !bannerPending.add(id)) return
+            if (bannerJob != null) return
+            bannerJob = bannerScope.launch {
+                kotlinx.coroutines.delay(120) // kumpulkan kartu yang muncul bersamaan
+                while (true) {
+                    val batch = synchronized(bannerPending) {
+                        if (bannerPending.isEmpty()) {
+                            bannerJob = null // selesai; permintaan berikutnya memulai job baru
+                            emptyList()
+                        } else bannerPending.take(50).also { bannerPending.removeAll(it.toSet()) }
+                    }
+                    if (batch.isEmpty()) break
+                    val got = src.load(batch)
+                    // got == null = gagal jaringan: tidak dicatat selesai, jadi boleh diminta lagi nanti.
+                    if (got != null) synchronized(bannerPending) { bannerDone.addAll(batch) }
+                    if (got != null && got.isNotEmpty()) banners = banners + got
+                }
+            }
+        }
+    }
 
     var catalogLoading by mutableStateOf(false)
         private set
@@ -175,9 +217,27 @@ class AppController(
     suspend fun loadEpisodeMeta(a: Anime) {
         val src = metaSource ?: return
         if (a.id in seedIds || !metaRequested.add(a.id)) return
-        val m = src.load(a.id)
-        if (m == null) metaRequested.remove(a.id) 
-        else if (m.isNotEmpty()) episodeMeta = episodeMeta + (a.id to m)
+        val expected = time.releasedEpisodeCount(a)
+        var m: Map<Int, com.milkglass.app.core.remote.EpisodeMeta>? = null
+        // Jaringan seluler sering gagal sesaat: coba sampai 3 kali sebelum menyerah (dulu hanya 1 kali per layar).
+        for (attempt in 0 until 3) {
+            m = src.loadFor(a.id, expected)
+            if (m != null && m.isNotEmpty()) break
+            if (attempt < 2) kotlinx.coroutines.delay(if (attempt == 0) 1_500L else 4_000L)
+        }
+        if (m == null || m.isEmpty()) {
+            metaRequested.remove(a.id) // boleh dicoba lagi saat layar dibuka berikutnya
+            return
+        }
+        val old = episodeMeta[a.id].orEmpty()
+        val merged = HashMap(old)
+        for ((n, e) in m) {
+            val cur = merged[n]
+            merged[n] = if (cur == null) e else com.milkglass.app.core.remote.EpisodeMeta(e.title ?: cur.title, e.image ?: cur.image)
+        }
+        episodeMeta = episodeMeta + (a.id to merged)
+        // Masih ada judul bolong? Izinkan percobaan ulang di kunjungan berikutnya.
+        if ((1..expected).any { merged[it]?.title == null }) metaRequested.remove(a.id)
     }
 
     

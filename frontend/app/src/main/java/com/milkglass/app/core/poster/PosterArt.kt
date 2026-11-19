@@ -1,6 +1,7 @@
 package com.milkglass.app.core.poster
 
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.ImageBitmap
@@ -51,7 +52,14 @@ data class PosterOp(
 
 @Immutable
 @Serializable
-data class PosterSpec(val w: Int, val h: Int, val ops: List<PosterOp>, val url: String? = null)
+data class PosterSpec(
+    val w: Int, val h: Int, val ops: List<PosterOp>, val url: String? = null,
+    /**
+     * true = [url] adalah poster portrait yang dipakai di slot 16:9. Poster tidak di-crop menjadi kartu lebar
+     * (hasilnya kepotong): yang digambar hanya latar ambient berupa poster yang diburamkan.
+     */
+    val ambient: Boolean = false,
+)
 
 class PosterStore(private val specs: Map<String, PosterSpec>) {
     fun allSpecs(wide: Boolean): List<PosterSpec> = specs.filterKeys { it.endsWith(if (wide) "w" else "p") }.values.toList()
@@ -175,8 +183,11 @@ object PosterBitmaps {
 @Composable
 fun PosterArt(spec: PosterSpec, modifier: Modifier = Modifier) {
     if (spec.url != null) {
-        
-        coil.compose.AsyncImage(model = spec.url, contentDescription = null, modifier = modifier, contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+        if (!spec.ambient) {
+            coil.compose.AsyncImage(model = spec.url, contentDescription = null, modifier = modifier, contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+        } else {
+            AmbientBackdrop(spec.url, modifier)
+        }
         return
     }
     val version = remember { androidx.compose.runtime.mutableIntStateOf(0) }
@@ -192,6 +203,24 @@ fun PosterArt(spec: PosterSpec, modifier: Modifier = Modifier) {
                 }
             }
         },
+    )
+}
+
+/**
+ * Latar ambient dari poster portrait: diminta dalam resolusi sangat kecil lalu direntangkan, hasilnya buram di
+ * semua versi Android (tanpa Modifier.blur yang hanya jalan di Android 12+) dan tidak ada bagian poster yang
+ * terbaca sebagai gambar terpotong.
+ */
+@Composable
+private fun AmbientBackdrop(url: String, modifier: Modifier) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val req = remember(url) {
+        coil.request.ImageRequest.Builder(ctx).data(url).size(48, 72).crossfade(false).build()
+    }
+    coil.compose.AsyncImage(
+        model = req, contentDescription = null,
+        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+        modifier = modifier.graphicsLayer { alpha = .7f },
     )
 }
 
