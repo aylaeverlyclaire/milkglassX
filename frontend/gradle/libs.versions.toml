@@ -40,8 +40,8 @@ androidx-room-compiler = { module = "androidx.room:room-compiler", version.ref =
 media3-exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = "media3" }
 media3-datasource-okhttp = { module = "androidx.media3:media3-datasource-okhttp", version.ref = "media3" }
 media3-database = { module = "androidx.media3:media3-database", version.ref = "media3" }
-# Dekoder FFmpeg (Jellyfin): codec audio MKV yang tidak ada di perangkat. Versinya harus sejajar dengan media3.
-media3-ffmpeg-decoder = { module = "org.jellyfin.media3:media3-ffmpeg-decoder", version = "1.5.1+1" }
+# Dekoder FFmpeg (Jellyfin): codec audio MKV yang tidak ada di perangkat. Versi 1.5.0+1 = jalur minor yang sama dengan media3 1.5.x (tidak ada 1.5.1+1 di Maven Central).
+media3-ffmpeg-decoder = { module = "org.jellyfin.media3:media3-ffmpeg-decoder", version = "1.5.0+1" }
 junit = { module = "junit:junit", version.ref = "junit" }
 # org.json asli untuk tes JVM engine: stub android.jar mengembalikan nilai kosong sehingga KrakenfilesExtractor tak bisa diuji.
 org-json = { module = "org.json:json", version = "20240303" }
