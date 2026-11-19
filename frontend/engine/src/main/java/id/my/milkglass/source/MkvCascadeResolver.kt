@@ -17,8 +17,8 @@ import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 
 enum class SourcePriority(val rank: Int, val id: String, val defaultBaseUrl: String) {
@@ -1113,51 +1113,60 @@ class MkvCascadeResolver(
         if (activeProviders.size >= 2) {
             val primary = activeProviders[0]
             val secondary = activeProviders[1]
+            val hedgeQueue = LinkedBlockingQueue<ProviderFetchOutcome>(2)
             attempted.add(primary.priority)
-            val primaryFuture = sharedProviderPool.submit<ProviderFetchOutcome> {
-                fetchFromProvider(primary, animeTitle, episodeNumber)
-            }
-            val fastPrimary = try {
-                primaryFuture.get(HEDGE_DELAY_MS, TimeUnit.MILLISECONDS)
-            } catch (_: TimeoutException) {
-                null
-            } catch (e: Exception) {
-                ProviderFetchOutcome(primary.priority, error = e.message ?: e::class.java.simpleName)
-            }
-
-            if (fastPrimary != null) {
-                val resolved = handleProviderOutcome(
-                    fastPrimary, cacheKey, qualityOrder, allowBatchFallback, preferCompatibleContainer, attempted, errors, cfHosts
-                )
-                if (resolved != null) return resolved
-                idx = 1
-            } else {
-                attempted.add(secondary.priority)
-                val secondaryFuture = sharedProviderPool.submit<ProviderFetchOutcome> {
-                    fetchFromProvider(secondary, animeTitle, episodeNumber)
+            val primaryFuture = sharedProviderPool.submit {
+                val outcome = runCatching {
+                    fetchFromProvider(primary, animeTitle, episodeNumber)
+                }.getOrElse { e ->
+                    ProviderFetchOutcome(primary.priority, error = e.message ?: e::class.java.simpleName)
                 }
-                val cs = ExecutorCompletionService<ProviderFetchOutcome>(sharedProviderPool)
-                val f1 = cs.submit { runCatching { primaryFuture.get(15, TimeUnit.SECONDS) }.getOrElse { ProviderFetchOutcome(primary.priority, error = it.message ?: "timeout") } }
-                val f2 = cs.submit { runCatching { secondaryFuture.get(15, TimeUnit.SECONDS) }.getOrElse { ProviderFetchOutcome(secondary.priority, error = it.message ?: "timeout") } }
-                try {
+                hedgeQueue.offer(outcome)
+            }
+            var secondaryFuture: Future<*>? = null
+            try {
+                val fastPrimary = runCatching {
+                    hedgeQueue.poll(HEDGE_DELAY_MS, TimeUnit.MILLISECONDS)
+                }.getOrNull()
+
+                if (fastPrimary != null) {
+                    val resolved = handleProviderOutcome(
+                        fastPrimary, cacheKey, qualityOrder, allowBatchFallback, preferCompatibleContainer, attempted, errors, cfHosts
+                    )
+                    if (resolved != null) return resolved
+                    idx = 1
+                } else {
+                    attempted.add(secondary.priority)
+                    secondaryFuture = sharedProviderPool.submit {
+                        val outcome = runCatching {
+                            fetchFromProvider(secondary, animeTitle, episodeNumber)
+                        }.getOrElse { e ->
+                            ProviderFetchOutcome(secondary.priority, error = e.message ?: e::class.java.simpleName)
+                        }
+                        hedgeQueue.offer(outcome)
+                    }
+                    val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(16L)
                     repeat(2) {
-                        val done = runCatching { cs.poll(16, TimeUnit.SECONDS)?.get() }.getOrNull() ?: return@repeat
+                        val remainingNs = deadlineNs - System.nanoTime()
+                        if (remainingNs <= 0L) return@repeat
+                        val done = runCatching {
+                            hedgeQueue.poll(remainingNs, TimeUnit.NANOSECONDS)
+                        }.getOrNull() ?: return@repeat
                         val resolved = handleProviderOutcome(
                             done, cacheKey, qualityOrder, allowBatchFallback, preferCompatibleContainer, attempted, errors, cfHosts
                         )
                         if (resolved != null) return resolved
                     }
-                } finally {
-                    f1.cancel(true)
-                    f2.cancel(true)
-                    primaryFuture.cancel(true)
-                    secondaryFuture.cancel(true)
+                    idx = 2
                 }
-                idx = 2
+            } finally {
+                if (!primaryFuture.isDone) primaryFuture.cancel(true)
+                secondaryFuture?.let { if (!it.isDone) it.cancel(true) }
             }
         }
 
         while (idx < activeProviders.size) {
+            if (Thread.currentThread().isInterrupted) break
             val provider = activeProviders[idx++]
             attempted.add(provider.priority)
             val outcome = fetchFromProvider(provider, animeTitle, episodeNumber)
@@ -1320,14 +1329,20 @@ class MkvCascadeResolver(
                     }
                 )
             }
-            val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(12L)
+            var deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(7L)
+            val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(400L)
             repeat(batch.size) {
+                if (Thread.currentThread().isInterrupted) return@repeat
                 val remainingNs = deadlineNs - System.nanoTime()
                 if (remainingNs <= 0L) return@repeat
                 val fut = runCatching { cs.poll(remainingNs, TimeUnit.NANOSECONDS) }.getOrNull() ?: return@repeat
                 val item = runCatching { fut.get() }.getOrNull()
                 if (item != null) {
                     results.add(item)
+                    if (results.size == 1) {
+                        val graceDeadline = System.nanoTime() + firstWinGraceNs
+                        if (graceDeadline < deadlineNs) deadlineNs = graceDeadline
+                    }
                     if (results.size >= maxResults) return@repeat
                 }
             }
@@ -1349,7 +1364,7 @@ class MkvCascadeResolver(
         }
 
         private val providerSeq = AtomicInteger(1)
-        private val sharedProviderPool: ExecutorService = Executors.newFixedThreadPool(4) { r ->
+        private val sharedProviderPool: ExecutorService = Executors.newFixedThreadPool(8) { r ->
             Thread(r, "milkglass-provider-${providerSeq.getAndIncrement()}").apply {
                 isDaemon = true
             }
