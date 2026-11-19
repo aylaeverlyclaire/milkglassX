@@ -215,7 +215,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(Color(0xFF2B1215))
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                            .padding(horizontal = 16.dp, vertical = 10.dp),  // grid-exempt: 10dp sengaja (kontrol pemutar)
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -330,7 +330,7 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
                     .padding(
                         start = 16.dp,
                         end = 16.dp,
-                        bottom = if (fullscreen) 28.dp else 10.dp
+                        bottom = if (fullscreen) 28.dp else 10.dp  // grid-exempt: 10dp sengaja (kontrol pemutar)
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -542,7 +542,7 @@ private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Mo
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             MilkText(ctl.episodeLineOf(a, ep), ty.title, c.onSurface)
             MilkText("${a.romaji} ${tr.t("player.minutesSuffix", "episodeMinutes" to a.episodeMinutes)}", ty.body, c.onSurfaceVariant)
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {  // grid-exempt: 10dp sengaja (kontrol pemutar)
                 val btnLabel = when {
                     alreadyDownloaded || dlStatus.isSucceeded -> "MKV ${targetQuality.label} Tersimpan"
                     dlStatus.isRunning -> "Mengunduh ${dlStatus.progressPercent}%..."
