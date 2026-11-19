@@ -14,6 +14,8 @@ import { AppBindings } from '../index';
 export const catalogRoutes = new Hono<{ Bindings: AppBindings }>();
 
 const CATALOG_STALE_AFTER_SEC = 18 * 3600;
+// Metadata AniList hanya pelengkap pencarian; jangan biarkan ia menahan hasil D1 lebih dari ini.
+const SEARCH_ANILIST_TIMEOUT_MS = 2500;
 const LIST_COLUMNS = `id, mal_id, title, title_alt, score, type, status, schedule_day,
                 duration, studio, release_season, poster_url, popularity, updated_at,
                 genres_json, episodes_total, next_airing_at, next_airing_ep`;
@@ -389,7 +391,7 @@ catalogRoutes.get('/search', edgeCache(300, 600, true), async (c) => {
     )
       .bind(pattern)
       .all<Record<string, unknown>>(),
-    searchAniListMetadata(q),
+    searchAniListMetadata(q, SEARCH_ANILIST_TIMEOUT_MS),
   ]);
 
   return c.json({

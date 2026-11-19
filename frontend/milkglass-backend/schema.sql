@@ -141,3 +141,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_prev_hash ON user_sessions(previous_toke
 CREATE INDEX IF NOT EXISTS idx_catalog_title ON catalog_episodes(title);
 CREATE INDEX IF NOT EXISTS idx_catalog_anilist ON catalog_episodes(anilist_id, episode);
 CREATE INDEX IF NOT EXISTS idx_catalog_rec ON catalog_episodes(is_recommended, updated_at DESC);
+-- Perf: /home (popular), /browse dan /snapshot mengurutkan popularity DESC tanpa filter status.
+CREATE INDEX IF NOT EXISTS idx_animes_pop ON animes(popularity DESC);
+-- Perf: GET /v1/catalog/ mengurutkan updated_at DESC tanpa filter is_recommended.
+CREATE INDEX IF NOT EXISTS idx_catalog_updated ON catalog_episodes(updated_at DESC);
+-- Perf: cron 15 menit menghapus sesi kedaluwarsa (expires_at) tanpa full scan.
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON user_sessions(expires_at);

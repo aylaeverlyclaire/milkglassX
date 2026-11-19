@@ -427,7 +427,10 @@ export async function getOtakudesuBaseUrl(db: D1Database): Promise<string> {
   return (await getSourceBaseUrls(db)).otakudesu;
 }
 
-export async function searchAniListMetadata(searchQuery: string): Promise<AniListSearchMetadata[]> {
+export async function searchAniListMetadata(
+  searchQuery: string,
+  timeoutMs = 5000
+): Promise<AniListSearchMetadata[]> {
   const graphqlQuery = `
     query ($search: String) {
       Page(page: 1, perPage: 12) {
@@ -450,7 +453,7 @@ export async function searchAniListMetadata(searchQuery: string): Promise<AniLis
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ query: graphqlQuery, variables: { search: searchQuery } }),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return [];
     const json = (await res.json()) as {

@@ -7,6 +7,8 @@ interface RateBucket {
 
 const isolateBuckets = new Map<string, RateBucket>();
 const MAX_BUCKETS = 5000;
+const SWEEP_INTERVAL_SEC = 30;
+let lastSweepSec = 0;
 
 export function normalizeClientIp(rawIp: string | undefined): string {
   if (!rawIp) return '0.0.0.0';
@@ -53,6 +55,7 @@ export function rateLimit(maxRequests: number, windowSeconds: number) {
     } else {
       existing.count += 1;
       if (existing.count > maxRequests) {
+        c.header('Retry-After', String(Math.max(1, existing.resetAt - now)));
         return c.json(
           { status: 'error', message: 'Server lagi sibuk.' },
           429
@@ -61,8 +64,12 @@ export function rateLimit(maxRequests: number, windowSeconds: number) {
     }
 
     if (isolateBuckets.size > MAX_BUCKETS) {
-      for (const [k, v] of isolateBuckets.entries()) {
-        if (v.resetAt <= now) isolateBuckets.delete(k);
+      // Sapuan penuh O(n) dibatasi sekali per SWEEP_INTERVAL_SEC supaya tidak jalan di setiap request saat ramai.
+      if (now - lastSweepSec >= SWEEP_INTERVAL_SEC) {
+        lastSweepSec = now;
+        for (const [k, v] of isolateBuckets.entries()) {
+          if (v.resetAt <= now) isolateBuckets.delete(k);
+        }
       }
       while (isolateBuckets.size > MAX_BUCKETS) {
         const oldestKey = isolateBuckets.keys().next().value;

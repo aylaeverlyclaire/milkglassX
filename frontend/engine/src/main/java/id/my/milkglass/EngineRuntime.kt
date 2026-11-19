@@ -38,7 +38,8 @@ object MilkglassEndpoints {
 
 data class HttpTextResponse(
     val code: Int,
-    val body: String
+    val body: String,
+    val etag: String? = null
 )
 
 interface EngineHttpTextClient {
@@ -186,7 +187,7 @@ class EngineRuntime private constructor(appContext: Context) {
             val builder = Request.Builder().url(url).header("Accept", "application/json")
             headers.forEach { (k, v) -> builder.header(k, v) }
             clients.mediaAndApiClient.newCall(builder.build()).execute().use { resp ->
-                return HttpTextResponse(resp.code, resp.body?.string().orEmpty())
+                return HttpTextResponse(resp.code, resp.body?.string().orEmpty(), resp.header("ETag"))
             }
         }
 

@@ -23,6 +23,8 @@ interface CatalogTransport {
     suspend fun get(pathAndQuery: String): String
 }
 
+private const val MAX_ETAG_ENTRIES = 24
+
 class CatalogHttpException(val code: Int) : Exception("HTTP $code")
 
 class CatalogUnavailable(message: String) : Exception(message)
@@ -32,11 +34,34 @@ class HttpUrlTransport(
     private val timeoutMs: Int = 15_000,
     private val httpClient: EngineHttpTextClient? = null,
 ) : CatalogTransport {
+    // Revalidasi ETag: backend membalas 304 (tanpa body) bila katalog tidak berubah, jadi refresh /home dan
+    // /status tidak mengunduh ulang JSON penuh. Hanya path tanpa query yang disimpan (query = kunci berversi
+    // seperti /snapshot?v=..., yang sudah immutable) dan dibatasi LRU kecil agar memori tidak membengkak.
+    private val etagCache = object : LinkedHashMap<String, Pair<String, String>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, String>>?): Boolean =
+            size > MAX_ETAG_ENTRIES
+    }
+
     override suspend fun get(pathAndQuery: String): String = withContext(Dispatchers.IO) {
         val targetUrl = baseUrl.trimEnd('/') + pathAndQuery
         if (httpClient != null) {
-            val resp = httpClient.get(targetUrl)
+            val revalidatable = '?' !in pathAndQuery
+            val known = if (revalidatable) synchronized(etagCache) { etagCache[targetUrl] } else null
+            val resp = if (known != null) {
+                httpClient.get(targetUrl, mapOf("If-None-Match" to known.first))
+            } else {
+                httpClient.get(targetUrl)
+            }
+            if (resp.code == 304 && known != null) return@withContext known.second
             if (resp.code !in 200..299) throw CatalogHttpException(resp.code)
+            if (revalidatable) {
+                val tag = resp.etag
+                if (tag.isNullOrBlank()) {
+                    synchronized(etagCache) { etagCache.remove(targetUrl) }
+                } else {
+                    synchronized(etagCache) { etagCache[targetUrl] = tag to resp.body }
+                }
+            }
             return@withContext resp.body
         }
         val conn = URL(targetUrl).openConnection() as HttpURLConnection
