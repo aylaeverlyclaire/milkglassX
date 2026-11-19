@@ -78,7 +78,12 @@ class SourceAvailabilityIndex(
             return entries.size
         }
 
-        val executor = Executors.newFixedThreadPool(4)
+        val executor = Executors.newFixedThreadPool(4) { r ->
+            Thread {
+                runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
+                r.run()
+            }.apply { isDaemon = true; name = "milkglass-index-fetch" }
+        }
         val fetchedBySource = linkedMapOf<SourcePriority, List<IndexedAnimeEntry>>()
         try {
             val tasks = listOf(

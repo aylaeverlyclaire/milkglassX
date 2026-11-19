@@ -333,11 +333,22 @@ class EngineRuntime private constructor(appContext: Context) {
         }
     }
 
+    /** Menunggu giliran prefetch, tapi langsung menyerah begitu ada permintaan yang lebih baru. */
+    private fun acquirePrefetchGate(key: String): Boolean {
+        val deadline = System.currentTimeMillis() + 30_000L
+        while (System.currentTimeMillis() < deadline) {
+            if (latestPrefetchKey != key) return false
+            if (prefetchGate.tryAcquire(250, java.util.concurrent.TimeUnit.MILLISECONDS)) return true
+        }
+        return false
+    }
+
     fun prefetchEpisode(
         title: String,
         romajiTitle: String,
         episode: Int,
-        preferredRes: String = "1080p"
+        preferredRes: String = "1080p",
+        maxAgeMs: Long = Long.MAX_VALUE
     ) {
         if (episode <= 0) return
         val searchTitle = romajiTitle.ifBlank { title }.trim()
@@ -348,14 +359,15 @@ class EngineRuntime private constructor(appContext: Context) {
         backgroundScope.launch {
             var held = false
             try {
-                held = prefetchGate.tryAcquire(20, java.util.concurrent.TimeUnit.SECONDS)
+                held = acquirePrefetchGate(key)
                 if (!held || latestPrefetchKey != key) return@launch
                 val slug = StreamResolver.buildEpisodeSlug(searchTitle, episode)
                 streamResolver.prefetchStream(
                     slug = slug,
                     preferredRes = preferredRes,
                     title = title,
-                    romajiTitle = romajiTitle
+                    romajiTitle = romajiTitle,
+                    maxAgeMs = maxAgeMs
                 )
             } catch (_: Throwable) {
             } finally {

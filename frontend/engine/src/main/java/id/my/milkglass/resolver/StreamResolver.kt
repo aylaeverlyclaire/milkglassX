@@ -230,12 +230,15 @@ class StreamResolver(
         slug: String,
         preferredRes: String = "1080p",
         title: String = "",
-        romajiTitle: String = ""
+        romajiTitle: String = "",
+        maxAgeMs: Long = RESOLVED_CACHE_TTL_MS
     ): Boolean {
         val preferredQuality = MkvQuality.fromText(preferredRes) ?: MkvQuality.P1080
         val sessionCacheKey = "${slug.lowercase()}#${preferredQuality.label}#std"
         val nowMs = System.currentTimeMillis()
-        if (resolvedCache[sessionCacheKey]?.let { nowMs - it.cachedAtMs <= RESOLVED_CACHE_TTL_MS } == true) {
+        // maxAgeMs < TTL = "segarkan bila lebih tua dari ini". Entri lama tetap dipakai kalau penyegaran gagal.
+        val maxAge = maxAgeMs.coerceIn(0L, RESOLVED_CACHE_TTL_MS)
+        if (resolvedCache[sessionCacheKey]?.let { nowMs - it.cachedAtMs <= maxAge } == true) {
             return true
         }
         val episodeNum = extractEpisodeNumber(slug)
@@ -357,7 +360,9 @@ class StreamResolver(
         }
 
         inFlightResolutions[sessionCacheKey]?.let { inflight ->
-            val joined = runCatching { inflight.get(25, TimeUnit.SECONDS) }.getOrNull()
+            // Bergabung dengan prefetch yang sedang jalan, tapi dibatasi: prefetch yang macet tidak boleh
+            // menahan pemutaran lebih dari ini (setelahnya resolve sendiri berjalan paralel).
+            val joined = runCatching { inflight.get(JOIN_INFLIGHT_MAX_MS, TimeUnit.MILLISECONDS) }.getOrNull()
             if (joined != null) {
                 return@withContext startSessionForCandidates(
                     candidates = joined.candidates,
@@ -690,6 +695,7 @@ class StreamResolver(
     companion object {
         const val DEFAULT_BACKEND_BASE_URL = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL
         private const val RESOLVED_CACHE_TTL_MS = 10L * 60L * 1000L
+        private const val JOIN_INFLIGHT_MAX_MS = 12_000L
 
         fun buildEpisodeSlug(romajiOrTitle: String, episode: Int): String {
             val clean = romajiOrTitle.lowercase()

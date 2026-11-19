@@ -51,6 +51,9 @@ class MainActivity : ComponentActivity() {
         val loaded = mutableStateOf<Loaded?>(null)
         val appCtx = applicationContext
         val density = resources.displayMetrics.density
+        // AppData (parse JSON aset) dan EngineRuntime (OkHttp, keystore, cache) saling bebas: jalankan paralel.
+        val dataTask = java.util.concurrent.FutureTask { AppData.load(appCtx) }
+        Thread(dataTask, "milkglass-appdata").start()
         Thread {
             val runtime = EngineRuntime.get(appCtx)
             val sharedHttp = runtime.httpTextClient
@@ -67,20 +70,20 @@ class MainActivity : ComponentActivity() {
                 }
             }.apply { start() }
 
-            val data = AppData.load(appCtx)
+            val data = dataTask.get()
             val posters = PosterStore(emptyMap())
-            PosterBitmaps.prewarm(posters, density)
+            runCatching { PosterBitmaps.prewarm(posters, density) }
 
             val repo = CatalogRepository(
                 HttpUrlTransport(httpClient = sharedHttp),
                 FileCatalogCache(File(cacheDir, "catalog_home.json")),
                 snapshots = FileSnapshotStore(File(filesDir, "catalog")),
             )
-            availabilityIndex.awaitDiskLoad(1_500L)
+            runCatching { availabilityIndex.awaitDiskLoad(1_500L) }
             val c = AppController(
                 data, posters, StateStore(File(filesDir, StateStore.FILE_NAME)),
                 catalogRepo = repo,
-                initialCatalog = repo.cachedSnapshot(),
+                initialCatalog = runCatching { repo.cachedSnapshot() }.getOrNull(),
                 metaSource = AniZipMetaSource(httpClient = sharedHttp),
                 skipSource = AniSkipSource(httpClient = sharedHttp),
                 extrasSource = AniListExtrasHttpSource(httpClient = sharedHttp),

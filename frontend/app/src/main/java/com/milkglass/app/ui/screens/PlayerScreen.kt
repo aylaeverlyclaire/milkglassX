@@ -173,10 +173,18 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
 
     LaunchedEffect(e) { ctl.loadSkipTimes(e) }
     LaunchedEffect(e.anime.id) { ctl.loadEpisodeMeta(e.anime) }
-    LaunchedEffect(snap.isReady, e.anime.id, e.episode, ctl.persisted.settings.quality) {
+    // Cache hasil resolve hanya berlaku 10 menit, sedangkan prefetch pertama terjadi di awal episode.
+    // Menjelang akhir (<= 4 menit tersisa) segarkan lagi supaya auto-next tidak mulai dari nol.
+    val nearEnd by androidx.compose.runtime.remember(e) {
+        androidx.compose.runtime.derivedStateOf { e.duration > 0 && e.duration - e.position <= 240.0 }
+    }
+    LaunchedEffect(snap.isReady, e.anime.id, e.episode, ctl.persisted.settings.quality, nearEnd) {
         if (snap.isReady && ctl.online) {
             ctl.nextPlayableEpisode(e.anime, e.episode)?.let { nextEp ->
-                EngineRuntime.get(context.applicationContext).prefetchEpisode(e.anime.title, e.anime.romaji, nextEp, ctl.persisted.settings.quality)
+                EngineRuntime.get(context.applicationContext).prefetchEpisode(
+                    e.anime.title, e.anime.romaji, nextEp, ctl.persisted.settings.quality,
+                    maxAgeMs = if (nearEnd) 5L * 60L * 1000L else Long.MAX_VALUE,
+                )
             }
         }
     }
