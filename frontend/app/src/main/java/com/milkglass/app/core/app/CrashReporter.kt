@@ -1,0 +1,75 @@
+package com.milkglass.app.core.app
+
+import android.app.Activity
+import android.app.ActivityManager
+import android.app.AlertDialog
+import android.content.Context
+import android.os.Build
+import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
+
+/**
+ * Merekam penyebab aplikasi berhenti, lalu menampilkannya saat aplikasi dibuka lagi
+ * agar bisa di-screenshot. Dua sumber: exception Java yang tak tertangkap, dan
+ * alasan keluar proses dari sistem (ANR, kehabisan memori, crash native; Android 11+).
+ */
+object CrashReporter {
+    private const val FILE = "last_crash.txt"
+    private const val PREFS = "crash_reporter"
+
+    fun install(ctx: Context) {
+        val app = ctx.applicationContext
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            runCatching {
+                val sw = StringWriter()
+                error.printStackTrace(PrintWriter(sw))
+                File(app.filesDir, FILE).writeText("thread: ${thread.name}\n$sw".take(5000))
+            }
+            previous?.uncaughtException(thread, error)
+        }
+    }
+
+    fun pendingReport(ctx: Context): String? {
+        val exit = exitReason(ctx)
+        val f = File(ctx.filesDir, FILE)
+        if (f.exists()) {
+            val text = runCatching { f.readText() }.getOrNull()
+            runCatching { f.delete() }
+            if (!text.isNullOrBlank()) return text
+        }
+        return exit
+    }
+
+    fun show(activity: Activity, report: String) {
+        runCatching {
+            AlertDialog.Builder(activity)
+                .setTitle("Milkglass sempat berhenti")
+                .setMessage("Mohon screenshot layar ini dan kirim ke pengembang.\n\n" + report.take(2200))
+                .setPositiveButton("OK", null)
+                .show()
+        }
+    }
+
+    private fun exitReason(ctx: Context): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return runCatching {
+            val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val info = am.getHistoricalProcessExitReasons(ctx.packageName, 0, 1).firstOrNull() ?: return null
+            val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (info.timestamp <= prefs.getLong("seen_exit_ts", 0L)) return null
+            prefs.edit().putLong("seen_exit_ts", info.timestamp).apply()
+            val name = when (info.reason) {
+                2 -> "SIGNALED (dimatikan sinyal)"
+                3 -> "LOW_MEMORY (kehabisan memori)"
+                4 -> "CRASH (exception Java)"
+                5 -> "CRASH_NATIVE (crash native)"
+                6 -> "ANR (tidak merespons)"
+                9 -> "EXCESSIVE_RESOURCE_USAGE"
+                else -> return null
+            }
+            "alasan keluar: $name\n${info.description.orEmpty()}"
+        }.getOrNull()
+    }
+}

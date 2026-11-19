@@ -171,6 +171,8 @@ class SourceConfigStore(
 class EngineRuntime private constructor(appContext: Context) {
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val inFlightPrefetches = ConcurrentHashMap.newKeySet<String>()
+    private val prefetchGate = java.util.concurrent.Semaphore(1)
+    @Volatile private var latestPrefetchKey: String = ""
 
     @Volatile
     private var remoteCfDisabledUntilMs: Long = 0L
@@ -342,8 +344,12 @@ class EngineRuntime private constructor(appContext: Context) {
         if (searchTitle.length < 2) return
         val key = "${searchTitle.lowercase(Locale.ROOT)}#$episode"
         if (!inFlightPrefetches.add(key)) return
+        latestPrefetchKey = key
         backgroundScope.launch {
+            var held = false
             try {
+                held = prefetchGate.tryAcquire(20, java.util.concurrent.TimeUnit.SECONDS)
+                if (!held || latestPrefetchKey != key) return@launch
                 val slug = StreamResolver.buildEpisodeSlug(searchTitle, episode)
                 streamResolver.prefetchStream(
                     slug = slug,
@@ -353,6 +359,7 @@ class EngineRuntime private constructor(appContext: Context) {
                 )
             } catch (_: Throwable) {
             } finally {
+                if (held) prefetchGate.release()
                 inFlightPrefetches.remove(key)
             }
         }

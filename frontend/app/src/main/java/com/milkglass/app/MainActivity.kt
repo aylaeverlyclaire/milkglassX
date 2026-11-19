@@ -29,6 +29,7 @@ import com.milkglass.app.core.remote.FileCatalogCache
 import com.milkglass.app.core.remote.FileSnapshotStore
 import com.milkglass.app.core.remote.HttpUrlTransport
 import com.milkglass.app.core.storage.StateStore
+import com.milkglass.app.core.app.CrashReporter
 import com.milkglass.app.ui.shell.AppRoot
 import id.my.milkglass.EngineRuntime
 import java.io.File
@@ -41,6 +42,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashReporter.install(applicationContext)
+        CrashReporter.pendingReport(this)?.let { CrashReporter.show(this, it) }
 
         val gridOverlay = intent.getBooleanExtra("grid", false)
 
