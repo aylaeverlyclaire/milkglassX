@@ -60,7 +60,7 @@ class MainActivity : ComponentActivity() {
                 runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
                 runCatching { runtime.sourceConfig.refreshIfNeeded() }
                 val count = runCatching { availabilityIndex.refreshIfNeeded() }.getOrDefault(0)
-                if (count > 0) {
+                if (count > 0 || availabilityIndex.isReady) {
                     runOnUiThread {
                         if (!isFinishing && !isDestroyed) controller?.notifyAvailabilityUpdated()
                     }
@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
                 FileCatalogCache(File(cacheDir, "catalog_home.json")),
                 snapshots = FileSnapshotStore(File(filesDir, "catalog")),
             )
+            availabilityIndex.awaitDiskLoad(1_500L)
             val c = AppController(
                 data, posters, StateStore(File(filesDir, StateStore.FILE_NAME)),
                 catalogRepo = repo,

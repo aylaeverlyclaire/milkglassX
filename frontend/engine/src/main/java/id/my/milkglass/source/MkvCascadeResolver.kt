@@ -148,6 +148,12 @@ internal object TitleMatcher {
         Regex("""\bpart\s*(\d+)\b""", RegexOption.IGNORE_CASE)
     )
     private val romanSeasonRegex = Regex("""\b(II|III|IV|V)\b""")
+    private val whitespaceRegex = Regex("\\s+")
+    private val ordinalSeasonRegex = Regex("""\b(\d+)(?:nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE)
+    private val shortSeasonRegex = Regex("""\bs(\d+)\b""", RegexOption.IGNORE_CASE)
+    private val roman3Regex = Regex("""\bIII\b""")
+    private val roman2Regex = Regex("""\bII\b""")
+    private val roman4Regex = Regex("""\bIV\b""")
 
     fun parse(input: String): ParsedTitle {
         val noBrackets = brackets.replace(input, " ")
@@ -173,7 +179,7 @@ internal object TitleMatcher {
         for (p in seasonPatterns) stripped = p.replace(stripped, " ")
         stripped = romanSeasonRegex.replace(stripped, " ")
         val canonicalBase = nonWord.replace(stripped.lowercase(Locale.ROOT), " ")
-            .replace(Regex("\\s+"), " ")
+            .replace(whitespaceRegex, " ")
             .trim()
         return ParsedTitle(
             canonicalBase = canonicalBase,
@@ -184,11 +190,11 @@ internal object TitleMatcher {
 
     fun tokenize(input: String): Set<String> {
         val normalized = brackets.replace(input, " ")
-            .replace(Regex("""\b(\d+)(?:nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE), "season $1")
-            .replace(Regex("""\bs(\d+)\b""", RegexOption.IGNORE_CASE), "season $1")
-            .replace(Regex("""\bIII\b"""), "season 3")
-            .replace(Regex("""\bII\b"""), "season 2")
-            .replace(Regex("""\bIV\b"""), "season 4")
+            .replace(ordinalSeasonRegex, "season $1")
+            .replace(shortSeasonRegex, "season $1")
+            .replace(roman3Regex, "season 3")
+            .replace(roman2Regex, "season 2")
+            .replace(roman4Regex, "season 4")
         return nonWord.replace(normalized.lowercase(Locale.ROOT), " ")
             .split(" ")
             .map { it.trim() }
@@ -227,10 +233,10 @@ internal object TitleMatcher {
     fun searchQueries(animeTitle: String): List<String> {
         val p = parse(animeTitle)
         val cleanFull = nonWord.replace(brackets.replace(animeTitle, " "), " ")
-            .replace(Regex("\\s+"), " ")
+            .replace(whitespaceRegex, " ")
             .trim()
         val beforeColon = nonWord.replace(brackets.replace(animeTitle.substringBefore(":"), " "), " ")
-            .replace(Regex("\\s+"), " ")
+            .replace(whitespaceRegex, " ")
             .trim()
         val base = p.canonicalBase
         val out = mutableListOf<String>()

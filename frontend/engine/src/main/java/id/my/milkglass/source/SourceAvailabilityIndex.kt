@@ -40,13 +40,26 @@ class SourceAvailabilityIndex(
     @Volatile
     private var lastSyncedAtMs: Long = 0L
 
+    private val diskLoaded = java.util.concurrent.CountDownLatch(1)
+
     init {
         if (prefs != null) {
             Thread {
                 runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
-                loadFromDisk()
+                try {
+                    loadFromDisk()
+                } finally {
+                    diskLoaded.countDown()
+                }
             }.start()
+        } else {
+            diskLoaded.countDown()
         }
+    }
+
+    /** Menunggu pemuatan indeks dari disk selesai (dibatasi waktu). Jangan dipanggil dari thread UI tanpa batas kecil. */
+    fun awaitDiskLoad(timeoutMs: Long = 10_000L) {
+        runCatching { diskLoaded.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS) }
     }
 
     val isReady: Boolean
@@ -59,6 +72,7 @@ class SourceAvailabilityIndex(
     }
 
     fun refreshIfNeeded(force: Boolean = false): Int {
+        awaitDiskLoad()
         val now = System.currentTimeMillis()
         if (!force && isReady && (now - lastSyncedAtMs) < INDEX_TTL_MS) {
             return entries.size
@@ -255,7 +269,7 @@ class SourceAvailabilityIndex(
     }
 
     private fun buildEntry(source: SourcePriority, rawTitle: String, url: String): IndexedAnimeEntry? {
-        val cleanTitle = rawTitle.replace(Regex("\\s+"), " ").trim()
+        val cleanTitle = rawTitle.replace(WHITESPACE, " ").trim()
         if (cleanTitle.length < 2 || !url.startsWith("http")) return null
         val tokens = TitleMatcher.tokenize(cleanTitle)
         if (tokens.isEmpty()) return null
@@ -270,8 +284,8 @@ class SourceAvailabilityIndex(
 
     private fun normalizeTitle(raw: String): String {
         return raw.lowercase(Locale.ROOT)
-            .replace(Regex("[^a-z0-9\\s]+"), " ")
-            .replace(Regex("\\s+"), " ")
+            .replace(NON_ALNUM, " ")
+            .replace(WHITESPACE, " ")
             .trim()
     }
 
@@ -315,6 +329,8 @@ class SourceAvailabilityIndex(
     }
 
     companion object {
+        private val WHITESPACE = Regex("\\s+")
+        private val NON_ALNUM = Regex("[^a-z0-9\\s]+")
         const val INDEX_TTL_MS = 12L * 60L * 60L * 1000L
         const val MIN_VALID_ENTRIES = 15
     }
