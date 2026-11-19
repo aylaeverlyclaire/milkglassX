@@ -1,0 +1,24 @@
+name: CF audit (sementara)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    env:
+      T: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      A: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Audit
+        run: |
+          B=https://api.cloudflare.com/client/v4/accounts/$A
+          g() { curl -sS -m 30 -H "Authorization: Bearer $T" "$@"; }
+          echo "== token verify"; g $B/tokens/verify | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('success'),d.get('result',{}).get('status'),d.get('errors'))"
+          echo "== workers"; g $B/workers/scripts | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('success'),[ (s['id'],s.get('modified_on','')[:10]) for s in d.get('result') or []],d.get('errors'))"
+          echo "== workers subdomain"; g $B/workers/subdomain | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('success'),d.get('result'),d.get('errors'))"
+          echo "== d1"; g "$B/d1/database?per_page=100" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('success'),[(x['name'],x['uuid']) for x in d.get('result') or []],d.get('errors'))"
+          echo "== kv"; g "$B/storage/kv/namespaces?per_page=100" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('success'),[(x['title'],x['id']) for x in d.get('result') or []],d.get('errors'))"
+          echo "== r2"; g "$B/r2/buckets" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('success'),d.get('result'),d.get('errors'))"
+          echo "== pages"; g "$B/pages/projects" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('success'),[x['name'] for x in d.get('result') or []],d.get('errors'))"
+          echo "== queues"; g "$B/queues" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('success'),[x.get('queue_name') for x in d.get('result') or []],d.get('errors'))"
