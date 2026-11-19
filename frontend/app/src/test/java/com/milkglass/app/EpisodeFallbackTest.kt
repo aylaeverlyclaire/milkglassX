@@ -4,6 +4,7 @@ import com.milkglass.app.core.remote.ChainedEpisodeMetaSource
 import com.milkglass.app.core.remote.EpisodeMeta
 import com.milkglass.app.core.remote.EpisodeMetaSource
 import com.milkglass.app.core.remote.parseAniListBanners
+import com.milkglass.app.core.remote.parseAniZipFanart
 import com.milkglass.app.core.remote.parseAniListStreaming
 import com.milkglass.app.core.remote.parseAniZipEpisodes
 import com.milkglass.app.core.remote.parseJikanEpisodes
@@ -80,5 +81,15 @@ class EpisodeFallbackTest {
         val fallback = Fake(mapOf(1 to EpisodeMeta("A", null)))
         assertEquals(mapOf(1 to EpisodeMeta("A", null)), ChainedEpisodeMetaSource(Fake(null), fallback).loadFor(1, 1))
         assertNull(ChainedEpisodeMetaSource(Fake(null), Fake(null)).loadFor(1, 1))
+    }
+
+    @Test fun fanartPicksFullSize169ImageNotBanner() {
+        val json = """{"images":[
+            {"coverType":"Banner","url":"https://x/banner.jpg"},
+            {"coverType":"Poster","url":"https://x/poster.jpg"},
+            {"coverType":"Fanart","url":"http://artworks.thetvdb.com/fanart/original/1.jpg"}]}"""
+        assertEquals("https://artworks.thetvdb.com/fanart/original/1.jpg", parseAniZipFanart(json))
+        assertEquals("", parseAniZipFanart("""{"images":[{"coverType":"Poster","url":"https://x/p.jpg"}]}"""))
+        assertNull(parseAniZipFanart("bukan json"))
     }
 }

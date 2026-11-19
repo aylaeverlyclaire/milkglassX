@@ -2,6 +2,9 @@ package com.milkglass.app.core.remote
 
 import id.my.milkglass.EngineHttpTextClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -75,4 +78,60 @@ internal fun parseAniListBanners(json: String): Map<Int, String>? {
         if (url != null) out[id] = url
     }
     return out
+}
+
+/**
+ * Fanart 16:9 resolusi penuh (±1920x1080) dari ani.zip — ini yang cocok untuk kartu 16:9.
+ * Banner AniList (±1900x400, rasio 4,75:1) hanya cadangan: dipotong ke 16:9 ia jadi irisan sempit yang pecah.
+ */
+class AniZipFanartSource(
+    private val timeoutMs: Int = 10_000,
+    private val httpClient: EngineHttpTextClient? = null,
+    private val concurrency: Int = 4,
+) : BannerSource {
+    override suspend fun load(ids: List<Int>): Map<Int, String>? = kotlinx.coroutines.coroutineScope {
+        val gate = kotlinx.coroutines.sync.Semaphore(concurrency)
+        val results = ids.map { id ->
+            async(Dispatchers.IO) {
+                gate.withPermit {
+                    id to httpGetJson(
+                        "https://api.ani.zip/mappings?anilist_id=$id",
+                        timeoutMs, notFound = "", httpClient = httpClient, parse = ::parseAniZipFanart,
+                    )
+                }
+            }
+        }.awaitAll()
+        if (results.isNotEmpty() && results.all { it.second == null }) null
+        else results.mapNotNull { (id, url) -> url?.takeIf { it.isNotEmpty() }?.let { id to it } }.toMap()
+    }
+}
+
+/** URL fanart pertama dari `images` ani.zip; "" bila tidak ada, null bila JSON rusak. Selalu https. */
+internal fun parseAniZipFanart(json: String): String? {
+    val root = runCatching { RemoteJson.parseToJsonElement(json) }.getOrNull() as? JsonObject ?: return null
+    for (el in (root["images"] as? JsonArray).orEmpty()) {
+        val o = el as? JsonObject ?: continue
+        if ((o["coverType"] as? JsonPrimitive)?.contentOrNull?.equals("Fanart", ignoreCase = true) != true) continue
+        val raw = (o["url"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+        when {
+            raw.startsWith("https://") -> return raw
+            raw.startsWith("http://") -> return "https://" + raw.removePrefix("http://")
+        }
+    }
+    return ""
+}
+
+/** Coba [primary]; id yang tidak punya gambar di sana dicoba di [fallback]. */
+class ChainedBannerSource(private val primary: BannerSource, private val fallback: BannerSource) : BannerSource {
+    override suspend fun load(ids: List<Int>): Map<Int, String>? {
+        val first = try { primary.load(ids) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
+        val missing = ids.filter { first == null || it !in first }
+        if (missing.isEmpty()) return first
+        val second = fallback.load(missing)
+        return when {
+            first == null -> second
+            second == null -> first
+            else -> first + second
+        }
+    }
 }
