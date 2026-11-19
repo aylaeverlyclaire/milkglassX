@@ -77,7 +77,13 @@ object ErrorMapper {
                 }
             }
             FailureReason.DNS -> "Gagal resolve DNS sumber video."
-            else -> detail ?: MSG_SOURCES_UNAVAILABLE
+            else -> {
+                val base = detail ?: MSG_SOURCES_UNAVAILABLE
+                if (error is PlaybackException) {
+                    val c = error.cause?.let { "${it.javaClass.simpleName}: ${it.message.orEmpty()}" }
+                    listOfNotNull(base, "[${error.errorCodeName}]", c).joinToString(" ").take(220)
+                } else base
+            }
         }
     }
 
