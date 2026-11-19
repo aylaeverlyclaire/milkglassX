@@ -41,7 +41,9 @@ class SourceAvailabilityIndex(
     private var lastSyncedAtMs: Long = 0L
 
     init {
-        loadFromDisk()
+        if (prefs != null) {
+            Thread { loadFromDisk() }.start()
+        }
     }
 
     val isReady: Boolean

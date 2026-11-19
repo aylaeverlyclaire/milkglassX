@@ -700,19 +700,77 @@ class MkvHosterExtractorRegistry(
 }
 
 object JsUnpacker {
-    private val packedRegex = Regex(
-        """\u007D\s*\(\s*'((?:[^'\\]|\\.)*)',\s*(\d+),\s*(\d+),\s*'((?:[^'\\]|\\.)*)'\s*\.split"""
-    )
+    private val wordRegex = Regex("""\b([0-9A-Za-z]+)\b""")
+
+    private fun readQuoted(src: String, startIdx: Int): Pair<String, Int>? {
+        var i = startIdx
+        val n = src.length
+        while (i < n && src[i].isWhitespace()) i++
+        if (i >= n || (src[i] != '\'' && src[i] != '"')) return null
+        val quote = src[i++]
+        val sb = StringBuilder()
+        while (i < n) {
+            val ch = src[i++]
+            if (ch == '\\' && i < n) {
+                val next = src[i++]
+                when (next) {
+                    quote -> sb.append(quote)
+                    '\\' -> sb.append('\\')
+                    '/' -> sb.append('/')
+                    'n' -> sb.append('\n')
+                    'r' -> sb.append('\r')
+                    't' -> sb.append('\t')
+                    else -> {
+                        sb.append('\\')
+                        sb.append(next)
+                    }
+                }
+            } else if (ch == quote) {
+                return sb.toString() to i
+            } else {
+                sb.append(ch)
+            }
+        }
+        return null
+    }
+
+    private fun skipCommaAndSpaces(src: String, startIdx: Int): Int {
+        var i = startIdx
+        val n = src.length
+        while (i < n && (src[i].isWhitespace() || src[i] == ',')) i++
+        return i
+    }
+
+    private fun readIntToken(src: String, startIdx: Int): Pair<Int, Int>? {
+        var i = startIdx
+        val n = src.length
+        while (i < n && src[i].isWhitespace()) i++
+        val start = i
+        while (i < n && src[i].isDigit()) i++
+        if (i == start) return null
+        val v = src.substring(start, i).toIntOrNull() ?: return null
+        return v to i
+    }
 
     fun unpack(source: String): String? {
-        val match = packedRegex.find(source) ?: return null
-        val payload = match.groupValues[1].replace("\\'", "'")
-        val radix = match.groupValues[2].toIntOrNull() ?: return null
-        val keys = match.groupValues[4].split("|")
-        return Regex("""\b(\w+)\b""").replace(payload) { m ->
+        val markerIdx = source.indexOf("eval(function(p,a,c,k,e")
+        val searchFrom = if (markerIdx >= 0) markerIdx else 0
+        val braceIdx = source.indexOf("}(", searchFrom)
+        if (braceIdx < 0) return null
+
+        val (payload, afterPayload) = readQuoted(source, braceIdx + 2) ?: return null
+        val radixPos = skipCommaAndSpaces(source, afterPayload)
+        val (radix, afterRadix) = readIntToken(source, radixPos) ?: return null
+        if (radix < 2 || radix > 36) return null
+        val countPos = skipCommaAndSpaces(source, afterRadix)
+        val (_, afterCount) = readIntToken(source, countPos) ?: return null
+        val keysPos = skipCommaAndSpaces(source, afterCount)
+        val (keysRaw, _) = readQuoted(source, keysPos) ?: return null
+        val keys = keysRaw.split("|")
+
+        return wordRegex.replace(payload) { m ->
             val word = m.groupValues[1]
             val idx = word.toLongOrNull(radix)?.toInt()
             if (idx != null && idx in keys.indices && keys[idx].isNotEmpty()) keys[idx] else word
         }
     }
-}

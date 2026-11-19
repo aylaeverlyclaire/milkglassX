@@ -248,6 +248,29 @@ class StreamResolver(
             return runCatching { existing.get(25, TimeUnit.SECONDS) != null }.getOrDefault(false)
         }
         return try {
+            val serverCandidates = resolveViaServerSplitPlane(
+                searchTitle = searchTitle,
+                episodeNum = episodeNum,
+                preferredQuality = preferredQuality,
+                preferCompatibleContainer = false
+            )
+            if (serverCandidates.isNotEmpty()) {
+                val chosen = serverCandidates.first()
+                val avail = serverCandidates.map { it.quality.label }.distinct()
+                    .ifEmpty { listOf(chosen.quality.label) }
+                val entry = CachedResolvedCandidates(
+                    cachedAtMs = System.currentTimeMillis(),
+                    candidates = serverCandidates,
+                    availableResolutions = avail,
+                    activeResolution = chosen.quality.label,
+                    resolvedSourceId = chosen.source.id,
+                    resolvedHoster = chosen.hoster
+                )
+                if (resolvedCache.size > 32) resolvedCache.clear()
+                resolvedCache[sessionCacheKey] = entry
+                mine.complete(entry)
+                return true
+            }
             val outcome = cascadeResolver.resolve(
                 animeTitle = searchTitle,
                 episodeNumber = episodeNum,
@@ -565,7 +588,13 @@ class StreamResolver(
                 var keepAlive = false
 
                 val startIdx = stickyIdx.get().coerceIn(0, (candidates.size - 1).coerceAtLeast(0))
-                val orderedIndices = (startIdx until candidates.size) + (0 until startIdx)
+                val rangeStart = rangeHeader?.substringAfter("bytes=", "")?.substringBefore("-")?.trim()?.toLongOrNull() ?: 0L
+                val isMidStreamSeek = rangeStart > 0L
+                val orderedIndices = if (isMidStreamSeek) {
+                    listOf(startIdx, startIdx)
+                } else {
+                    (startIdx until candidates.size) + (0 until startIdx)
+                }
                 for ((attemptPos, idx) in orderedIndices.withIndex()) {
                     val candidate = candidates[idx]
                     val isLast = attemptPos == orderedIndices.lastIndex
@@ -580,8 +609,12 @@ class StreamResolver(
                     }
                     if (method == "HEAD") reqBuilder.head()
 
+                    var headersSent = false
                     val outcome = runCatching {
                         clients.mediaAndApiClient.newCall(reqBuilder.build()).execute().use { resp ->
+                            if (isMidStreamSeek && resp.code == 200) {
+                                return@use Pair(false, false)
+                            }
                             val shouldFailover = !isLast && (resp.code == 403 || resp.code == 404 || resp.code == 410 || resp.code == 429 || resp.code >= 500)
                             if (shouldFailover) {
                                 EndpointHealthScorer.recordFailure(candidate.hoster)
@@ -593,7 +626,7 @@ class StreamResolver(
                             }
 
                             val contentLength = resp.header("Content-Length")
-                            val canKeepAlive = !clientWantsClose && (contentLength != null || method == "HEAD")
+                            val canKeepAlive = !clientWantsClose && method == "HEAD"
                             val statusText = when (resp.code) {
                                 206 -> "Partial Content"
                                 200 -> "OK"
@@ -603,11 +636,13 @@ class StreamResolver(
                             val sb = StringBuilder()
                             sb.append("HTTP/1.1 ${resp.code} $statusText\r\n")
                             sb.append("Content-Type: ${resp.header("Content-Type") ?: fallbackCt}\r\n")
-                            sb.append("Accept-Ranges: bytes\r\n")
+                            sb.append("Accept-Ranges: ${if (candidate.supportsRange) "bytes" else "none"}\r\n")
                             contentLength?.let { sb.append("Content-Length: $it\r\n") }
                             resp.header("Content-Range")?.let { sb.append("Content-Range: $it\r\n") }
                             sb.append("Connection: ${if (canKeepAlive) "keep-alive" else "close"}\r\n\r\n")
                             out.write(sb.toString().toByteArray())
+                            out.flush()
+                            headersSent = true
 
                             if (method != "HEAD") {
                                 resp.body?.byteStream()?.let { stream ->
@@ -624,7 +659,9 @@ class StreamResolver(
                             out.flush()
                             Pair(true, canKeepAlive)
                         }
-                    }.getOrDefault(Pair(false, false))
+                    }.getOrElse {
+                        if (headersSent) Pair(true, false) else Pair(false, false)
+                    }
 
                     if (outcome.first) {
                         handled = true
