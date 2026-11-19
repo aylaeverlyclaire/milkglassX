@@ -1,0 +1,15 @@
+name: tmp verify direct
+on: workflow_dispatch
+jobs:
+  v:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          U=https://milkglass-backend.milkyliquid.workers.dev
+          {
+            echo "direct-noauth: $(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"title":"ab","ep":1,"candidates":[]}' $U/v1/play/direct)"
+            echo "hint-noauth: $(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"title":"ab","ep":1,"candidates":[]}' $U/v1/play/hint)"
+            echo "resolve-noauth: $(curl -s -m 20 -o /dev/null -w '%{http_code}' "$U/v1/play/resolve?title=ab&ep=1")"
+            echo "nonexistent: $(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST $U/v1/play/zzz)"
+          } > o.txt; cat o.txt
+          echo "::notice title=verify::$(tr '\n' ' ' < o.txt)"
