@@ -658,29 +658,41 @@ class StreamResolver(
 
         // Prefetch yang sedang jalan: tunggu sebentar saja. Bila belum selesai, resolve sendiri dimulai SEKARANG dan
         // prefetch tetap ikut berlomba (dulu: menunggu sampai 12 dtk lalu mengulang dari nol).
-        val inflight = inFlightResolutions[sessionCacheKey]
+        val mine = CompletableFuture<CachedResolvedCandidates?>()
+        val inflight = inFlightResolutions.putIfAbsent(sessionCacheKey, mine)
         if (inflight != null) {
             val joinedEntry = inflight.awaitOrNull(JOIN_FAST_MS)
             if (joinedEntry != null) return startFromEntry(joinedEntry, scope)
         }
 
         val altTitle = if (searchTitle == romajiTitle) title else romajiTitle
-        val outcome = raceResolve(
-            searchTitle = searchTitle,
-            altTitle = altTitle,
-            episodeNum = episodeNum,
-            preferredQuality = preferredQuality,
-            preferCompatibleContainer = preferCompatibleContainer,
-            joined = inflight
-        )
-        return when (outcome) {
-            is RaceOutcome.Failed -> throw StreamResolutionException(outcome.reason, outcome.message)
-            is RaceOutcome.Candidates -> {
-                val entry = cacheEntryFor(outcome.list)
-                if (resolvedCache.size > 32) resolvedCache.clear()
-                resolvedCache[sessionCacheKey] = entry
-                startFromEntry(entry, scope)
+        return try {
+            val outcome = raceResolve(
+                searchTitle = searchTitle,
+                altTitle = altTitle,
+                episodeNum = episodeNum,
+                preferredQuality = preferredQuality,
+                preferCompatibleContainer = preferCompatibleContainer,
+                joined = inflight
+            )
+            when (outcome) {
+                is RaceOutcome.Failed -> {
+                    if (inflight == null) mine.complete(null)
+                    throw StreamResolutionException(outcome.reason, outcome.message)
+                }
+                is RaceOutcome.Candidates -> {
+                    val entry = cacheEntryFor(outcome.list)
+                    if (resolvedCache.size > 32) resolvedCache.clear()
+                    resolvedCache[sessionCacheKey] = entry
+                    if (inflight == null) mine.complete(entry)
+                    startFromEntry(entry, scope)
+                }
             }
+        } catch (t: Throwable) {
+            if (inflight == null && !mine.isDone) mine.complete(null)
+            throw t
+        } finally {
+            if (inflight == null) inFlightResolutions.remove(sessionCacheKey, mine)
         }
     }
 
@@ -733,14 +745,20 @@ class StreamResolver(
         val expectedPath = "/$sessionToken/stream"
         val localUrl = "http://127.0.0.1:${server.localPort}$expectedPath"
         val stickyIdx = AtomicInteger(0)
+        val activeSockets = ConcurrentHashMap.newKeySet<Socket>()
 
         val acceptJob = scope.launch(Dispatchers.IO) {
             try {
                 while (isActive && !server.isClosed) {
                     val clientSocket = runCatching { server.accept() }.getOrNull() ?: break
+                    activeSockets.add(clientSocket)
                     launch(Dispatchers.IO) {
-                        runCatching {
-                            handleLocalProxyRequest(clientSocket, expectedPath, candidates, stickyIdx)
+                        try {
+                            runCatching {
+                                handleLocalProxyRequest(clientSocket, expectedPath, candidates, stickyIdx)
+                            }
+                        } finally {
+                            activeSockets.remove(clientSocket)
                         }
                     }
                 }
@@ -759,6 +777,8 @@ class StreamResolver(
             closeSession = {
                 acceptJob.cancel()
                 runCatching { server.close() }
+                activeSockets.forEach { s -> runCatching { s.close() } }
+                activeSockets.clear()
             }
         )
     }
@@ -812,7 +832,7 @@ class StreamResolver(
                 val rangeStart = rangeHeader?.substringAfter("bytes=", "")?.substringBefore("-")?.trim()?.toLongOrNull() ?: 0L
                 val isMidStreamSeek = rangeStart > 0L
                 val orderedIndices = if (isMidStreamSeek) {
-                    listOf(startIdx, startIdx)
+                    listOf(startIdx) + (0 until candidates.size).filter { it != startIdx }
                 } else {
                     (startIdx until candidates.size) + (0 until startIdx)
                 }
