@@ -91,7 +91,8 @@ data class ResolvedMkvMedia(
     val sizeLabel: String? = null,
     val isBatchArchive: Boolean = false,
     val container: MediaContainer = MediaContainer.MKV,
-    val isHls: Boolean = false
+    val isHls: Boolean = false,
+    val extraHeaders: Map<String, String> = emptyMap()
 )
 
 data class CascadeDiagnostics(
@@ -111,7 +112,8 @@ sealed class CascadeResult {
     data class Success(
         val selected: ResolvedMkvMedia,
         val alternatives: List<ResolvedMkvMedia>,
-        val diagnostics: CascadeDiagnostics
+        val diagnostics: CascadeDiagnostics,
+        val availableQualities: List<MkvQuality> = listOf(selected.quality)
     ) : CascadeResult()
 
     data class Failure(
@@ -155,6 +157,7 @@ internal object TitleMatcher {
     private val roman3Regex = Regex("""\bIII\b""")
     private val roman2Regex = Regex("""\bII\b""")
     private val roman4Regex = Regex("""\bIV\b""")
+    private val roman5Regex = Regex("""\bV\b""")
 
     private val parseCache = java.util.concurrent.ConcurrentHashMap<String, ParsedTitle>()
 
@@ -207,6 +210,7 @@ internal object TitleMatcher {
             .replace(roman3Regex, "season 3")
             .replace(roman2Regex, "season 2")
             .replace(roman4Regex, "season 4")
+            .replace(roman5Regex, "season 5")
         return nonWord.replace(normalized.lowercase(Locale.ROOT), " ")
             .split(" ")
             .map { it.trim() }
@@ -481,7 +485,7 @@ abstract class BaseHtmlMkvProvider(
                     hosterLabel = "EmbedPlayer",
                     rawUrl = src,
                     pageReferer = epUrl,
-                    container = MediaContainer.MP4
+                    container = MediaContainer.UNKNOWN
                 )
             )
         }
@@ -565,13 +569,17 @@ class OtakudesuSourceProvider(
         val results = mutableListOf<RawMkvCandidate>()
 
         val downloadUls = epDoc.select("div.download ul")
-        downloadUls.forEach { ul ->
+        downloadUls.forEachIndexed { ulIdx, ul ->
             val blockHeader = ul.previousElementSibling()?.text().orEmpty()
+            val isImplicitMkvUl = downloadUls.size >= 2 && ulIdx == downloadUls.lastIndex
             ul.select("li").forEach { li ->
                 val strongText = li.selectFirst("strong")?.text().orEmpty()
                 val quality = MkvQuality.fromText(strongText) ?: return@forEach
                 if (quality !in targetQualities) return@forEach
-                val container = MediaContainer.detect(blockHeader, strongText)
+                val detected = MediaContainer.detect(blockHeader, strongText)
+                val container = if (detected == MediaContainer.UNKNOWN && isImplicitMkvUl && !strongText.contains("mp4", ignoreCase = true)) {
+                    MediaContainer.MKV
+                } else detected
                 val sizeLabel = li.selectFirst("i")?.text()?.trim()?.takeIf { it.isNotBlank() }
 
                 li.select("a[href]").forEach { a ->
@@ -770,7 +778,7 @@ class OploverzSourceProvider(
         if (bestAnimeUrl == null) return emptyList()
 
         var seriesUrl = bestAnimeUrl
-        var epUrl = if (seriesUrl.contains("/series/")) SeriesEpisodeMapCache.get(priority, seriesUrl, episodeNumber) else null
+        var epUrl = if (seriesUrl.contains("/series/") || seriesUrl.contains("/anime/")) SeriesEpisodeMapCache.get(priority, seriesUrl, episodeNumber) else null
         if (epUrl == null) {
             var animeDoc = runCatching { fetchDoc(seriesUrl, searchUrl) }.getOrElse {
                 if (!Thread.currentThread().isInterrupted) slugCache?.invalidate(priority, animeTitle)
@@ -806,7 +814,10 @@ class OploverzSourceProvider(
                 }?.selectFirst("a[href]")?.absUrl("href") ?: return emptyList()
         }
 
-        val epDoc = fetchDoc(epUrl, seriesUrl)
+        val epDoc = runCatching { fetchDoc(epUrl, seriesUrl) }.getOrElse {
+            if (!Thread.currentThread().isInterrupted) SeriesEpisodeMapCache.invalidate(priority, seriesUrl)
+            throw it
+        }
         val results = mutableListOf<RawMkvCandidate>()
 
         epDoc.select("div.soraddlx, div.mctnx, div.download-box").forEach { block ->
@@ -1135,7 +1146,8 @@ class MkvCascadeResolver(
                             referer = m.referer,
                             supportsRange = m.supportsRange,
                             isArchive = m.isBatchArchive,
-                            isHls = m.isHls
+                            isHls = m.isHls,
+                            extraHeaders = m.extraHeaders
                         )
                     )
                 }.getOrDefault(false)
@@ -1171,7 +1183,7 @@ class MkvCascadeResolver(
         val qualityOrder = listOf(preferredQuality) + MkvQuality.ALL_DESC.filterNot { it == preferredQuality }
         val usable = rankCandidates(raw, qualityOrder, false, preferCompatibleContainer)
         if (usable.isEmpty()) return emptyList()
-        return raceExtractCandidates(usable, maxResults = 3)
+        return raceExtractByQualityOrder(usable, qualityOrder, maxResults = 3)
     }
 
     fun resolve(
@@ -1198,12 +1210,14 @@ class MkvCascadeResolver(
 
         if (!cachedRaw.isNullOrEmpty()) {
             val usableCached = rankCandidates(cachedRaw, qualityOrder, allowBatchFallback, preferCompatibleContainer)
-            val fastResolved = raceExtractCandidates(usableCached, maxResults = 3)
+            val cachedQualities = usableCached.map { it.quality }.distinct().sortedByDescending { it.height }
+            val fastResolved = raceExtractByQualityOrder(usableCached, qualityOrder, maxResults = 3)
             if (fastResolved.isNotEmpty()) {
                 return CascadeResult.Success(
                     selected = fastResolved.first(),
                     alternatives = fastResolved.drop(1),
-                    diagnostics = CascadeDiagnostics(attempted, errors, cfHosts)
+                    diagnostics = CascadeDiagnostics(attempted, errors, cfHosts),
+                    availableQualities = cachedQualities
                 )
             }
         }
@@ -1345,20 +1359,22 @@ class MkvCascadeResolver(
             return null
         }
         SourceCircuitBreaker.recordSuccess(outcome.source)
-        putRawCache(cacheKey, outcome.candidates, System.currentTimeMillis())
         val usable = rankCandidates(outcome.candidates, qualityOrder, allowBatchFallback, preferCompatibleContainer)
         if (usable.isEmpty()) {
             errors[outcome.source] = "hanya arsip batch"
             return null
         }
-        val resolvedList = raceExtractCandidates(usable, maxResults = 3)
+        val availQualities = usable.map { it.quality }.distinct().sortedByDescending { it.height }
+        val resolvedList = raceExtractByQualityOrder(usable, qualityOrder, maxResults = 3)
         if (resolvedList.isNotEmpty()) {
+            putRawCache(cacheKey, outcome.candidates, System.currentTimeMillis())
             // Beri tahu lapisan Cloudflare (hint bersama). Tidak boleh memblok/menggagalkan pemutaran.
             runCatching { onEpisodeResolved?.invoke(cacheKey, usable.take(6)) }
             return CascadeResult.Success(
                 selected = resolvedList.first(),
                 alternatives = resolvedList.drop(1),
-                diagnostics = CascadeDiagnostics(attempted, errors, cfHosts)
+                diagnostics = CascadeDiagnostics(attempted, errors, cfHosts),
+                availableQualities = availQualities
             )
         }
         errors[outcome.source] = "${usable.size} link hoster gagal diekstrak/mati"
@@ -1399,9 +1415,29 @@ class MkvCascadeResolver(
             )
     }
 
+    private fun raceExtractByQualityOrder(
+        candidates: List<RawMkvCandidate>,
+        qualityOrder: List<MkvQuality>,
+        maxResults: Int = 3
+    ): List<ResolvedMkvMedia> {
+        val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L)
+        for (quality in qualityOrder) {
+            if (Thread.currentThread().isInterrupted) break
+            val remainingMs = TimeUnit.NANOSECONDS.toMillis(totalDeadlineNs - System.nanoTime())
+            if (remainingMs <= 500L) break
+            val tier = candidates.filter { it.quality == quality }
+            if (tier.isEmpty()) continue
+            val tierBudgetMs = remainingMs.coerceAtMost(4_500L)
+            val extracted = raceExtractCandidates(tier, maxResults = maxResults, timeoutMs = tierBudgetMs)
+            if (extracted.isNotEmpty()) return extracted
+        }
+        return emptyList()
+    }
+
     private fun raceExtractCandidates(
         candidates: List<RawMkvCandidate>,
-        maxResults: Int = 3
+        maxResults: Int = 3,
+        timeoutMs: Long = 7_000L
     ): List<ResolvedMkvMedia> {
         val fresh = candidates.filterNot { DeadCandidateCache.isDead(it.rawUrl) }
         val batch = (if (fresh.isNotEmpty()) fresh else candidates).take(8)
@@ -1447,14 +1483,15 @@ class MkvCascadeResolver(
                                 sizeLabel = candidate.sizeLabel,
                                 isBatchArchive = candidate.isBatchArchive || media.isArchive,
                                 container = detectedContainer,
-                                isHls = media.isHls
+                                isHls = media.isHls,
+                                extraHeaders = media.extraHeaders
                             )
                         }.getOrNull()
                     }
                 )
             }
-            var deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(7L)
-            val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(400L)
+            var deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+            val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(120L)
             repeat(batch.size) {
                 if (Thread.currentThread().isInterrupted) return@repeat
                 val remainingNs = deadlineNs - System.nanoTime()
@@ -1485,10 +1522,10 @@ class MkvCascadeResolver(
     companion object {
         private const val RAW_CACHE_TTL_MS = 20L * 60L * 1000L
         private const val DISK_RAW_TTL_MS = 6L * 60L * 60L * 1000L
-        private const val HEDGE_DELAY_MS = 650L
+        private const val HEDGE_DELAY_MS = 600L
 
         private val extractSeq = AtomicInteger(1)
-        private val sharedExtractionPool: ExecutorService = Executors.newFixedThreadPool(6) { r ->
+        private val sharedExtractionPool: ExecutorService = Executors.newFixedThreadPool(8) { r ->
             Thread({
                 runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
                 r.run()
