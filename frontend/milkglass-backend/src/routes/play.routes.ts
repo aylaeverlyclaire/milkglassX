@@ -56,9 +56,12 @@ export function isKnownHosterUrl(raw: string): boolean {
 
 
 
+export function normalizeTitleKey(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ').slice(0, 120);
+}
+
 export function hintKey(title: string, ep: number): string {
-  const norm = title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
-  return `${norm.slice(0, 120)}#${ep}`;
+  return `${normalizeTitleKey(title)}#${ep}`;
 }
 
 const hintBodySchema = z.object({
@@ -149,6 +152,41 @@ playRoutes.post('/hint', rateLimit(20, 60), requireVerifiedUserMiddleware(userWr
     return c.json({ status: 'ok', stored: false, degraded: true });
   }
 });
+
+async function lookupEpisodeHosters(db: D1ReadClient, title: string, ep: number): Promise<StoredHint[] | null> {
+  const tKey = normalizeTitleKey(title);
+  if (!tKey) return null;
+  try {
+    const { results } = await db
+      .prepare(
+        `SELECT url, quality, hoster, provider, container, referer
+         FROM episode_hosters
+         WHERE episode_number = ?2 AND is_live = 1 AND (title_key = ?1 OR title_alt_key = ?1)
+         ORDER BY last_verified_at DESC
+         LIMIT 16`
+      )
+      .bind(tKey, ep)
+      .all<{
+        url: string;
+        quality: string;
+        hoster: string;
+        provider: string;
+        container: string;
+        referer: string;
+      }>();
+    if (!results || results.length === 0) return null;
+    return results.map((r) => ({
+      raw_url: r.url,
+      quality: r.quality || '720p',
+      hoster: r.hoster || 'Hoster',
+      source: r.provider || 'otakudesu',
+      container: r.container || 'mp4',
+      referer: r.referer || '',
+    }));
+  } catch {
+    return null;
+  }
+}
 
 async function lookupHint(db: D1ReadClient, title: string, ep: number): Promise<StoredHint[] | null> {
   try {
@@ -353,14 +391,23 @@ playRoutes.get(
   async (c) => {
     const { title, ep, q } = c.req.valid('query');
 
-    // 1) Jalur cepat dari D1 (tanpa scrape, tanpa Cloudflare-challenge): URL direct terverifikasi + hint hoster mentah.
+    // 1) Jalur cepat dari D1 (tanpa scrape, tanpa Cloudflare-challenge): URL direct terverifikasi + multi-hoster katalog + hint.
     const rdb = readDb(c.env);
-    const [direct, hinted, globalStats] = await Promise.all([
+    const [direct, indexedHosters, hinted, globalStats] = await Promise.all([
       lookupDirect(rdb, title, ep),
+      lookupEpisodeHosters(rdb, title, ep),
       lookupHint(rdb, title, ep),
       loadAsnStats(rdb, 0),
     ]);
-    if (direct || hinted) {
+    const mergedHints: StoredHint[] = [];
+    const seenUrls = new Set<string>();
+    for (const item of [...(indexedHosters ?? []), ...(hinted ?? [])]) {
+      if (!seenUrls.has(item.raw_url)) {
+        seenUrls.add(item.raw_url);
+        mergedHints.push(item);
+      }
+    }
+    if (direct || mergedHints.length > 0) {
       const hosterScores: Record<string, number> = {};
       for (const [hoster, st] of globalStats.entries()) {
         hosterScores[hoster] = Math.round(scoreAsnStat(st) * 1000) / 1000;
@@ -369,9 +416,9 @@ playRoutes.get(
         status: 'ok',
         data: {
           direct_candidates: rankByAsn(direct ?? [], q, globalStats),
-          client_extract_candidates: rankByAsn(hinted ?? [], q, globalStats),
+          client_extract_candidates: rankByAsn(mergedHints, q, globalStats),
           hoster_scores: hosterScores,
-          source: direct ? 'direct' : 'hint',
+          source: direct ? 'direct' : indexedHosters ? 'catalog_hosters' : 'hint',
         },
       });
     }
@@ -452,20 +499,47 @@ playRoutes.post(
       const row = await c.env.DB.prepare(`SELECT payload FROM ${table} WHERE key = ?1`)
         .bind(key)
         .first<{ payload: string }>();
-      if (!row) return c.json({ status: 'ok', evicted: false });
-      const arr = JSON.parse(row.payload) as Array<Record<string, unknown>>;
-      const filtered = arr.filter((item) => (kind === 'direct' ? item.direct_url : item.raw_url) !== url);
-      if (filtered.length === 0) {
-        await c.env.DB.prepare(`DELETE FROM ${table} WHERE key = ?1`).bind(key).run();
-      } else if (filtered.length !== arr.length) {
-        await c.env.DB.prepare(`UPDATE ${table} SET payload = ?2 WHERE key = ?1`)
-          .bind(key, JSON.stringify(filtered))
-          .run();
+      let evicted = false;
+      let remaining = 0;
+      if (row) {
+        const arr = JSON.parse(row.payload) as Array<Record<string, unknown>>;
+        const filtered = arr.filter((item) => (kind === 'direct' ? item.direct_url : item.raw_url) !== url);
+        remaining = filtered.length;
+        if (filtered.length === 0) {
+          await c.env.DB.prepare(`DELETE FROM ${table} WHERE key = ?1`).bind(key).run();
+          evicted = true;
+        } else if (filtered.length !== arr.length) {
+          await c.env.DB.prepare(`UPDATE ${table} SET payload = ?2 WHERE key = ?1`)
+            .bind(key, JSON.stringify(filtered))
+            .run();
+          evicted = true;
+        }
       }
-      if (filtered.length !== arr.length) {
+      if (kind === 'hint') {
+        const affected = await c.env.DB.prepare(
+          `SELECT DISTINCT anime_id FROM episode_hosters WHERE url = ?1 AND is_live = 1`
+        ).bind(url).all<{ anime_id: number }>();
+        const animeIds = (affected.results ?? []).map((r) => r.anime_id);
+        if (animeIds.length > 0) {
+          await c.env.DB.prepare(
+            `UPDATE episode_hosters SET is_live = 0, fail_count = fail_count + 1 WHERE url = ?1`
+          ).bind(url).run();
+          for (const aid of animeIds) {
+            await c.env.DB.prepare(
+              `UPDATE animes
+               SET has_live_source = CASE WHEN EXISTS (
+                 SELECT 1 FROM episode_hosters WHERE anime_id = ?1 AND is_live = 1
+               ) THEN 1 ELSE 0 END
+               WHERE id = ?1`
+            ).bind(aid).run();
+          }
+          evicted = true;
+        }
+      }
+      if (evicted) {
         c.executionCtx?.waitUntil?.(purgePlayResolveCache(c.req.url, title, ep));
       }
-      return c.json({ status: 'ok', evicted: filtered.length !== arr.length, remaining: filtered.length });
+      return c.json({ status: 'ok', evicted, remaining });
     } catch {
       return c.json({ status: 'ok', evicted: false });
     }

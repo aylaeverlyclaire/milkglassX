@@ -308,3 +308,131 @@ ingestRoutes.post('/source-domain', zValidator('json', sourceDomainSchema), asyn
   await purgeSourcesCache(c.req.url);
   return c.json({ status: 'ok', source, key, base_url: cleanUrl });
 });
+
+
+function normalizeHosterTitleKey(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ').slice(0, 120);
+}
+
+ingestRoutes.get('/catalog-list', async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, title, title_alt, status, popularity, episodes_total, has_live_source
+     FROM animes
+     ORDER BY popularity DESC
+     LIMIT 5000`
+  ).all<Record<string, unknown>>();
+  return c.json({ status: 'ok', count: (results ?? []).length, data: results ?? [] });
+});
+
+const syncHostersSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        anime_id: z.number().int().positive(),
+        title: z.string().trim().min(1).max(200),
+        title_alt: z.string().trim().max(200).nullable().optional(),
+        episodes: z
+          .array(
+            z.object({
+              ep: z.number().int().min(1).max(2000),
+              hosters: z
+                .array(
+                  z.object({
+                    url: z.string().trim().url().max(2048),
+                    quality: z.string().trim().min(2).max(16).default('720p'),
+                    hoster: z.string().trim().min(1).max(60).default('Hoster'),
+                    provider: z.string().trim().min(1).max(32).default('otakudesu'),
+                    container: z.string().trim().min(2).max(12).default('mp4'),
+                    referer: z.string().trim().max(1024).default(''),
+                  })
+                )
+                .min(1)
+                .max(20),
+            })
+          )
+          .min(1)
+          .max(200),
+      })
+    )
+    .max(50)
+    .default([]),
+  reconcile: z.boolean().optional().default(false),
+});
+
+ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async (c) => {
+  const { items, reconcile } = c.req.valid('json');
+  const now = Math.floor(Date.now() / 1000);
+  let upserted = 0;
+  const touchedAnimeIds = new Set<number>();
+
+  const stmts: D1PreparedStatement[] = [];
+  for (const item of items) {
+    const tKey = normalizeHosterTitleKey(item.title);
+    const tAltKey = item.title_alt ? normalizeHosterTitleKey(item.title_alt) : null;
+    for (const epEntry of item.episodes) {
+      for (const h of epEntry.hosters) {
+        if (!h.url.startsWith('https://') && !h.url.startsWith('http://')) continue;
+        stmts.push(
+          c.env.DB.prepare(
+            `INSERT INTO episode_hosters
+               (anime_id, episode_number, title_key, title_alt_key, url, quality, hoster, provider, container, referer, is_live, last_verified_at, fail_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, 0)
+             ON CONFLICT(anime_id, episode_number, url) DO UPDATE SET
+               title_key = excluded.title_key,
+               title_alt_key = excluded.title_alt_key,
+               quality = excluded.quality,
+               hoster = excluded.hoster,
+               provider = excluded.provider,
+               container = excluded.container,
+               referer = excluded.referer,
+               is_live = 1,
+               last_verified_at = excluded.last_verified_at,
+               fail_count = 0`
+          ).bind(
+            item.anime_id,
+            epEntry.ep,
+            tKey,
+            tAltKey,
+            h.url,
+            h.quality,
+            h.hoster,
+            h.provider,
+            h.container,
+            h.referer,
+            now
+          )
+        );
+        upserted++;
+        touchedAnimeIds.add(item.anime_id);
+      }
+    }
+  }
+
+  for (let i = 0; i < stmts.length; i += 80) {
+    await c.env.DB.batch(stmts.slice(i, i + 80));
+  }
+
+  if (touchedAnimeIds.size > 0) {
+    const flagStmts = Array.from(touchedAnimeIds).map((aid) =>
+      c.env.DB.prepare(`UPDATE animes SET has_live_source = 1 WHERE id = ?1`).bind(aid)
+    );
+    await c.env.DB.batch(flagStmts);
+  }
+
+  if (reconcile) {
+    await c.env.DB.prepare(
+      `UPDATE animes
+       SET has_live_source = CASE WHEN EXISTS (
+         SELECT 1 FROM episode_hosters eh WHERE eh.anime_id = animes.id AND eh.is_live = 1
+       ) THEN 1 ELSE 0 END`
+    ).run();
+    await purgeHomeCache(c.req.url);
+  }
+
+  return c.json({
+    status: 'ok',
+    upserted_hosters: upserted,
+    touched_animes: touchedAnimeIds.size,
+    reconciled: reconcile,
+  });
+});

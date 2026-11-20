@@ -89,20 +89,21 @@ catalogRoutes.get('/home', edgeCache(300, 600, false), async (c) => {
     db.prepare(
       `SELECT ${LIST_COLUMNS}
          FROM animes
-         WHERE status = 1
+         WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1)) AND status = 1
          ORDER BY popularity DESC
          LIMIT 20`
     ),
     db.prepare(
       `SELECT ${LIST_COLUMNS}
          FROM animes
+         WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))
          ORDER BY popularity DESC
          LIMIT 20`
     ),
     db.prepare(
       `SELECT ${LIST_COLUMNS}
          FROM animes
-         WHERE status = 2
+         WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1)) AND status = 2
          ORDER BY popularity DESC
          LIMIT 20`
     ),
@@ -155,13 +156,17 @@ catalogRoutes.get('/status', edgeCache(60, 120, false), async (c) => {
     } catch {}
   }
   const db = readDb(c.env);
-  const [metaRes, countRes] = await db.batch([
+  const [metaRes, countRes, totalAllRes, hosterRes] = await db.batch([
     db.prepare(META_QUERY),
-    db.prepare(`SELECT COUNT(*) AS total FROM animes`),
+    db.prepare(`SELECT COUNT(*) AS total FROM animes WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))`),
+    db.prepare(`SELECT COUNT(*) AS total_all FROM animes`),
+    db.prepare(`SELECT COUNT(*) AS live_hosters FROM episode_hosters WHERE is_live = 1`),
   ]);
 
   const marker = readSyncMarker(metaRes.results as Array<{ key: string; value: string }>);
   const total = Number((countRes.results?.[0] as { total?: number } | undefined)?.total ?? 0);
+  const totalCatalog = Number((totalAllRes.results?.[0] as { total_all?: number } | undefined)?.total_all ?? 0);
+  const liveHosters = Number((hosterRes.results?.[0] as { live_hosters?: number } | undefined)?.live_hosters ?? 0);
   const nowSec = Math.floor(Date.now() / 1000);
   const ageSec = marker.synced_at === null ? null : Math.max(0, nowSec - marker.synced_at);
   const stale = ageSec === null || ageSec > CATALOG_STALE_AFTER_SEC;
@@ -174,6 +179,8 @@ catalogRoutes.get('/status', edgeCache(60, 120, false), async (c) => {
     status: 'ok',
     data: {
       total,
+      total_catalog: totalCatalog,
+      live_hosters: liveHosters,
       version: catalogVersion(marker, total),
       synced_at: marker.synced_at,
       full_synced_at: marker.full_synced_at,
@@ -228,11 +235,11 @@ catalogRoutes.get(
     }
     const statements: D1PreparedStatement[] = [
       db.prepare(META_QUERY),
-      db.prepare(`SELECT COUNT(*) AS total FROM animes`),
+      db.prepare(`SELECT COUNT(*) AS total FROM animes WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))`),
     ];
     if (v) {
       statements.push(
-        db.prepare(`SELECT ${LIST_COLUMNS} FROM animes ORDER BY popularity DESC LIMIT 5000`)
+        db.prepare(`SELECT ${LIST_COLUMNS} FROM animes WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1)) ORDER BY popularity DESC LIMIT 5000`)
       );
     }
     const batchRes = await db.batch(statements);
@@ -320,7 +327,7 @@ catalogRoutes.get(
     const { q, genre, status, schedule_day, page } = c.req.valid('query');
     const limit = 24;
     const offset = (page - 1) * limit;
-    const conditions = ['1 = 1'];
+    const conditions = ['(has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))'];
     const params: Array<string | number> = [];
 
     if (q && q.length > 0) {
@@ -522,7 +529,7 @@ catalogRoutes.get(
             `SELECT ${LIST_COLUMNS.split(',').map((col) => 'a.' + col.trim()).join(', ')}
              FROM animes_fts
              JOIN animes a ON a.id = animes_fts.rowid
-             WHERE animes_fts MATCH ?1
+             WHERE animes_fts MATCH ?1 AND (a.has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))
              ORDER BY (bm25(animes_fts, 2.0, 1.0) - (2.0 * CAST(a.popularity AS REAL) / (CAST(a.popularity AS REAL) + 50000.0))) ASC, a.popularity DESC
              LIMIT 24`
           )
@@ -534,7 +541,7 @@ catalogRoutes.get(
       return readDb(c.env).prepare(
         `SELECT ${LIST_COLUMNS}
          FROM animes
-         WHERE title LIKE ?1 ESCAPE '\\' OR title_alt LIKE ?1 ESCAPE '\\'
+         WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1)) AND (title LIKE ?1 ESCAPE '\\' OR title_alt LIKE ?1 ESCAPE '\\')
          ORDER BY popularity DESC
          LIMIT 24`
       )
@@ -544,7 +551,7 @@ catalogRoutes.get(
     const d1Animes = await queryD1Search();
     const d1Rows = d1Animes.results ?? [];
     // Conditional AniList enrichment: skip slow external GraphQL round-trip when D1 already has >= 3 matches.
-    const anilistItems = d1Rows.length >= 3 ? [] : await searchAniListMetadata(q);
+    const anilistItems: unknown[] = [];
 
     return c.json({
       status: 'ok',
