@@ -388,7 +388,7 @@ class MkvDownloadWorker(
                 partFile.delete()
             }
             setProgress(Data.Builder().putInt(KEY_PROGRESS, 100).build())
-            CandidateDownloadStatus.SUCCEEDED
+            CandidateDownloadStatus.SUCCESS
         } catch (_: Exception) {
             null // Fallback bersih ke jalur OkHttp standar bila CacheDataSource gagal
         } finally {
@@ -500,7 +500,7 @@ class MkvDownloadWorker(
                         partFile = partFile,
                         existingBytes = existingBytes
                     )
-                    if (cacheStatus == CandidateDownloadStatus.SUCCEEDED) {
+                    if (cacheStatus == CandidateDownloadStatus.SUCCESS) {
                         EndpointHealthScorer.recordSuccess(resolved.hoster)
                         return@withPermit Result.success(
                             Data.Builder()

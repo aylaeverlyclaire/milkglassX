@@ -766,7 +766,7 @@ class PlayerManager(
         PlaybackBandwidthGate.onBufferingChanged(buffering)
         }
 
-        internal fun getSharedStreamCache(context: Context): SimpleCache? = getStreamCache(context.applicationContext)
+        internal fun getSharedStreamCache(context: Context): androidx.media3.datasource.cache.Cache? = getStreamCache(context.applicationContext)
 
         fun buildStreamCacheKey(
             slug: String,
