@@ -10,6 +10,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -20,8 +24,17 @@ const val DEFAULT_CATALOG_BASE_URL = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL
 
 const val CATALOG_STALE_AFTER_SEC = 18L * 3600L
 
+data class CatalogResponse(
+    val body: String?,
+    val etag: String? = null,
+    val notModified: Boolean = false,
+)
+
 interface CatalogTransport {
     suspend fun get(pathAndQuery: String): String
+
+    suspend fun getConditional(pathAndQuery: String, ifNoneMatch: String?): CatalogResponse =
+        CatalogResponse(body = get(pathAndQuery), etag = null, notModified = false)
 }
 
 class CatalogHttpException(val code: Int) : Exception("HTTP $code")
@@ -84,16 +97,30 @@ class FileCatalogCache(private val file: File) : CatalogCache {
     }
 
     override fun write(json: String) {
-        try {
-            file.parentFile?.mkdirs()
-            val tmp = File(file.parentFile, file.name + ".tmp")
-            tmp.writeText(json, Charsets.UTF_8)
-            if (!tmp.renameTo(file)) {
-                file.delete()
-                tmp.renameTo(file)
+        synchronized(this) {
+            try {
+                file.parentFile?.mkdirs()
+                val tmp = File(file.parentFile, file.name + ".tmp")
+                FileOutputStream(tmp).use { fos ->
+                    fos.write(json.toByteArray(Charsets.UTF_8))
+                    fos.fd.sync()
+                }
+                try {
+                    Files.move(
+                        tmp.toPath(),
+                        file.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE,
+                    )
+                } catch (e: AtomicMoveNotSupportedException) {
+                    Files.move(
+                        tmp.toPath(),
+                        file.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                    )
+                }
+            } catch (e: Exception) {
             }
-        } catch (e: Exception) {
-
         }
     }
 }
@@ -127,10 +154,24 @@ class CatalogRepository(
         return stateMemo
     }
 
+    private suspend fun stateIo(store: SnapshotStore): SnapshotState? {
+        if (!stateRead) {
+            stateMemo = store.readStateIo()?.takeIf { it.schema == SNAPSHOT_SCHEMA }
+            stateRead = true
+        }
+        return stateMemo
+    }
+
     private fun saveState(store: SnapshotStore, s: SnapshotState) {
         stateMemo = s
         stateRead = true
         store.writeState(s)
+    }
+
+    private suspend fun saveStateIo(store: SnapshotStore, s: SnapshotState) {
+        stateMemo = s
+        stateRead = true
+        store.writeStateIo(s)
     }
 
     fun cachedSnapshot(): CachedSnapshot? {
@@ -143,7 +184,7 @@ class CatalogRepository(
     suspend fun refreshSnapshot(force: Boolean = false): RefreshOutcome {
         val store = snapshots ?: return RefreshOutcome.Unsupported
         val now = nowMs()
-        val st = state(store)?.takeIf { store.readBody() != null }
+        val st = stateIo(store)?.takeIf { store.readBodyIo() != null }
 
         if (!force && st != null && now >= st.fetchedAtMs && now < st.validUntilMs) return RefreshOutcome.Skipped
 
@@ -170,26 +211,20 @@ class CatalogRepository(
         if (snapFetch.body == null) {
             return if (snapFetch.httpCode == 404 || snapFetch.httpCode == 405) RefreshOutcome.Unsupported else failed(store, st, now)
         }
-        val decoded = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-            val r = decodeSnapshot(snapFetch.body) ?: return@withContext null
-            r to r.data.map(RemoteMapper::toEntry)
-        } ?: return failed(store, st, now)
-        val (resp, entries) = decoded
+        val resp = decodeSnapshot(snapFetch.body) ?: return failed(store, st, now)
         val complete = resp.meta.count in 1..resp.data.size
 
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            store.writeBody(snapFetch.body)
-            saveState(
-                store,
-                SnapshotState(
-                    version = resp.meta.version ?: version,
-                    fetchedAtMs = now,
-                    validUntilMs = now + recheckMs,
-                    complete = complete,
-                ),
-            )
-        }
-        return RefreshOutcome.Updated(entries, complete)
+        store.writeBody(snapFetch.body)
+        saveState(
+            store,
+            SnapshotState(
+                version = resp.meta.version ?: version,
+                fetchedAtMs = now,
+                validUntilMs = now + recheckMs,
+                complete = complete,
+            ),
+        )
+        return RefreshOutcome.Updated(resp.data.map(RemoteMapper::toEntry), complete)
     }
 
     private fun failed(store: SnapshotStore, st: SnapshotState?, now: Long): RefreshOutcome {
@@ -277,9 +312,11 @@ class CatalogRepository(
                 val scoreRaw = (obj["averageScore"] as? JsonPrimitive)?.intOrNull
                 val statusStr = (obj["status"] as? JsonPrimitive)?.contentOrNull ?: "FINISHED"
                 val statusInt = if (statusStr == "RELEASING") 1 else 2
+                val malId = (obj["malId"] as? JsonPrimitive)?.intOrNull
+                    ?: (obj["mal_id"] as? JsonPrimitive)?.intOrNull
                 val mapped = RemoteAnime(
                     id = id,
-                    malId = id,
+                    malId = malId,
                     title = romaji,
                     titleAlt = english,
                     score = scoreRaw?.let { it / 10.0 },

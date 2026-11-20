@@ -17,6 +17,16 @@ import java.io.StringWriter
 object CrashReporter {
     private const val FILE = "last_crash.txt"
     private const val PREFS = "crash_reporter"
+    private val headerSecretRegex = Regex("(?i)(authorization|cookie|set-cookie|x-api-key|x-milkglass-sig|access_token|refresh_token|bearer)\\s*[:=]\\s*[^\\s,;\"]+")
+    private val querySecretRegex = Regex("(?i)([?&](?:token|sig|signature|key|auth|jwt|session|email)=)[^&\\s\"'<>]+")
+    private val jwtRegex = Regex("eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+")
+    private val emailRegex = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+
+    internal fun sanitize(raw: String): String = raw
+        .replace(headerSecretRegex, "$1=[REDACTED]")
+        .replace(querySecretRegex, "$1[REDACTED]")
+        .replace(jwtRegex, "[REDACTED_JWT]")
+        .replace(emailRegex, "[REDACTED_EMAIL]")
 
     fun install(ctx: Context) {
         val app = ctx.applicationContext
@@ -25,7 +35,7 @@ object CrashReporter {
             runCatching {
                 val sw = StringWriter()
                 error.printStackTrace(PrintWriter(sw))
-                File(app.filesDir, FILE).writeText("thread: ${thread.name}\n$sw".take(5000))
+                File(app.filesDir, FILE).writeText(sanitize("thread: ${thread.name}\n$sw").take(5000))
             }
             previous?.uncaughtException(thread, error)
         }

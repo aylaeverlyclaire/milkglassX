@@ -4,6 +4,7 @@ import com.milkglass.app.core.model.Conversation
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import java.io.File
+import java.io.FileOutputStream
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -16,7 +17,13 @@ object StateCodec {
     }
 
     fun encode(state: PersistedState): String =
-        json.encodeToString(PersistedState.serializer(), state.copy(downloads = state.downloads.filterValues { it == 100 }))
+        json.encodeToString(
+            PersistedState.serializer(),
+            state.copy(
+                accessToken = null,
+                downloads = state.downloads.filterValues { it == 100 },
+            ),
+        )
 
     fun decode(text: String?, defaults: PersistedState, seedConversations: List<Conversation>): PersistedState {
         if (text.isNullOrBlank()) return defaults
@@ -35,6 +42,7 @@ object StateCodec {
             }
             json.decodeFromJsonElement(PersistedState.serializer(), merged)
         }
+        if (s.accessToken != null) s = s.copy(accessToken = null)
         val sub = s.subscription
         if (sub != null && sub.active == 0) s = s.copy(subscription = null)
         val photo = s.profilePhoto
@@ -53,7 +61,10 @@ class StateStore(private val file: File) {
         if (encoded == lastSavedJson && file.exists()) return@runCatching true
         file.parentFile?.mkdirs()
         val tmp = File(file.parentFile, file.name + ".tmp")
-        tmp.writeText(encoded, Charsets.UTF_8)
+        FileOutputStream(tmp).use { fos ->
+            fos.write(encoded.toByteArray(Charsets.UTF_8))
+            fos.fd.sync()
+        }
         try {
             Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
         } catch (e: AtomicMoveNotSupportedException) {
@@ -63,13 +74,13 @@ class StateStore(private val file: File) {
         true
     }.getOrDefault(false) }
 
-    fun load(defaults: PersistedState, seedConversations: List<Conversation>): PersistedState {
+    fun load(defaults: PersistedState, seedConversations: List<Conversation>): PersistedState = synchronized(this) {
         val raw = if (file.exists()) runCatching { file.readText(Charsets.UTF_8) }.getOrNull() else null
         if (raw != null) lastSavedJson = raw
-        return StateCodec.decode(raw, defaults, seedConversations)
+        StateCodec.decode(raw, defaults, seedConversations)
     }
 
-    fun wipe() {
+    fun wipe() = synchronized(this) {
         lastSavedJson = null
         file.delete()
     }

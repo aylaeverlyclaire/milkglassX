@@ -1,8 +1,14 @@
 package com.milkglass.app.core.remote
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 const val SNAPSHOT_SCHEMA = 1
 
@@ -51,6 +57,8 @@ data class SnapshotState(
     val failures: Int = 0,
 
     val complete: Boolean = true,
+    val statusEtag: String? = null,
+    val snapshotEtag: String? = null,
 )
 
 interface SnapshotStore {
@@ -58,6 +66,11 @@ interface SnapshotStore {
     fun readState(): SnapshotState?
     fun writeBody(json: String)
     fun writeState(state: SnapshotState)
+
+    suspend fun readBodyIo(): String? = withContext(Dispatchers.IO) { readBody() }
+    suspend fun readStateIo(): SnapshotState? = withContext(Dispatchers.IO) { readState() }
+    suspend fun writeBodyIo(json: String) = withContext(Dispatchers.IO) { writeBody(json) }
+    suspend fun writeStateIo(state: SnapshotState) = withContext(Dispatchers.IO) { writeState(state) }
 }
 
 class FileSnapshotStore(private val dir: File) : SnapshotStore {
@@ -84,16 +97,30 @@ class FileSnapshotStore(private val dir: File) : SnapshotStore {
     }
 
     private fun atomicWrite(target: File, text: String) {
-        try {
-            target.parentFile?.mkdirs()
-            val tmp = File(target.parentFile, target.name + ".tmp")
-            tmp.writeText(text, Charsets.UTF_8)
-            if (!tmp.renameTo(target)) {
-                target.delete()
-                tmp.renameTo(target)
+        synchronized(this) {
+            try {
+                target.parentFile?.mkdirs()
+                val tmp = File(target.parentFile, target.name + ".tmp")
+                FileOutputStream(tmp).use { fos ->
+                    fos.write(text.toByteArray(Charsets.UTF_8))
+                    fos.fd.sync()
+                }
+                try {
+                    Files.move(
+                        tmp.toPath(),
+                        target.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE,
+                    )
+                } catch (e: AtomicMoveNotSupportedException) {
+                    Files.move(
+                        tmp.toPath(),
+                        target.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                    )
+                }
+            } catch (e: Exception) {
             }
-        } catch (e: Exception) {
-
         }
     }
 }

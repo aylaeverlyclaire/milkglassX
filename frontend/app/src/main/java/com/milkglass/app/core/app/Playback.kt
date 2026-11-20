@@ -282,12 +282,20 @@ class PlayerEngine(
         }
         if (floor(position * 4).toLong() % 4 == 0L) save()
         if (position >= duration) {
-            hasEnded = true
-            isPlaying = false
-            save()
-            val n = ctl.nextPlayableEpisode(anime, episode)
-            if (n != null && ctl.persisted.settings.autoplayNext != 0) noticeTimer = 5.0 else hasEnded = true
+            onNativeEnded()
+            return
         }
+        updateUi()
+    }
+
+    fun onNativeEnded() {
+        if (left || hasEnded) return
+        if (duration > 0) position = duration.toDouble()
+        hasEnded = true
+        isPlaying = false
+        save()
+        val n = ctl.nextPlayableEpisode(anime, episode)
+        if (n != null && ctl.persisted.settings.autoplayNext != 0) noticeTimer = 5.0
         updateUi()
     }
 }

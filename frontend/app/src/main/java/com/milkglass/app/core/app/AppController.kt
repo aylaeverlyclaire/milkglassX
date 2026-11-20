@@ -104,6 +104,7 @@ class AppController(
     private val availabilityChecker: ((Anime) -> Boolean)? = null,
 
     seedState: ((com.milkglass.app.core.data.Translator, Long) -> com.milkglass.app.core.storage.PersistedState)? = null,
+    private val onSignOut: (() -> Unit)? = null,
 ) {
     val tr = Translator(data.locale)
     val time = MilkTime(tr, clock, zone)
@@ -129,19 +130,19 @@ class AppController(
     private var availability by mutableStateOf<Map<Int, Boolean>>(emptyMap())
     private val availabilityDirty = java.util.concurrent.atomic.AtomicBoolean(false)
     private val availabilityRunning = java.util.concurrent.atomic.AtomicBoolean(false)
-    private val availabilityExec by lazy {
-        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-            Thread(r, "milkglass-availability").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
-        }
-    }
     private val saveExec by lazy {
         java.util.concurrent.Executors.newSingleThreadExecutor { r ->
             Thread(r, "milkglass-save").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
         }
     }
+    private val availabilityExec by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "milkglass-availability").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
+        }
+    }
 
     private fun rawCatalog(): List<Anime> =
-        if (remoteEntries.isEmpty()) seedCatalog else seedCatalog + remoteEntries.values.map { it.anime }
+        if (remoteEntries.isEmpty()) seedCatalog else seedCatalog.filter { it.id !in remoteEntries } + remoteEntries.values.map { it.anime }
 
     /** Hitung ulang ketersediaan di thread pemanggil. HANYA panggil dari thread latar. */
     fun warmAvailability() {
@@ -318,9 +319,9 @@ class AppController(
         if (query.length < 2) return
         val key = "xdcc:${query.lowercase()}"
         if (key in searchedQueries) return
+        searchedQueries.add(key)
         val universal = repo.searchUniversal(query)
         if (universal.isNotEmpty()) {
-            searchedQueries.add(key)
             mergeRemote(universal)
         }
     }
@@ -652,7 +653,7 @@ class AppController(
             openPlayer(id, ep, null)
         } else {
             openDetail(id)
-            openEpisode(a, ep)
+            if (info?.waiting != true) openEpisode(a, ep)
         }
     }
 
@@ -734,6 +735,7 @@ class AppController(
     val player: PlayerEngine? get() = (viewStack.lastOrNull() as? ViewEntry.Player)?.engine
 
     var onQualityChanged: ((String) -> Unit)? = null
+    var availablePlayerQualities by mutableStateOf(listOf("Auto", "1080p", "720p", "480p"))
 
     fun nextPlayableEpisode(a: Anime, ep: Int): Int? =
         if (ep < a.totalEpisodes && episodeAccess(a, ep + 1) == Access.Ok) ep + 1 else null
@@ -766,7 +768,7 @@ class AppController(
         (viewStack.lastOrNull() as? ViewEntry.Player)?.let { it.engine.onLeave(); viewStack.removeAt(viewStack.lastIndex) }
         val sp = resumePosition(a, ep)
         val start = pos ?: if (sp > 0 && !isWatched(a, ep)) smartResume(sp, lastWatchedAt(a), now()) else 0.0
-        val rec = similarOf(a).ifEmpty { catalog.asSequence().filter { it.id != a.id }.take(10).toList() }.map { it.id }
+        val rec = catalog.filter { it.id != a.id }.shuffled().take(10).map { it.id }
         pushView(ViewEntry.Player(PlayerEngine(this, a, ep, start), rec))
     }
 
@@ -834,7 +836,8 @@ class AppController(
     fun signOut() {
         (viewStack.lastOrNull() as? ViewEntry.Player)?.engine?.onLeave()
         overlay = null
-        persisted = persisted.copy(isAuthenticated = 0)
+        persisted = persisted.copy(isAuthenticated = 0, accessToken = null)
+        runCatching { onSignOut?.invoke() }
         viewStack.clear()
         exitingViews.clear()
         navKind = NavKind.None
@@ -942,7 +945,11 @@ class AppController(
 
     suspend fun boot(warm: suspend (List<String>) -> Unit = {}) {
         isBooting = true
-        val minShowMs = if (persisted.isAuthenticated != 0) 350L else 900L
+        val minShowMs = when {
+            catalog.isNotEmpty() && persisted.isAuthenticated != 0 -> 0L
+            persisted.isAuthenticated != 0 -> 350L
+            else -> 900L
+        }
         kotlinx.coroutines.coroutineScope {
             val minShow = launch { kotlinx.coroutines.delay(minShowMs) }
             val work = launch {

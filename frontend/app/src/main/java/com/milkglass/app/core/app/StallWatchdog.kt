@@ -90,12 +90,7 @@ object StallWatchdog {
         val rt = Runtime.getRuntime()
         val usedMb = (rt.totalMemory() - rt.freeMemory()) / 1_048_576L
         val maxMb = rt.maxMemory() / 1_048_576L
-        val all = Thread.getAllStackTraces()
-        val running = all.entries.filter {
-            it.key !== main && it.key.state == Thread.State.RUNNABLE && it.value.isNotEmpty()
-        }
-        val lines = running.take(6).joinToString("\n") { "  ${it.key.name}: ${it.value[0]}" }
-        "heap ${usedMb}/${maxMb}MB, thread ${all.size}, runnable ${running.size}\n$lines"
+        "heap ${usedMb}/${maxMb}MB"
     }.getOrDefault("(lingkungan tidak terbaca)")
 
     private fun record(app: Context, text: String) {

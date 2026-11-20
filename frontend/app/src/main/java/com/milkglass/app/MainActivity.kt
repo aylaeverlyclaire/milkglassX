@@ -46,7 +46,7 @@ class MainActivity : ComponentActivity() {
         com.milkglass.app.core.app.StallWatchdog.start(applicationContext)
         CrashReporter.pendingReport(this)?.let { CrashReporter.show(this, it) }
 
-        val gridOverlay = intent.getBooleanExtra("grid", false)
+        val gridOverlay = BuildConfig.DEBUG && intent.getBooleanExtra("grid", false)
 
         val loaded = mutableStateOf<Loaded?>(null)
         val appCtx = applicationContext
@@ -56,6 +56,7 @@ class MainActivity : ComponentActivity() {
         Thread(dataTask, "milkglass-appdata").start()
         Thread {
             val runtime = EngineRuntime.get(appCtx)
+            runtime.prewarmCloudflareEdge()
             val sharedHttp = runtime.httpTextClient
             val availabilityIndex = runtime.availabilityIndex
 
@@ -79,7 +80,6 @@ class MainActivity : ComponentActivity() {
                 FileCatalogCache(File(cacheDir, "catalog_home.json")),
                 snapshots = FileSnapshotStore(File(filesDir, "catalog")),
             )
-            runCatching { availabilityIndex.awaitDiskLoad(1_500L) }
             val c = AppController(
                 data, posters, StateStore(File(filesDir, StateStore.FILE_NAME)),
                 catalogRepo = repo,
@@ -87,15 +87,16 @@ class MainActivity : ComponentActivity() {
                 metaSource = AniZipMetaSource(httpClient = sharedHttp),
                 skipSource = AniSkipSource(httpClient = sharedHttp),
                 extrasSource = AniListExtrasHttpSource(httpClient = sharedHttp),
+                onSignOut = { runtime.sessionStore.clearSession() },
                 availabilityChecker = { anime ->
                     availabilityIndex.isAvailable(listOf(anime.romaji, anime.title))
                 },
             )
-            c.warmAvailability()
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 controller = c
                 watchConnectivity(c)
+                runtime.onRequireReLogin = { runOnUiThread { if (!isFinishing && !isDestroyed) c.signOut() } }
                 loaded.value = Loaded(data, posters, c)
                 if (!warmupThread.isAlive && availabilityIndex.isReady) {
                     c.notifyAvailabilityUpdated()
