@@ -16,6 +16,9 @@ jobs:
       WORKER_URL: https://milkglass-backend.milkyliquid.workers.dev
       MIN_TOTAL: "300"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
       - name: Periksa /v1/catalog/status
         run: node frontend/scripts/check-freshness.mjs
