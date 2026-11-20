@@ -179,7 +179,7 @@ class StreamResolver(
         hintExecutor.execute {
             runCatching {
                 val arr = JSONArray()
-                candidates.filter { !it.isBatchArchive }.take(6).forEach { c ->
+                candidates.filter { !it.isBatchArchive }.take(8).forEach { c ->
                     arr.put(
                         JSONObject().put("source", c.source.id).put("quality", c.quality.label)
                             .put("hoster", c.hosterLabel.take(40)).put("raw_url", c.rawUrl)
@@ -211,7 +211,7 @@ class StreamResolver(
         if (list.isEmpty() || ep <= 0 || title.trim().length < 2 || !hasAuthSession()) return
         val now = System.currentTimeMillis()
         if (now < serverResolverDisabledUntilMs) return
-        val key = "${title.lowercase().trim()}#$ep"
+        val key = "${title.lowercase().trim()}#$ep#${list.first().quality.label}"
         val last = directReportedAt[key]
         if (last != null && now - last < 5L * 60L * 1000L) return
         if (directReportedAt.size > 64) directReportedAt.clear()
@@ -266,7 +266,7 @@ class StreamResolver(
     }
 
     private sealed interface RaceMsg {
-        class FromServer(val list: List<ResolvedMkvMedia>) : RaceMsg
+        class FromServer(val list: List<ResolvedMkvMedia>, val availableQualities: List<MkvQuality> = emptyList()) : RaceMsg
         class FromJoin(val entry: CachedResolvedCandidates?) : RaceMsg
         class FromCascade(val result: CascadeResult?) : RaceMsg
     }
@@ -353,9 +353,9 @@ class StreamResolver(
                     raceExecutor.submit(Runnable {
                         var msg = RaceMsg.FromServer(emptyList())
                         try {
-                            val list = resolveViaServerSplitPlane(searchTitle, episodeNum, preferredQuality, preferCompatibleContainer)
-                            noteServerOutcome(list.isNotEmpty())
-                            msg = RaceMsg.FromServer(list)
+                    val (list, availQ, hadAnyServerEntry) = resolveViaServerSplitPlane(searchTitle, episodeNum, preferredQuality, preferCompatibleContainer)
+                    noteServerOutcome(list.isNotEmpty() || hadAnyServerEntry)
+                    msg = RaceMsg.FromServer(list, availQ)
                         } catch (_: InterruptedException) {
                             // kalah balapan / dibatalkan: bukan kegagalan server
                         } catch (_: Throwable) {
@@ -414,7 +414,7 @@ class StreamResolver(
                 when (val msg = queue.take()) {
                     is RaceMsg.FromServer -> {
                         pending--
-                        if (msg.list.isNotEmpty()) return RaceOutcome.Candidates(msg.list.distinctBy { it.directUrl })
+                        if (msg.list.isNotEmpty()) return RaceOutcome.Candidates(msg.list.distinctBy { it.directUrl }, msg.availableQualities)
                     }
                     is RaceMsg.FromJoin -> {
                         pending--
@@ -461,10 +461,10 @@ class StreamResolver(
         episodeNum: Int,
         preferredQuality: MkvQuality,
         preferCompatibleContainer: Boolean
-    ): List<ResolvedMkvMedia> {
-        if (!hasAuthSession()) return emptyList()
+    ): Triple<List<ResolvedMkvMedia>, List<MkvQuality>, Boolean> { val empty = Triple(emptyList<ResolvedMkvMedia>(), emptyList<MkvQuality>(), false)
+        if (!hasAuthSession()) return empty
         val now = System.currentTimeMillis()
-        if (now < serverResolverDisabledUntilMs) return emptyList()
+        if (now < serverResolverDisabledUntilMs) return empty
         val url = "${backendBaseUrl.trimEnd('/')}/v1/play/resolve" +
             "?title=${URLEncoder.encode(searchTitle, "UTF-8")}" +
             "&ep=$episodeNum&q=${preferredQuality.label}"
@@ -501,20 +501,22 @@ class StreamResolver(
             }
             serverResolverDisabledUntilMs = System.currentTimeMillis() + 20_000L
             null
-        } ?: return emptyList()
+        } ?: return empty
 
-        val data = runCatching { JSONObject(body).optJSONObject("data") }.getOrNull() ?: return emptyList()
+        val data = runCatching { JSONObject(body).optJSONObject("data") }.getOrNull() ?: return empty
         val resolved = mutableListOf<ResolvedMkvMedia>()
-
+        val serverQualities = linkedSetOf<MkvQuality>()
+        var hadAnyServerEntry = false
+        
         val directs = data.optJSONArray("direct_candidates")
         if (directs != null) {
             for (i in 0 until directs.length()) {
                 val obj = directs.optJSONObject(i) ?: continue
                 val directUrl = obj.optString("direct_url").trim()
                 val host = directUrl.toHttpUrlOrNull()?.host ?: continue
-                if (runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host); true }.getOrDefault(false).not()) continue
+                val qual = MkvQuality.fromText(obj.optString("quality")); if (qual != null) serverQualities.add(qual); hadAnyServerEntry = true; if (qual != preferredQuality) continue; if (runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host); true }.getOrDefault(false).not()) continue
                 val src = SourcePriority.entries.firstOrNull { it.id == obj.optString("source") } ?: SourcePriority.OTAKUDESU
-                val qual = MkvQuality.fromText(obj.optString("quality")) ?: preferredQuality
+                // quality checked above
                 val cont = runCatching { MediaContainer.valueOf(obj.optString("container").uppercase()) }.getOrDefault(MediaContainer.UNKNOWN)
                 resolved.add(
                     ResolvedMkvMedia(
@@ -537,15 +539,26 @@ class StreamResolver(
             resolved.clear()
             resolved.addAll(verified)
         }
-
+        val clientArrAll = data.optJSONArray("client_extract_candidates")
+        if (clientArrAll != null) {
+            for (i in 0 until minOf(clientArrAll.length(), 8)) {
+                val obj = clientArrAll.optJSONObject(i) ?: continue
+                hadAnyServerEntry = true
+                MkvQuality.fromText(obj.optString("quality"))?.let { serverQualities.add(it) }
+            }
+        }
         val needClientExtract = resolved.isEmpty() || (preferCompatibleContainer && resolved.none { it.container == MediaContainer.MP4 || it.container == MediaContainer.HLS })
-        val clientArr = if (needClientExtract) data.optJSONArray("client_extract_candidates") else null
+        val clientArr = if (needClientExtract) clientArrAll else null
         if (clientArr != null) {
             // Hint dari Cloudflare diekstrak PARALEL (bukan satu per satu) lewat jalur cascade yang sama.
             val raws = ArrayList<RawMkvCandidate>()
             for (i in 0 until minOf(clientArr.length(), 8)) {
                 val obj = clientArr.optJSONObject(i) ?: continue
                 val rawUrl = obj.optString("raw_url").trim()
+                hadAnyServerEntry = true
+                val qual = MkvQuality.fromText(obj.optString("quality")) ?: continue
+                serverQualities.add(qual)
+                if (qual != preferredQuality) continue
                 if (!rawUrl.startsWith("https://")) continue
                 val hoster = obj.optString("hoster").ifBlank { "Hoster" }
                 raws.add(
@@ -567,19 +580,25 @@ class StreamResolver(
             }
         }
 
-        if (resolved.isEmpty()) return emptyList()
-        return if (preferCompatibleContainer) {
+        val knownQualities = (serverQualities + cascadeResolver.cachedQualitiesFor(searchTitle, episodeNum))
+            .distinct()
+            .sortedByDescending { it.height }
+            .ifEmpty { MkvQuality.ALL_DESC }
+        if (resolved.isEmpty()) return Triple(emptyList(), knownQualities, hadAnyServerEntry)
+        val ordered = if (preferCompatibleContainer) {
             resolved.sortedBy {
                 when (it.container) {
                     MediaContainer.MP4 -> 0
                     MediaContainer.HLS -> 1
-                    MediaContainer.UNKNOWN -> 2
-                    MediaContainer.MKV -> 3
+                    MediaContainer.MKV -> 2
+                    MediaContainer.UNKNOWN -> 3
                 }
             }
         } else {
             resolved
         }
+        return Triple(ordered, knownQualities, hadAnyServerEntry)
+
     }
 
     fun invalidateCache(slug: String) {
