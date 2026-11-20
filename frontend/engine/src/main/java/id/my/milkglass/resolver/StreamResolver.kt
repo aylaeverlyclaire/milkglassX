@@ -12,6 +12,7 @@ import id.my.milkglass.source.MediaContainer
 import id.my.milkglass.source.MkvCascadeResolver
 import id.my.milkglass.source.MkvQuality
 import id.my.milkglass.source.OploverzSourceProvider
+import id.my.milkglass.source.AnimasuSourceProvider
 import id.my.milkglass.source.OtakudesuSourceProvider
 import id.my.milkglass.source.RawMkvCandidate
 import id.my.milkglass.source.ResolvedMkvMedia
@@ -43,7 +44,7 @@ data class LocalStreamSession(
     val expectedSizeBytes: Long,
     val availableResolutions: List<String> = listOf("1080p", "720p", "480p"),
     val activeResolution: String = "1080p",
-    val resolvedSourceId: String = "otakudesu",
+    val resolvedSourceId: String = "animasu",
     val resolvedHoster: String = "Pixeldrain",
     val isHls: Boolean = false,
     val headers: Map<String, String> = emptyMap(),
@@ -65,6 +66,11 @@ class StreamResolver(
         clients = clients,
         slugCache = slugCache,
         providers = listOf(
+            AnimasuSourceProvider(
+                clients,
+                sourceBaseUrls[SourcePriority.ANIMASU] ?: SourcePriority.ANIMASU.defaultBaseUrl,
+                slugCache = slugCache
+            ),
             OtakudesuSourceProvider(
                 clients,
                 sourceBaseUrls[SourcePriority.OTAKUDESU] ?: SourcePriority.OTAKUDESU.defaultBaseUrl,
@@ -353,9 +359,9 @@ class StreamResolver(
                     raceExecutor.submit(Runnable {
                         var msg = RaceMsg.FromServer(emptyList())
                         try {
-                    val (list, availQ, hadAnyServerEntry) = resolveViaServerSplitPlane(searchTitle, episodeNum, preferredQuality, preferCompatibleContainer)
-                    noteServerOutcome(list.isNotEmpty() || hadAnyServerEntry)
-                    msg = RaceMsg.FromServer(list, availQ)
+                            val (list, availQ, hadAnyServerEntry) = resolveViaServerSplitPlane(searchTitle, episodeNum, preferredQuality, preferCompatibleContainer)
+                            noteServerOutcome(list.isNotEmpty() || hadAnyServerEntry)
+                            msg = RaceMsg.FromServer(list, availQ)
                         } catch (_: InterruptedException) {
                             // kalah balapan / dibatalkan: bukan kegagalan server
                         } catch (_: Throwable) {
@@ -461,7 +467,8 @@ class StreamResolver(
         episodeNum: Int,
         preferredQuality: MkvQuality,
         preferCompatibleContainer: Boolean
-    ): Triple<List<ResolvedMkvMedia>, List<MkvQuality>, Boolean> { val empty = Triple(emptyList<ResolvedMkvMedia>(), emptyList<MkvQuality>(), false)
+    ): Triple<List<ResolvedMkvMedia>, List<MkvQuality>, Boolean> {
+        val empty = Triple(emptyList<ResolvedMkvMedia>(), emptyList<MkvQuality>(), false)
         if (!hasAuthSession()) return empty
         val now = System.currentTimeMillis()
         if (now < serverResolverDisabledUntilMs) return empty
@@ -507,16 +514,20 @@ class StreamResolver(
         val resolved = mutableListOf<ResolvedMkvMedia>()
         val serverQualities = linkedSetOf<MkvQuality>()
         var hadAnyServerEntry = false
-        
+
         val directs = data.optJSONArray("direct_candidates")
         if (directs != null) {
             for (i in 0 until directs.length()) {
                 val obj = directs.optJSONObject(i) ?: continue
                 val directUrl = obj.optString("direct_url").trim()
                 val host = directUrl.toHttpUrlOrNull()?.host ?: continue
-                val qual = MkvQuality.fromText(obj.optString("quality")); if (qual != null) serverQualities.add(qual); hadAnyServerEntry = true; if (qual != preferredQuality) continue; if (runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host); true }.getOrDefault(false).not()) continue
+                val qual = MkvQuality.fromText(obj.optString("quality"))
+                if (qual != null) serverQualities.add(qual)
+                hadAnyServerEntry = true
+                // Hanya terima kandidat direct yang resolusinya cocok dengan pilihan user agar ganti resolusi selalu efektif.
+                if (qual != preferredQuality) continue
+                if (runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host); true }.getOrDefault(false).not()) continue
                 val src = SourcePriority.entries.firstOrNull { it.id == obj.optString("source") } ?: SourcePriority.OTAKUDESU
-                // quality checked above
                 val cont = runCatching { MediaContainer.valueOf(obj.optString("container").uppercase()) }.getOrDefault(MediaContainer.UNKNOWN)
                 resolved.add(
                     ResolvedMkvMedia(
@@ -539,32 +550,32 @@ class StreamResolver(
             resolved.clear()
             resolved.addAll(verified)
         }
+
         val clientArrAll = data.optJSONArray("client_extract_candidates")
         if (clientArrAll != null) {
             for (i in 0 until minOf(clientArrAll.length(), 8)) {
                 val obj = clientArrAll.optJSONObject(i) ?: continue
-                hadAnyServerEntry = true
                 MkvQuality.fromText(obj.optString("quality"))?.let { serverQualities.add(it) }
+                hadAnyServerEntry = true
             }
         }
+
         val needClientExtract = resolved.isEmpty() || (preferCompatibleContainer && resolved.none { it.container == MediaContainer.MP4 || it.container == MediaContainer.HLS })
         val clientArr = if (needClientExtract) clientArrAll else null
         if (clientArr != null) {
-            // Hint dari Cloudflare diekstrak PARALEL (bukan satu per satu) lewat jalur cascade yang sama.
+            // Hint dari Cloudflare difilter ke resolusi yang diminta user agar tidak menimpa pilihan resolusi.
             val raws = ArrayList<RawMkvCandidate>()
             for (i in 0 until minOf(clientArr.length(), 8)) {
                 val obj = clientArr.optJSONObject(i) ?: continue
                 val rawUrl = obj.optString("raw_url").trim()
-                hadAnyServerEntry = true
-                val qual = MkvQuality.fromText(obj.optString("quality")) ?: continue
-                serverQualities.add(qual)
-                if (qual != preferredQuality) continue
                 if (!rawUrl.startsWith("https://")) continue
+                val qual = MkvQuality.fromText(obj.optString("quality")) ?: continue
+                if (qual != preferredQuality) continue
                 val hoster = obj.optString("hoster").ifBlank { "Hoster" }
                 raws.add(
                     RawMkvCandidate(
                         source = SourcePriority.entries.firstOrNull { it.id == obj.optString("source") } ?: SourcePriority.OTAKUDESU,
-                        quality = MkvQuality.fromText(obj.optString("quality")) ?: preferredQuality,
+                        quality = qual,
                         hosterLabel = hoster,
                         rawUrl = rawUrl,
                         pageReferer = obj.optString("referer").trim(),
@@ -590,15 +601,14 @@ class StreamResolver(
                 when (it.container) {
                     MediaContainer.MP4 -> 0
                     MediaContainer.HLS -> 1
-                    MediaContainer.MKV -> 2
-                    MediaContainer.UNKNOWN -> 3
+                    MediaContainer.UNKNOWN -> 2
+                    MediaContainer.MKV -> 3
                 }
             }
         } else {
             resolved
         }
         return Triple(ordered, knownQualities, hadAnyServerEntry)
-
     }
 
     fun invalidateCache(slug: String) {
