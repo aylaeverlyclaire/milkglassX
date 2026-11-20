@@ -30,7 +30,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.ScrubbingModeParameters
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
@@ -147,7 +147,8 @@ class PlayerManager(
     private val sessionCounter = AtomicLong(0L)
     @Volatile private var activeSessionId: Long = 0L
     @Volatile private var released = false
-
+    private var isScrubbing = false
+    
     private val _snapshot = MutableStateFlow(PlayerSnapshot())
     val snapshot: StateFlow<PlayerSnapshot> = _snapshot.asStateFlow()
 
@@ -309,15 +310,8 @@ class PlayerManager(
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        val scrubbingParams = ScrubbingModeParameters.Builder()
-            .setDisabledTrackTypes(setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_TEXT))
-            .setFractionalSeekTolerance(0.005, 0.005)
-            .setShouldIncreaseCodecOperatingRate(true)
-            .setAllowSkippingKeyFrameReset(true)
-            .build()
 
         exoPlayer = ExoPlayer.Builder(appContext, renderersFactory)
-            .setScrubbingModeParameters(scrubbingParams)
             .setTrackSelector(trackSelector!!)
             .setLoadControl(loadControl)
             .setBandwidthMeter(bandwidthMeter)
@@ -326,7 +320,7 @@ class PlayerManager(
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
             .also { player ->
-                player.setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC)
+                player.setSeekParameters(SeekParameters.CLOSEST_SYNC)
                 player.addListener(playerListener)
                 attachedTextureView?.let { player.setVideoTextureView(it) }
             }
@@ -638,9 +632,9 @@ class PlayerManager(
 
     fun setScrubbing(active: Boolean) {
         val p = exoPlayer ?: return
-        if (p.isScrubbingModeEnabled != active) {
-            p.isScrubbingModeEnabled = active
-        }
+        if (isScrubbing == active) return
+        isScrubbing = active
+        p.setSeekParameters(if (active) SeekParameters.PREVIOUS_SYNC else SeekParameters.CLOSEST_SYNC)
     }
 
     fun pause() {
@@ -697,6 +691,7 @@ class PlayerManager(
     fun release() {
         if (released) return
         released = true
+        isScrubbing = false
         activeSessionId = -1L
         cancelPrebuffer()
         setVideoBuffering(false)
