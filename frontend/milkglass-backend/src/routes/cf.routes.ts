@@ -94,6 +94,13 @@ async function attachServerSignature(
 const MAX_HTML_CHARS = 2_000_000;
 
 const ALLOWED_HOST_SUFFIXES = [
+  'animasu.love',
+  'animasu.me',
+  'yourupload.com',
+  'vidhidepre.com',
+  'berkasdrive.com',
+  'mitedrive.com',
+  'short.ink',
   'otakudesu.blog',
   'otakudesu.cloud',
   'otakudesu.best',
