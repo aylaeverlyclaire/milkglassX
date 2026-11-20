@@ -18,6 +18,8 @@ export interface AppBindings {
   CF_HANDLER_URL?: string;
   CF_HANDLER_TOKEN?: string;
   CF_REQUIRE_AUTH?: string;
+  CATALOG_R2?: R2Bucket;
+  ENVIRONMENT?: string;
 }
 
 const MAX_PUBLIC_BODY_BYTES = 64 * 1024;
@@ -41,6 +43,7 @@ app.use(
     origin: (origin) => (origin && isAllowedOrigin(origin) ? origin : ''),
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Authorization', 'Content-Type', 'If-None-Match', 'X-Admin-Secret', 'X-Milkglass-Ts', 'X-Milkglass-Sig'],
+    exposeHeaders: ['X-Milkglass-Server-Sig', 'ETag', 'Retry-After', 'X-Milkglass-Cache'],
     maxAge: 600,
   })
 );

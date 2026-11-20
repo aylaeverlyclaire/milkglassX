@@ -1,12 +1,58 @@
 import { Context, Next } from 'hono';
 
-interface RateBucket {
+export interface RateBucket {
   count: number;
   resetAt: number;
 }
 
 const isolateBuckets = new Map<string, RateBucket>();
 const MAX_BUCKETS = 5000;
+
+function evictBucketsIfNeeded(
+  buckets: Map<string, RateBucket>,
+  nowSec: number,
+  maxBuckets: number
+): void {
+  if (buckets.size <= maxBuckets) return;
+  let scanned = 0;
+  for (const [k, v] of buckets.entries()) {
+    if (v.resetAt <= nowSec) buckets.delete(k);
+    if (++scanned >= 32) break;
+  }
+  while (buckets.size > maxBuckets) {
+    const oldestKey = buckets.keys().next().value;
+    if (!oldestKey) break;
+    buckets.delete(oldestKey);
+  }
+}
+
+export function checkBoundedQuota(
+  buckets: Map<string, RateBucket>,
+  key: string,
+  maxRequests: number,
+  windowSeconds: number,
+  maxBuckets = 2000
+): { allowed: boolean; retryAfter: number } {
+  const now = Math.floor(Date.now() / 1000);
+  const existing = buckets.get(key);
+
+  if (!existing || existing.resetAt <= now) {
+    if (existing) buckets.delete(key);
+    buckets.set(key, { count: 1, resetAt: now + windowSeconds });
+    evictBucketsIfNeeded(buckets, now, maxBuckets);
+    return { allowed: true, retryAfter: 0 };
+  }
+
+  existing.count += 1;
+  // Refresh LRU order on access
+  buckets.delete(key);
+  buckets.set(key, existing);
+
+  if (existing.count > maxRequests) {
+    return { allowed: false, retryAfter: Math.max(1, existing.resetAt - now) };
+  }
+  return { allowed: true, retryAfter: 0 };
+}
 
 export function normalizeClientIp(rawIp: string | undefined): string {
   if (!rawIp) return '0.0.0.0';
@@ -37,38 +83,15 @@ export function normalizeClientIp(rawIp: string | undefined): string {
 
 export function rateLimit(maxRequests: number, windowSeconds: number) {
   return async (c: Context, next: Next) => {
-    const now = Math.floor(Date.now() / 1000);
-    const rawIp =
-      c.req.header('CF-Connecting-IP') ||
-      '0.0.0.0';
+    const rawIp = c.req.header('CF-Connecting-IP') || '0.0.0.0';
     const clientIp = normalizeClientIp(rawIp);
     const normalizedRoute = c.req.routePath || c.req.path;
     const routeKey = `${c.req.method}:${normalizedRoute}:${clientIp}`;
 
-    const existing = isolateBuckets.get(routeKey);
-    if (!existing || existing.resetAt <= now) {
-      isolateBuckets.set(routeKey, { count: 1, resetAt: now + windowSeconds });
-    } else {
-      existing.count += 1;
-      if (existing.count > maxRequests) {
-        const retryAfter = Math.max(1, existing.resetAt - now);
-        c.header('Retry-After', String(retryAfter));
-        return c.json(
-          { status: 'error', message: 'Server lagi sibuk.' },
-          429
-        );
-      }
-    }
-
-    if (isolateBuckets.size > MAX_BUCKETS) {
-      for (const [k, v] of isolateBuckets.entries()) {
-        if (v.resetAt <= now) isolateBuckets.delete(k);
-      }
-      while (isolateBuckets.size > MAX_BUCKETS) {
-        const oldestKey = isolateBuckets.keys().next().value;
-        if (!oldestKey) break;
-        isolateBuckets.delete(oldestKey);
-      }
+    const quota = checkBoundedQuota(isolateBuckets, routeKey, maxRequests, windowSeconds, MAX_BUCKETS);
+    if (!quota.allowed) {
+      c.header('Retry-After', String(quota.retryAfter));
+      return c.json({ status: 'error', message: 'Server lagi sibuk.' }, 429);
     }
 
     await next();
