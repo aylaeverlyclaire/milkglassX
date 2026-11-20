@@ -637,8 +637,89 @@ class OtakudesuSourceProvider(
                 }
             }
         }
+        results.addAll(harvestOtakudesuMirrorStreams(epDoc, epUrl, root, targetQualities, results))
         results.addAll(harvestFallbackCandidates(epDoc, epUrl, results))
         return results
+    }
+
+    private fun harvestOtakudesuMirrorStreams(
+        epDoc: org.jsoup.nodes.Document,
+        epUrl: String,
+        root: String,
+        targetQualities: Set<MkvQuality>,
+        existing: List<RawMkvCandidate>
+    ): List<RawMkvCandidate> {
+        val mirrorLinks = epDoc.select("ul.m360p li a[data-content], ul.m480p li a[data-content], ul.m720p li a[data-content]")
+        if (mirrorLinks.isEmpty()) return emptyList()
+        val nonce = runCatching {
+            val form = okhttp3.FormBody.Builder().add("action", "aa1208d27f29ca340c92c66d1926f13f").build()
+            val req = okhttp3.Request.Builder()
+                .url("$root/wp-admin/admin-ajax.php")
+                .post(form)
+                .header("Referer", epUrl)
+                .header("X-Requested-With", "XMLHttpRequest")
+                .build()
+            clients.sourceClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                org.json.JSONObject(resp.body?.string().orEmpty()).optString("data").takeIf { it.isNotBlank() }
+            }
+        }.getOrNull() ?: return emptyList()
+
+        val seenUrls = existing.mapTo(HashSet()) { it.rawUrl }
+        val out = mutableListOf<RawMkvCandidate>()
+        for (a in mirrorLinks) {
+            if (out.size >= 4) break
+            val label = a.text().trim()
+            if (HosterFilter.isBlacklisted(label, label)) continue
+            val ulClass = a.parents().firstOrNull { it.tagName() == "ul" }?.className().orEmpty()
+            val quality = MkvQuality.fromText(ulClass) ?: MkvQuality.P720
+            if (quality !in targetQualities) continue
+            val payload = runCatching {
+                val decoded = String(android.util.Base64.decode(a.attr("data-content"), android.util.Base64.DEFAULT))
+                org.json.JSONObject(decoded)
+            }.getOrNull() ?: continue
+            val id = payload.optString("id")
+            val i = payload.optString("i")
+            val q = payload.optString("q")
+            if (id.isBlank() || q.isBlank()) continue
+            val embedSrc = runCatching {
+                val form = okhttp3.FormBody.Builder()
+                    .add("id", id)
+                    .add("i", i)
+                    .add("q", q)
+                    .add("nonce", nonce)
+                    .add("action", "2a3505c93b0035d3f455df82bf976b84")
+                    .build()
+                val req = okhttp3.Request.Builder()
+                    .url("$root/wp-admin/admin-ajax.php")
+                    .post(form)
+                    .header("Referer", epUrl)
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .build()
+                clients.sourceClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val dataB64 = org.json.JSONObject(resp.body?.string().orEmpty()).optString("data")
+                    if (dataB64.isBlank()) return@use null
+                    val iframeHtml = String(android.util.Base64.decode(dataB64, android.util.Base64.DEFAULT))
+                    org.jsoup.Jsoup.parse(iframeHtml, root).selectFirst("iframe[src]")?.absUrl("src")?.trim()
+                }
+            }.getOrNull()
+            if (!embedSrc.isNullOrBlank() && embedSrc.startsWith("http") &&
+                !HosterFilter.isBlacklisted(label, embedSrc) && seenUrls.add(embedSrc)
+            ) {
+                out.add(
+                    RawMkvCandidate(
+                        source = priority,
+                        quality = quality,
+                        hosterLabel = label.ifBlank { "StreamMirror" },
+                        rawUrl = embedSrc,
+                        pageReferer = epUrl,
+                        container = MediaContainer.MP4
+                    )
+                )
+            }
+        }
+        return out
     }
 }
 
@@ -755,8 +836,67 @@ class SamehadakuSourceProvider(
                 }
             }
         }
+        results.addAll(harvestSamehadakuPlayerMirrors(epDoc, epUrl, root, targetQualities, results))
         results.addAll(harvestFallbackCandidates(epDoc, epUrl, results))
         return results
+    }
+
+    private fun harvestSamehadakuPlayerMirrors(
+        epDoc: org.jsoup.nodes.Document,
+        epUrl: String,
+        root: String,
+        targetQualities: Set<MkvQuality>,
+        existing: List<RawMkvCandidate>
+    ): List<RawMkvCandidate> {
+        val options = epDoc.select("div.east_player_option[data-post], li div[data-post][data-nume]")
+        if (options.isEmpty()) return emptyList()
+        val seenUrls = existing.mapTo(HashSet()) { it.rawUrl }
+        val out = mutableListOf<RawMkvCandidate>()
+        for (opt in options) {
+            if (out.size >= 4) break
+            val label = opt.text().trim()
+            if (HosterFilter.isBlacklisted(label, label)) continue
+            val postId = opt.attr("data-post").trim()
+            val nume = opt.attr("data-nume").trim()
+            val type = opt.attr("data-type").trim().ifBlank { "schtml" }
+            if (postId.isBlank() || nume.isBlank()) continue
+            val quality = MkvQuality.fromText(label) ?: MkvQuality.P1080
+            if (quality !in targetQualities) continue
+            val embedSrc = runCatching {
+                val form = okhttp3.FormBody.Builder()
+                    .add("action", "player_ajax")
+                    .add("post", postId)
+                    .add("nume", nume)
+                    .add("type", type)
+                    .build()
+                val req = okhttp3.Request.Builder()
+                    .url("$root/wp-admin/admin-ajax.php")
+                    .post(form)
+                    .header("Referer", epUrl)
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .build()
+                clients.sourceClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val html = resp.body?.string().orEmpty()
+                    org.jsoup.Jsoup.parse(html, root).selectFirst("iframe[src]")?.absUrl("src")?.trim()
+                }
+            }.getOrNull()
+            if (!embedSrc.isNullOrBlank() && embedSrc.startsWith("http") &&
+                !HosterFilter.isBlacklisted(label, embedSrc) && seenUrls.add(embedSrc)
+            ) {
+                out.add(
+                    RawMkvCandidate(
+                        source = priority,
+                        quality = quality,
+                        hosterLabel = label.ifBlank { "SamehadakuStream" },
+                        rawUrl = embedSrc,
+                        pageReferer = epUrl,
+                        container = MediaContainer.MKV
+                    )
+                )
+            }
+        }
+        return out
     }
 }
 

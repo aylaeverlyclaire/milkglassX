@@ -8,7 +8,7 @@ const BLACKLISTED_HOSTER_PATTERNS = [
   'safelink', 'ouo.io', 'ouo.press', 'shrinkme', 'exe.io', 'bc.vc',
   'adf.ly', 'bit.ly', 'tinyurl.com', 't.me', 'telegram', 'discord',
   'facebook.com', 'twitter.com', 'instagram.com', 'youtube.com', 'youtu.be',
-  'saweria', 'trakteer', 'paypal', 'javascript:', 'mailto:', '#', 'mirrored.to', 'acefile.co',
+  'saweria', 'trakteer', 'paypal', 'javascript:', 'mailto:', '#', 'mirrored.to', 'acefile.co', '(rar)', '.rar', '(zip)', 'terabox', 'shrinkearn',
 ];
 
 const KNOWN_HOSTER_DOMAINS = [

@@ -21,6 +21,7 @@ export interface AniListRawMedia {
   popularity?: number | null;
   episodes?: number | null;
   genres?: string[] | null;
+  synonyms?: string[] | null;
   coverImage?: {
     extraLarge?: string | null;
     large?: string | null;
@@ -129,6 +130,7 @@ const MEDIA_FIELDS = `
   popularity
   episodes
   genres
+  synonyms
   coverImage {
     extraLarge
     large
@@ -193,8 +195,9 @@ const UPSERT_ANIME_SQL = `
   INSERT INTO animes (
     id, mal_id, title, title_alt, synopsis, score, type, status,
     schedule_day, duration, studio, release_season, poster_url,
-    genres_json, popularity, updated_at, episodes_total, next_airing_at, next_airing_ep
-  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+    genres_json, popularity, updated_at, episodes_total, next_airing_at, next_airing_ep,
+    title_native, synonyms_json, norm_compact
+  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
   ON CONFLICT(id) DO UPDATE SET
     mal_id = COALESCE(excluded.mal_id, animes.mal_id),
     title = excluded.title,
@@ -213,7 +216,10 @@ const UPSERT_ANIME_SQL = `
     updated_at = excluded.updated_at,
     episodes_total = CASE WHEN excluded.episodes_total > 0 THEN excluded.episodes_total ELSE animes.episodes_total END,
     next_airing_at = excluded.next_airing_at,
-    next_airing_ep = excluded.next_airing_ep
+    next_airing_ep = excluded.next_airing_ep,
+    title_native = COALESCE(excluded.title_native, animes.title_native),
+    synonyms_json = COALESCE(excluded.synonyms_json, animes.synonyms_json),
+    norm_compact = excluded.norm_compact
 `;
 
 export function bindAnimeUpsert(
@@ -254,7 +260,17 @@ export function bindAnimeUpsert(
       nowSec,
       item.episodes && item.episodes > 0 ? item.episodes : 0,
       item.nextAiringEpisode?.airingAt ?? 0,
-      item.nextAiringEpisode?.episode ?? 0
+      item.nextAiringEpisode?.episode ?? 0,
+      item.title?.native || null,
+      JSON.stringify((item.synonyms ?? []).filter((s) => typeof s === 'string' && s.trim().length > 0).slice(0, 12)),
+      [item.title?.romaji, item.title?.english, item.title?.native]
+        .filter(Boolean)
+        .join(' ')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+/g, '')
+        .slice(0, 200)
     );
 }
 

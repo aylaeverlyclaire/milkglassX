@@ -148,7 +148,7 @@ class PlayerManager(
     @Volatile private var activeSessionId: Long = 0L
     @Volatile private var released = false
     private var isScrubbing = false
-    
+
     private val _snapshot = MutableStateFlow(PlayerSnapshot())
     val snapshot: StateFlow<PlayerSnapshot> = _snapshot.asStateFlow()
 
@@ -310,7 +310,6 @@ class PlayerManager(
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-
         exoPlayer = ExoPlayer.Builder(appContext, renderersFactory)
             .setTrackSelector(trackSelector!!)
             .setLoadControl(loadControl)
@@ -437,14 +436,14 @@ class PlayerManager(
         val current = lastRequest ?: return
         val activeSession = activeStreamSession
         if (activeSession != null && activeSession.isHls) {
-           val maxH = when {
+            val maxH = when {
                 newResolution.contains("1080") -> 1080
                 newResolution.contains("720") -> 720
                 newResolution.contains("480") -> 480
                 newResolution.contains("360") -> 360
                 else -> 0
-           }
-           lastRequest = current.copy(preferredResolution = newResolution)
+            }
+            lastRequest = current.copy(preferredResolution = newResolution)
             setMaxVideoResolution(maxH)
             _snapshot.update {
                 it.copy(activeResolution = if (newResolution == "Auto") activeSession.activeResolution else newResolution)
@@ -766,6 +765,8 @@ class PlayerManager(
             _isVideoBuffering.value = buffering
         PlaybackBandwidthGate.onBufferingChanged(buffering)
         }
+
+        internal fun getSharedStreamCache(context: Context): SimpleCache? = getStreamCache(context.applicationContext)
 
         fun buildStreamCacheKey(
             slug: String,

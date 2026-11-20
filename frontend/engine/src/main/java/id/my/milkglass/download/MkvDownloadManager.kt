@@ -12,7 +12,13 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import android.net.Uri
+import androidx.media3.common.C
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import id.my.milkglass.EngineRuntime
+import id.my.milkglass.player.PlayerManager
 import id.my.milkglass.net.CloudflareChallengeException
 import id.my.milkglass.net.PublicIpGuard
 import id.my.milkglass.source.CascadeResult
@@ -311,6 +317,85 @@ class MkvDownloadWorker(
         return digest.take(8).joinToString("") { "%02x".format(it) }
     }
 
+    /**
+     * Unduhan terpadu berbasis SimpleCache: memanfaatkan byte yang sudah di-cache saat streaming/seekbar
+     * sehingga hanya bagian yang belum ter-cache yang diunduh dari jaringan (hemat bandwidth).
+     */
+    private suspend fun tryDownloadViaSharedCache(
+        clients: id.my.milkglass.net.IsolatedHttpClients,
+        resolved: id.my.milkglass.source.ResolvedMkvMedia,
+        episodeSlug: String,
+        targetFile: File,
+        partFile: File,
+        existingBytes: Long
+    ): CandidateDownloadStatus? {
+        if (resolved.isBatchArchive) return null
+        val streamCache = PlayerManager.getSharedStreamCache(applicationContext) ?: return null
+        val keyStd = PlayerManager.buildStreamCacheKey(episodeSlug, resolved.quality.label, false)
+        val keyCompat = PlayerManager.buildStreamCacheKey(episodeSlug, resolved.quality.label, true)
+        val cachedCompat = runCatching { streamCache.getCachedBytes(keyCompat, 0L, Long.MAX_VALUE) }.getOrDefault(0L)
+        val cachedStd = runCatching { streamCache.getCachedBytes(keyStd, 0L, Long.MAX_VALUE) }.getOrDefault(0L)
+        val cacheKey = if (cachedCompat > cachedStd) keyCompat else keyStd
+        if (cachedCompat <= 0L && cachedStd <= 0L) return null
+
+        val headers = LinkedHashMap<String, String>(resolved.extraHeaders)
+        if (!resolved.referer.isNullOrBlank()) headers["Referer"] = resolved.referer
+        val upstream = OkHttpDataSource.Factory(clients.streamingClient)
+            .setUserAgent(clients.webViewUserAgent)
+            .setDefaultRequestProperties(headers)
+        val cacheDs = CacheDataSource.Factory()
+            .setCache(streamCache)
+            .setUpstreamDataSourceFactory(upstream)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+            .createDataSource()
+
+        val spec = DataSpec.Builder()
+            .setUri(Uri.parse(resolved.directUrl))
+            .setKey(cacheKey)
+            .setPosition(existingBytes)
+            .build()
+
+        return try {
+            val remainingLen = cacheDs.open(spec)
+            val totalBytes = if (remainingLen != C.LENGTH_UNSET.toLong() && remainingLen > 0L) {
+                existingBytes + remainingLen
+            } else -1L
+
+            var downloaded = existingBytes
+            var lastReportedPct = -1
+            FileOutputStream(partFile, existingBytes > 0L).use { fos ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val read = cacheDs.read(buf, 0, buf.size)
+                    if (read == C.RESULT_END_OF_INPUT || read < 0) break
+                    if (read == 0) continue
+                    fos.write(buf, 0, read)
+                    downloaded += read
+                    if (totalBytes > 0L) {
+                        val pct = ((downloaded * 100L) / totalBytes).toInt().coerceIn(0, 99)
+                        if (pct != lastReportedPct) {
+                            lastReportedPct = pct
+                            setProgress(Data.Builder().putInt(KEY_PROGRESS, pct).build())
+                        }
+                    }
+                }
+                fos.flush()
+            }
+            if (downloaded <= 0L) return CandidateDownloadStatus.FAILED_RETRYABLE
+            if (targetFile.exists()) targetFile.delete()
+            if (!partFile.renameTo(targetFile)) {
+                partFile.copyTo(targetFile, overwrite = true)
+                partFile.delete()
+            }
+            setProgress(Data.Builder().putInt(KEY_PROGRESS, 100).build())
+            CandidateDownloadStatus.SUCCEEDED
+        } catch (_: Exception) {
+            null // Fallback bersih ke jalur OkHttp standar bila CacheDataSource gagal
+        } finally {
+            runCatching { cacheDs.close() }
+        }
+    }
+
     private fun cleanupEpisodePartFiles(dir: File, slug: String, episode: Int) {
         if (!dir.exists()) return
         val prefix = "${slug}_ep${episode}_"
@@ -407,6 +492,23 @@ class MkvDownloadWorker(
                 val existingBytes = if (partFile.exists()) partFile.length() else 0L
 
                 try {
+                    val cacheStatus = tryDownloadViaSharedCache(
+                        clients = clients,
+                        resolved = resolved,
+                        episodeSlug = episodeSlug,
+                        targetFile = targetFile,
+                        partFile = partFile,
+                        existingBytes = existingBytes
+                    )
+                    if (cacheStatus == CandidateDownloadStatus.SUCCEEDED) {
+                        EndpointHealthScorer.recordSuccess(resolved.hoster)
+                        return@withPermit Result.success(
+                            Data.Builder()
+                                .putInt(KEY_PROGRESS, 100)
+                                .putString(KEY_OUTCOME, DownloadDrainOutcome.SUCCESS.name)
+                                .build()
+                        )
+                    }
                     val reqBuilder = Request.Builder()
                         .url(resolved.directUrl)
                         .header("User-Agent", clients.webViewUserAgent)

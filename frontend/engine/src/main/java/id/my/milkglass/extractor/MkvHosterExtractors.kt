@@ -30,13 +30,13 @@ data class ExtractedDirectMedia(
 object HosterFilter {
     private val blacklistedTokens = listOf(
         "mega.nz", "mega.co.nz", "megaup", "otakufiles", "zippyshare",
-        "mirrored.to", "acefile.co"
+        "mirrored.to", "acefile.co", "(rar)", ".rar", "(zip)", "terabox", "shrinkearn"
     )
 
     private val preferredOrder = listOf(
         "pixeldrain", "pdrain", "gofile", "buzzheavier", "filedon", "odfiles",
         "gdrive", "drive.google", "qiwi", "mediafire", "kuramadrive",
-        "odstream", "ondesu", "desustream", "blogger", "streamruby",
+        "icefile.web.id", "odstream", "ondesu", "desustream", "blogger", "streamruby",
         "vidhide", "filemoon", "mixdrop", "streamtape", "dood", "krakenfiles", "kfiles"
     )
 
@@ -419,7 +419,7 @@ class MkvHosterExtractorRegistry(
                 low.contains("docs.google.com") -> extractGoogleDrive(resolvedUrl)
             low.contains("kuramadrive.com") -> extractKuramadrive(resolvedUrl)
             low.contains("dood.") || low.contains("doodstream.") || low.contains("ds2play.") -> extractDood(resolvedUrl)
-            low.contains("odstream.xyz") || low.contains("desustream.") -> extractOdstreamOrDesustream(resolvedUrl, referer)
+            low.contains("odstream.xyz") || low.contains("desustream.") || low.contains("icefile.web.id") -> extractOdstreamOrDesustream(resolvedUrl, referer)
             low.contains("ondesu.cc") || low.contains("ondesuh.cc") -> extractOndesu(resolvedUrl, referer, depth)
             low.contains("blogger.com") -> extractBlogger(resolvedUrl, referer)
             low.contains("rubyvidhub.com") || low.contains("streamruby.") -> extractStreamRuby(resolvedUrl, referer)
