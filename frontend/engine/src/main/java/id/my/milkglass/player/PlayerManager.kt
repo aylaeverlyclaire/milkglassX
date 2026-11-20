@@ -387,7 +387,7 @@ class PlayerManager(
                 }
 
                 activeStreamSession = session
-                val availRes = listOf("Auto") + session.availableResolutions
+                val availRes = (listOf("Auto") + session.availableResolutions).distinct()
                 _availableResolutions.value = availRes
                 _snapshot.update {
                     if (it.sessionId != sid) it else it.copy(
@@ -435,6 +435,22 @@ class PlayerManager(
 
     fun switchResolution(newResolution: String) {
         val current = lastRequest ?: return
+        val activeSession = activeStreamSession
+        if (activeSession != null && activeSession.isHls) {
+           val maxH = when {
+                newResolution.contains("1080") -> 1080
+                newResolution.contains("720") -> 720
+                newResolution.contains("480") -> 480
+                newResolution.contains("360") -> 360
+                else -> 0
+           }
+           lastRequest = current.copy(preferredResolution = newResolution)
+            setMaxVideoResolution(maxH)
+            _snapshot.update {
+                it.copy(activeResolution = if (newResolution == "Auto") activeSession.activeResolution else newResolution)
+            }
+            return
+        }
         val resumeMs = getCurrentPosition().takeIf { it > 0L } ?: _snapshot.value.positionMs
         load(
             current.copy(
