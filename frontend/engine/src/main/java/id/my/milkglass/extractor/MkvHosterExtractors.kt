@@ -95,7 +95,7 @@ class LinkUnshortener(
             mine.complete(resolved)
             resolved
         } catch (t: Throwable) {
-            mine.complete(trimmed)
+            mine.completeExceptionally(t)
             throw t
         } finally {
             inFlight.remove(trimmed, mine)
@@ -321,7 +321,7 @@ class MkvHosterExtractorRegistry(
 
         val nestedIframe = doc.selectFirst("iframe[src]")?.absUrl("src")
             ?.takeIf { it.startsWith("http") && !it.equals(url, ignoreCase = true) }
-        if (nestedIframe != null && nestedIframe.toHttpUrlOrNull()?.host != url.toHttpUrlOrNull()?.host) {
+        if (nestedIframe != null && !nestedIframe.equals(url, ignoreCase = true)) {
             val nestedHtml = fetchText(nestedIframe, url) ?: return null
             val nestedUnpacked = JsUnpacker.unpack(nestedHtml) ?: nestedHtml
             val hit = directMediaUrlRegex.find(nestedUnpacked)?.value?.replace("\\/", "/")
@@ -391,8 +391,10 @@ class MkvHosterExtractorRegistry(
             ?: url.trimEnd('/').substringAfterLast('/').takeIf { it.isNotBlank() }
             ?: return null
         val candidates = listOf("https://filedon.co/embed/$slug", url).distinct()
+        var lastHtml: String? = null
         for (target in candidates) {
             val html = fetchText(target, "https://filedon.co/") ?: continue
+            if (target == url) lastHtml = html
             val doc = Jsoup.parse(html, target)
             val rawDataPage = doc.selectFirst("[data-page]")?.attr("data-page") ?: continue
             val props = runCatching { JSONObject(rawDataPage).optJSONObject("props") }.getOrNull() ?: continue
@@ -409,7 +411,7 @@ class MkvHosterExtractorRegistry(
                 isHls = isHls
             )
         }
-        val origHtml = fetchText(url, "https://filedon.co/") ?: return null
+        val origHtml = lastHtml ?: fetchText(url, "https://filedon.co/") ?: return null
         val csrf = Jsoup.parse(origHtml, url).selectFirst("meta[name=csrf-token]")?.attr("content")?.trim()
         if (!csrf.isNullOrBlank()) {
             val postReq = Request.Builder()
@@ -531,7 +533,8 @@ class MkvHosterExtractorRegistry(
                 .build()
             direct = runCatching {
                 clients.noRedirectClient.newCall(req).execute().use { resp ->
-                    resp.header("hx-redirect") ?: resp.header("Location")
+                    val raw = resp.header("hx-redirect") ?: resp.header("Location") ?: return@use null
+                    if (raw.startsWith("http")) raw else target.toHttpUrlOrNull()?.resolve(raw)?.toString()
                 }
             }.getOrNull()?.takeIf { it.startsWith("http") }
             if (direct != null) break
