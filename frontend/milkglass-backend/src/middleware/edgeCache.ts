@@ -2,6 +2,7 @@ import { Context, Next } from 'hono';
 
 export interface EdgeCacheOptions {
   immutable?: boolean;
+  excludeParams?: string[];
 }
 
 async function weakEtag(body: string): Promise<string> {
@@ -40,6 +41,9 @@ export function edgeCache(
     const cache = (caches as unknown as { default: Cache }).default;
     const normalizedUrl = new URL(c.req.url);
     if (allowQueryParams) {
+      if (options.excludeParams?.length) {
+        for (const p of options.excludeParams) normalizedUrl.searchParams.delete(p);
+      }
       normalizedUrl.searchParams.sort();
     } else {
       normalizedUrl.search = '';
@@ -80,15 +84,23 @@ export function edgeCache(
       const bodyText = await c.res.text();
       const etag = await weakEtag(bodyText);
       const mutableHeaders = new Headers(c.res.headers);
-      const cacheControl = options.immutable
-        ? `public, max-age=${sMaxAgeSeconds}, s-maxage=${sMaxAgeSeconds}, immutable`
-        : `public, s-maxage=${sMaxAgeSeconds}, stale-while-revalidate=${staleWhileRevalidateSeconds}`;
+      const shortCacheSec = Number(c.res.headers.get('X-Milkglass-ShortCache') || '0');
+      mutableHeaders.delete('X-Milkglass-ShortCache');
+      const cacheControl = shortCacheSec > 0
+        ? `public, s-maxage=${shortCacheSec}, stale-while-revalidate=${shortCacheSec}`
+        : options.immutable
+          ? `public, max-age=${sMaxAgeSeconds}, s-maxage=${sMaxAgeSeconds}, immutable`
+          : `public, s-maxage=${sMaxAgeSeconds}, stale-while-revalidate=${staleWhileRevalidateSeconds}`;
       mutableHeaders.set('Cache-Control', cacheControl);
       mutableHeaders.set('ETag', etag);
       mutableHeaders.set('X-Milkglass-Cache', 'MISS');
 
+      const cacheHeaders = new Headers(mutableHeaders);
+      cacheHeaders.delete('Access-Control-Allow-Origin');
+      cacheHeaders.delete('Access-Control-Allow-Credentials');
+      cacheHeaders.delete('Vary');
       c.executionCtx.waitUntil(
-        cache.put(cacheKey, new Response(bodyText, { status: 200, headers: mutableHeaders }))
+        cache.put(cacheKey, new Response(bodyText, { status: 200, headers: cacheHeaders }))
       );
       c.res = etagMatches(c.req.header('If-None-Match'), etag)
         ? notModified(etag, cacheControl)
@@ -139,5 +151,22 @@ export async function purgeSourcesCache(requestUrl: string): Promise<void> {
     await cache.delete(new Request(`${origin}/v1/catalog/sources`, { method: 'GET' }));
   } catch {
 
+  }
+}
+
+export async function purgePlayResolveCache(
+  requestUrl: string,
+  title: string,
+  ep: number
+): Promise<void> {
+  try {
+    const origin = new URL(requestUrl).origin;
+    const u = new URL(`${origin}/v1/play/resolve`);
+    u.searchParams.set('ep', String(ep));
+    u.searchParams.set('title', title);
+    u.searchParams.sort();
+    const cache = (caches as unknown as { default: Cache }).default;
+    await cache.delete(new Request(u.toString(), { method: 'GET' }));
+  } catch {
   }
 }

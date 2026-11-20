@@ -157,3 +157,6 @@ CREATE INDEX IF NOT EXISTS idx_catalog_title ON catalog_episodes(title);
 CREATE INDEX IF NOT EXISTS idx_catalog_anilist ON catalog_episodes(anilist_id, episode);
 CREATE INDEX IF NOT EXISTS idx_catalog_rec ON catalog_episodes(is_recommended, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_play_hints_updated ON play_hints(updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_animes_popularity ON animes(popularity DESC);
+CREATE INDEX IF NOT EXISTS idx_sources_ep_sort ON stream_sources(episode_id, is_active, cooldown_until, fail_count, quality DESC);

@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
-import { edgeCache } from '../middleware/edgeCache';
+import { edgeCache, purgePlayResolveCache } from '../middleware/edgeCache';
 import { rateLimit } from '../middleware/rateLimit';
 import { getSourceBaseUrls } from '../services/anilist.service';
 import { deriveSessionProofKey, hmacSha256Hex, verifyAccessTokenClaims, verifyRequestProof, VerifiedAccessClaims } from './auth.routes';
@@ -126,16 +126,16 @@ playRoutes.post('/hint', rateLimit(20, 60), zValidator('json', hintBodySchema), 
 
   const key = hintKey(title, ep);
   const now = Math.floor(Date.now() / 1000);
-  const existing = await c.env.DB.prepare('SELECT updated_at FROM play_hints WHERE key = ?1').bind(key).first<{ updated_at: number }>();
-  if (existing && now - existing.updated_at < HINT_REFRESH_AFTER_SEC) {
-    // Sudah segar: lewati tulis (hemat kuota tulis D1).
-    return c.json({ status: 'ok', stored: false, fresh: true });
-  }
-  await c.env.DB.prepare(
+  const res = await c.env.DB.prepare(
     `INSERT INTO play_hints (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
-     ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1`
-  ).bind(key, JSON.stringify(clean), now).run();
-  return c.json({ status: 'ok', stored: true });
+     ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1
+     WHERE (?3 - play_hints.updated_at) >= ?4`
+  ).bind(key, JSON.stringify(clean), now, HINT_REFRESH_AFTER_SEC).run();
+  const stored = (res.meta?.changes ?? 0) > 0;
+  if (stored) {
+    c.executionCtx.waitUntil(purgePlayResolveCache(c.req.url, title, ep));
+  }
+  return c.json({ status: 'ok', stored, fresh: !stored });
 });
 
 async function lookupHint(db: D1Database, title: string, ep: number): Promise<StoredHint[] | null> {
@@ -228,15 +228,16 @@ playRoutes.post('/direct', rateLimit(20, 60), zValidator('json', directBodySchem
 
   const key = hintKey(title, ep);
   const now = Math.floor(Date.now() / 1000);
-  const existing = await c.env.DB.prepare('SELECT updated_at FROM play_direct WHERE key = ?1').bind(key).first<{ updated_at: number }>();
-  if (existing && now - existing.updated_at < DIRECT_REFRESH_AFTER_SEC) {
-    return c.json({ status: 'ok', stored: false, fresh: true });
-  }
-  await c.env.DB.prepare(
+  const res = await c.env.DB.prepare(
     `INSERT INTO play_direct (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
-     ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1`
-  ).bind(key, JSON.stringify(clean), now).run();
-  return c.json({ status: 'ok', stored: true });
+     ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1
+     WHERE (?3 - play_direct.updated_at) >= ?4`
+  ).bind(key, JSON.stringify(clean), now, DIRECT_REFRESH_AFTER_SEC).run();
+  const stored = (res.meta?.changes ?? 0) > 0;
+  if (stored) {
+    c.executionCtx.waitUntil(purgePlayResolveCache(c.req.url, title, ep));
+  }
+  return c.json({ status: 'ok', stored, fresh: !stored });
 });
 
 async function lookupDirect(db: D1Database, title: string, ep: number): Promise<StoredDirect[] | null> {
@@ -310,13 +311,36 @@ playRoutes.get(
       c.res = new Response(bodyText, { status: c.res.status, headers: signedHeaders });
     }
   },
-  edgeCache(900, 120, true),
+  edgeCache(900, 120, true, { excludeParams: ['q'] }),
   zValidator('query', resolveQuerySchema),
   async (c) => {
     const { title, ep, q } = c.req.valid('query');
 
     // 1) Jalur cepat dari D1 (tanpa scrape, tanpa Cloudflare-challenge): URL direct terverifikasi + hint hoster mentah.
-    const [direct, hinted] = await Promise.all([lookupDirect(c.env.DB, title, ep), lookupHint(c.env.DB, title, ep)]);
+    const key = hintKey(title, ep);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const [directRes, hintRes] = await c.env.DB.batch([
+      c.env.DB.prepare('SELECT payload, updated_at FROM play_direct WHERE key = ?1').bind(key),
+      c.env.DB.prepare('SELECT payload, updated_at FROM play_hints WHERE key = ?1').bind(key),
+    ]);
+    let direct: StoredDirect[] | null = null;
+    try {
+      const dRow = directRes.results?.[0] as { payload: string; updated_at: number } | undefined;
+      if (dRow && nowSec - dRow.updated_at <= DIRECT_MAX_AGE_SEC) {
+        const arr = JSON.parse(dRow.payload) as StoredDirect[];
+        const ok = (Array.isArray(arr) ? arr : []).filter((d) => d && isAcceptableDirect({ hoster: d.hoster || '', direct_url: d.direct_url }));
+        if (ok.length) direct = ok;
+      }
+    } catch {}
+    let hinted: StoredHint[] | null = null;
+    try {
+      const hRow = hintRes.results?.[0] as { payload: string; updated_at: number } | undefined;
+      if (hRow && nowSec - hRow.updated_at <= HINT_MAX_AGE_SEC) {
+        const arr = JSON.parse(hRow.payload) as StoredHint[];
+        const ok = (Array.isArray(arr) ? arr : []).filter((h) => h && isKnownHosterUrl(h.raw_url));
+        if (ok.length) hinted = ok;
+      }
+    } catch {}
     if (direct || hinted) {
       return c.json({
         status: 'ok',
@@ -332,7 +356,7 @@ playRoutes.get(
     if (!handlerBase.startsWith('http://') && !handlerBase.startsWith('https://')) {
       // Miss biasa (resolver server memang tidak dipasang): 200 kosong, bukan 503, supaya klien tidak
       // menganggap server mati dan tetap bertanya lagi untuk episode lain. Tidak di-cache.
-      c.header('X-Milkglass-NoCache', '1');
+      c.header('X-Milkglass-ShortCache', '20');
       return c.json({ status: 'ok', data: { direct_candidates: [], client_extract_candidates: [] } });
     }
 
