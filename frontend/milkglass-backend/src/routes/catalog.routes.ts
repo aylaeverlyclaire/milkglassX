@@ -501,11 +501,11 @@ catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
     target_resolutions: ['1080p', '720p', '480p'],
     cf_handler_available: Boolean(c.env.CF_HANDLER_URL && c.env.CF_HANDLER_URL.trim().startsWith('http')),
     sources: [
-      { rank: 1, id: 'otakudesu', base_url: urls.otakudesu },
-      { rank: 2, id: 'samehadaku', base_url: urls.samehadaku },
-      { rank: 3, id: 'nontonanimeid', base_url: urls.nontonanimeid },
-      { rank: 4, id: 'oploverz', base_url: urls.oploverz },
-      { rank: 5, id: 'kusonime', base_url: urls.kusonime },
+      { rank: 1, id: 'samehadaku', base_url: urls.samehadaku, watermark_tier: 0 },
+      { rank: 2, id: 'nontonanimeid', base_url: urls.nontonanimeid, watermark_tier: 0 },
+      { rank: 3, id: 'oploverz', base_url: urls.oploverz, watermark_tier: 1 },
+      { rank: 4, id: 'otakudesu', base_url: urls.otakudesu, watermark_tier: 2 },
+      { rank: 5, id: 'kusonime', base_url: urls.kusonime, watermark_tier: 2 },
     ],
   });
 });

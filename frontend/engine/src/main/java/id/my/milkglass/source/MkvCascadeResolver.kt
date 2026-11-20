@@ -22,12 +22,23 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
-enum class SourcePriority(val rank: Int, val id: String, val defaultBaseUrl: String) {
-    OTAKUDESU(1, "otakudesu", "https://otakudesu.blog"),
-    SAMEHADAKU(2, "samehadaku", "https://v2.samehadaku.how"),
-    NONTONANIMEID(3, "nontonanimeid", "https://nontonanimeid.stream"),
-    OPLOVERZ(4, "oploverz", "https://oploverz.ch"),
-    KUSONIME(5, "kusonime", "https://kusonime.com")
+/**
+ * Piramida Prioritas Sumber (berlaku per resolusi):
+ * watermarkTier 0 = Bersih tanpa watermark permanen (Puncak Piramida: Samehadaku, NontonAnimeID)
+ * watermarkTier 1 = Watermark sudut / ringan (Oploverz)
+ * watermarkTier 2 = Watermark berat / banner iklan atau batch (Dasar Piramida: Otakudesu, Kusonime)
+ */
+enum class SourcePriority(
+    val rank: Int,
+    val id: String,
+    val defaultBaseUrl: String,
+    val watermarkTier: Int
+) {
+    SAMEHADAKU(1, "samehadaku", "https://v2.samehadaku.how", 0),
+    NONTONANIMEID(2, "nontonanimeid", "https://nontonanimeid.stream", 0),
+    OPLOVERZ(3, "oploverz", "https://oploverz.ch", 1),
+    OTAKUDESU(4, "otakudesu", "https://otakudesu.blog", 2),
+    KUSONIME(5, "kusonime", "https://kusonime.com", 2)
 }
 
 enum class MediaContainer(val rank: Int, val label: String) {
@@ -1306,10 +1317,10 @@ class MkvCascadeResolver(
     private val rawStore: RawCandidateStore? = null,
     private val onEpisodeResolved: ((String, List<RawMkvCandidate>) -> Unit)? = null,
     private val providers: List<MkvSourceProvider> = listOf(
-        OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         SamehadakuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.SAMEHADAKU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         NontonAnimeIdSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.NONTONANIMEID) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         OploverzSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OPLOVERZ) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
+        OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         KusonimeSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.KUSONIME) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher)
     )
 ) {
