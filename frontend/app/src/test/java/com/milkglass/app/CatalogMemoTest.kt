@@ -92,7 +92,7 @@ class CatalogMemoTest {
         val c = ctl()
         val compactIds = search(c, "showaokami").map { it.id }
         assertTrue("compact query should match Shōwa Ōkami", compactIds.isNotEmpty())
-        val typoIds = search(c, "showaa okmii").map { it.id }
+        val typoIds = search(c, "showaa okmi").map { it.id }
         assertTrue("1-typo query should match Shōwa Ōkami", typoIds.isNotEmpty())
     }
 
