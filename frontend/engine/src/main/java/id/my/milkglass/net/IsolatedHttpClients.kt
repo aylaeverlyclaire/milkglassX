@@ -217,7 +217,14 @@ class CloudflareInterceptor(
         val mitigated = response.header("cf-mitigated")?.lowercase()
         if (mitigated == "challenge") return true
         val server = response.header("Server")?.lowercase().orEmpty()
-        return server.contains("cloudflare")
+        if (!server.contains("cloudflare")) return false
+        val ct = response.header("Content-Type")?.lowercase().orEmpty()
+        if (!ct.contains("text/html") && ct.isNotEmpty()) return false
+        val snippet = runCatching { response.peekBody(4096).string() }.getOrDefault("")
+        return snippet.contains("cf-challenge", ignoreCase = true) ||
+            snippet.contains("challenge-platform", ignoreCase = true) ||
+            snippet.contains("_cf_chl_opt", ignoreCase = true) ||
+            snippet.contains("Just a moment", ignoreCase = true)
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -268,9 +275,9 @@ class CloudflareDohDns(
     private val inFlight = ConcurrentHashMap<String, CompletableFuture<List<InetAddress>>>()
     private val dohClient = OkHttpClient.Builder()
         .connectionPool(ConnectionPool(4, 5, TimeUnit.MINUTES))
-        .connectTimeout(1500, TimeUnit.MILLISECONDS)
-        .readTimeout(2, TimeUnit.SECONDS)
-        .callTimeout(2500, TimeUnit.MILLISECONDS)
+        .connectTimeout(900, TimeUnit.MILLISECONDS)
+        .readTimeout(1200, TimeUnit.MILLISECONDS)
+        .callTimeout(1200, TimeUnit.MILLISECONDS)
         .build()
 
     /**

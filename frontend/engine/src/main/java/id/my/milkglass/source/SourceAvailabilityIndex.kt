@@ -225,28 +225,20 @@ class SourceAvailabilityIndex(
 
     private fun fetchOploverzIndex(): List<IndexedAnimeEntry> {
         val base = baseUrlProvider(SourcePriority.OPLOVERZ).trimEnd('/')
-        val html = fetchHtml("$base/anime/list-mode/", "$base/")
-        val htmlList = if (!html.isNullOrBlank()) {
-            val doc = Jsoup.parse(html, base)
-            doc.select(".soralist a[href], .blix a[href]").mapNotNull { a ->
-                buildEntry(SourcePriority.OPLOVERZ, a.text(), a.absUrl("href"))
-            }
-        } else {
-            emptyList()
-        }
-        if (htmlList.isNotEmpty()) return htmlList
-
-        val apiJson = fetchHtml("https://backapi.oploverz.ac/api/series?page=1&pageSize=250", null)
-            ?: return emptyList()
-        val arr = runCatching { JSONObject(apiJson).optJSONArray("data") }.getOrNull() ?: return emptyList()
         val out = mutableListOf<IndexedAnimeEntry>()
-        for (i in 0 until arr.length()) {
-            val obj = arr.optJSONObject(i) ?: continue
-            val title = obj.optString("title")
-            val slug = obj.optString("slug")
-            if (title.isNotBlank() && slug.isNotBlank()) {
-                buildEntry(SourcePriority.OPLOVERZ, title, "$base/series/$slug")?.let { out.add(it) }
+        for (page in 1..4) {
+            val apiJson = fetchHtml("https://backapi.oploverz.ac/api/series?page=$page&pageSize=250", null) ?: break
+            val arr = runCatching { JSONObject(apiJson).optJSONArray("data") }.getOrNull() ?: break
+            if (arr.length() == 0) break
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val title = obj.optString("title")
+                val slug = obj.optString("slug")
+                if (title.isNotBlank() && slug.isNotBlank()) {
+                    buildEntry(SourcePriority.OPLOVERZ, title, "$base/series/$slug")?.let { out.add(it) }
+                }
             }
+            if (arr.length() < 250) break
         }
         return out
     }
