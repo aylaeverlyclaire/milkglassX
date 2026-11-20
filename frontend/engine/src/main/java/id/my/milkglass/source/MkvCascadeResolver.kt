@@ -1107,7 +1107,15 @@ class MkvCascadeResolver(
                 .thenBy { it.priority.rank }
         )
     }
-
+    fun cachedQualitiesFor(animeTitle: String, episodeNumber: Int): List<MkvQuality> {
+        val cacheKey = "${animeTitle.lowercase(Locale.ROOT).trim()}#$episodeNumber"
+        val nowMs = System.currentTimeMillis()
+        val list = rawCache[cacheKey]?.takeIf { nowMs - it.cachedAtMs <= RAW_CACHE_TTL_MS }?.candidates
+            ?: rawStore?.get(cacheKey, DISK_RAW_TTL_MS)
+            ?: return emptyList()
+        return list.filterNot { it.isBatchArchive }.map { it.quality }.distinct().sortedByDescending { it.height }
+    }
+    
     fun warmEpisodeCandidates(animeTitle: String, episodeNumber: Int): Boolean {
         val cacheKey = "${animeTitle.lowercase(Locale.ROOT).trim()}#$episodeNumber"
         val nowMs = System.currentTimeMillis()
@@ -1369,7 +1377,8 @@ class MkvCascadeResolver(
         if (resolvedList.isNotEmpty()) {
             putRawCache(cacheKey, outcome.candidates, System.currentTimeMillis())
             // Beri tahu lapisan Cloudflare (hint bersama). Tidak boleh memblok/menggagalkan pemutaran.
-            runCatching { onEpisodeResolved?.invoke(cacheKey, usable.take(6)) }
+            val balancedHints = MkvQuality.ALL_DESC.flatMap { q -> usable.filter { it.quality == q }.take(2) }.take(8)
+            runCatching { onEpisodeResolved?.invoke(cacheKey, balancedHints.ifEmpty { usable.take(6) }) }
             return CascadeResult.Success(
                 selected = resolvedList.first(),
                 alternatives = resolvedList.drop(1),
