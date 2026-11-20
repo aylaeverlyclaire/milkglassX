@@ -33,9 +33,11 @@ const IP_AGNOSTIC_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
   'filedon.co', 'odfiles.com', 'buzzheavier.com', 'qiwi.gg', 'spyderrock.com',
   'mediafire.com', 'krakenfiles.com', 'kfiles.io', 'wibufile.com', 'uqni.net',
+  'drive.google.com', 'drive.usercontent.google.com',
 ];
 const IP_LOCKED_HOSTER_DOMAINS = [
   'gofile.io', 'desustream.info', 'desustream.com', 'ondesu.com', 'mp4upload.com',
+  'blogger.com', 'yourupload.com', 'vidhidepre.com', 'vidhide.com', 'berkasdrive.com', 'mitedrive.com', 'short.ink',
 ];
 const ALL_HOSTER_DOMAINS = [...IP_AGNOSTIC_HOSTER_DOMAINS, ...IP_LOCKED_HOSTER_DOMAINS];
 
@@ -70,7 +72,7 @@ const hintBodySchema = z.object({
   candidates: z
     .array(
       z.object({
-        source: z.enum(['otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
+        source: z.enum(['animasu', 'otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
         quality: z.enum(['1080p', '720p', '480p', '360p']),
         hoster: z.string().trim().min(1).max(40),
         raw_url: z.string().max(2048),
@@ -230,7 +232,7 @@ const directBodySchema = z.object({
   candidates: z
     .array(
       z.object({
-        source: z.enum(['otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
+        source: z.enum(['animasu', 'otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
         quality: z.enum(['1080p', '720p', '480p', '360p']),
         hoster: z.string().trim().min(1).max(40),
         direct_url: z.string().max(2048),
@@ -449,6 +451,7 @@ playRoutes.get(
       ep: String(ep),
       quality: q,
     });
+    if (sourceMap.animasu) params.set('animasu', sourceMap.animasu);
     if (sourceMap.otakudesu) params.set('otakudesu', sourceMap.otakudesu);
     if (sourceMap.samehadaku) params.set('samehadaku', sourceMap.samehadaku);
     if (sourceMap.oploverz) params.set('oploverz', sourceMap.oploverz);

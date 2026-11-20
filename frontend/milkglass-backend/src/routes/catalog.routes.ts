@@ -5,6 +5,10 @@ import { rateLimit } from '../middleware/rateLimit';
 import { zValidatorParam, zValidatorQuery } from '../middleware/validator';
 import { recheckAfterSec } from '../services/sync-schedule';
 import {
+  mapAnimasuItemToCatalogRow,
+  searchAnimasu,
+} from '../services/animasu.service';
+import {
   getSourceBaseUrls,
   searchAniListMetadata,
   fetchTrendingAniList,
@@ -17,6 +21,7 @@ const R2_KEY_STATUS = 'catalog/v1/status.json';
 const R2_KEY_SNAPSHOT = 'catalog/v1/snapshot.json';
 
 const DEFAULT_ENGINE_RULES = {
+  animasu: { search_path: '/?s={q}', selectors: { search_item: '.listupd .bs .bsx > a[href]', search_title: '.tt', episode_list: '#daftarepisode li a[href]', mirror_select: 'select.mirror option[value]', player_iframe: '#tonton iframe[src]', download_block: '.soraddlx', download_row: '.soraurlx', quality_text: 'strong', hoster_link: 'a[href]' } },
   otakudesu: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'ul.chivsrc > li', search_link: 'h2 > a[href]', episode_box: 'div.episodelist', episode_link: 'ul li a[href]', download_block: 'div.download ul', download_row: 'li', quality_text: 'strong', size_text: 'i', hoster_link: 'a[href]' } },
   samehadaku: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'div.animposx > a[href], article.animpost div.animposx > a[href], article.animepost div.animposx a[href]', search_title: '.data .title h2', series_link: "a[href*='/anime/'], div.nvs.nvsc a[href]", episode_row: 'div.lstepsiode.listeps ul li, .listeps ul li, .lstepsiode ul li, .episode-lainnya ul li', episode_badge: '.epsright, .epl-num, .shrink-0 a, .shrink-0 div', episode_link: "h4 a[href], .lchx a[href], a[href*='-episode-'], a[href]", download_block: 'div.download-eps, div#downloadb', download_header: 'p b, p', download_row: 'ul li', quality_text: 'strong', hoster_link: 'a[href]' } },
   oploverz: { back_api_url: 'https://backapi.oploverz.ac', search_path: '/?s={q}', selectors: { search_item: 'div.bsx, article.bs', search_title: 'div.tt h4, h4, .tt', series_link: "div.nvs.nvsc a[href], a[aria-label='All Episodes'], a[href*='/series/'], .year a[href*='/anime/']", episode_row: 'div.eplister ul li, ul#episodelist li', episode_badge: 'div.epl-num', download_block: 'div.soraddlx, div.mctnx, div.download-box', download_header: '.sorattlx, h3, h4', download_row: '.soraurlx, li', quality_text: 'strong', hoster_link: 'a[href]' } },
@@ -501,11 +506,12 @@ catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
     target_resolutions: ['1080p', '720p', '480p'],
     cf_handler_available: Boolean(c.env.CF_HANDLER_URL && c.env.CF_HANDLER_URL.trim().startsWith('http')),
     sources: [
-      { rank: 1, id: 'samehadaku', base_url: urls.samehadaku, watermark_tier: 0 },
-      { rank: 2, id: 'nontonanimeid', base_url: urls.nontonanimeid, watermark_tier: 0 },
-      { rank: 3, id: 'oploverz', base_url: urls.oploverz, watermark_tier: 1 },
-      { rank: 4, id: 'otakudesu', base_url: urls.otakudesu, watermark_tier: 2 },
-      { rank: 5, id: 'kusonime', base_url: urls.kusonime, watermark_tier: 2 },
+      { rank: 1, id: 'animasu', base_url: urls.animasu, watermark_tier: 0 },
+      { rank: 2, id: 'samehadaku', base_url: urls.samehadaku, watermark_tier: 0 },
+      { rank: 3, id: 'nontonanimeid', base_url: urls.nontonanimeid, watermark_tier: 0 },
+      { rank: 4, id: 'oploverz', base_url: urls.oploverz, watermark_tier: 1 },
+      { rank: 5, id: 'otakudesu', base_url: urls.otakudesu, watermark_tier: 2 },
+      { rank: 6, id: 'kusonime', base_url: urls.kusonime, watermark_tier: 2 },
     ],
   });
 });
@@ -649,9 +655,14 @@ catalogRoutes.get(
         .bind(pattern)
         .all<Record<string, unknown>>();
     };
-    const d1Animes = await queryD1Search();
+    const urls = await getSourceBaseUrls(readDb(c.env));
+    const [animasuItems, d1Animes] = await Promise.all([
+      searchAnimasu(q, urls.animasu, c.env.CF_HANDLER_URL, c.env.CF_HANDLER_TOKEN),
+      queryD1Search(),
+    ]);
+
     let d1Rows = d1Animes.results ?? [];
-    if (d1Rows.length < 8) {
+    if (animasuItems.length === 0 && d1Rows.length < 8) {
       const { results: livePool } = await readDb(c.env)
         .prepare(
           `SELECT ${LIST_COLUMNS}, title_native, synonyms_json
@@ -671,14 +682,60 @@ catalogRoutes.get(
         .map((x) => x.row);
       d1Rows = [...d1Rows, ...scored];
     }
-    const anilistItems: unknown[] = [];
+
+    const shapedD1 = shapeRows(d1Rows);
+    const d1ByNorm = new Map<string, Record<string, unknown>>();
+    for (const row of shapedD1) {
+      const k = normalizeSearchSpaced(String(row.title || ''));
+      if (k && !d1ByNorm.has(k)) d1ByNorm.set(k, row);
+      const ka = normalizeSearchSpaced(String(row.title_alt || ''));
+      if (ka && !d1ByNorm.has(ka)) d1ByNorm.set(ka, row);
+    }
+
+    // Animasu sebagai pelayan pencarian utama (urutan teratas), diperkaya metadata D1 jika cocok,
+    // lalu dilengkapi hasil D1/AniList sekunder tanpa duplikasi.
+    const merged: Array<Record<string, unknown>> = [];
+    const seenTitleKeys = new Set<string>();
+    for (const item of animasuItems) {
+      const baseRow = mapAnimasuItemToCatalogRow(item);
+      const normKey = normalizeSearchSpaced(item.title);
+      if (normKey) seenTitleKeys.add(normKey);
+      const matchD1 = normKey ? d1ByNorm.get(normKey) : undefined;
+      if (matchD1) {
+        const altKey = normalizeSearchSpaced(String(matchD1.title_alt || ''));
+        if (altKey) seenTitleKeys.add(altKey);
+        merged.push({
+          ...matchD1,
+          slug: item.slug,
+          source: 'animasu',
+          source_url: item.url,
+          poster_url: item.poster_url || matchD1.poster_url,
+          episodes_total: item.episodes_total > 0 ? item.episodes_total : matchD1.episodes_total,
+        });
+      } else {
+        merged.push(baseRow);
+      }
+    }
+
+    for (const row of shapedD1) {
+      const k = normalizeSearchSpaced(String(row.title || ''));
+      const ka = normalizeSearchSpaced(String(row.title_alt || ''));
+      if ((k && seenTitleKeys.has(k)) || (ka && seenTitleKeys.has(ka))) continue;
+      if (k) seenTitleKeys.add(k);
+      merged.push(row);
+      if (merged.length >= 30) break;
+    }
+
+    const anilistFallback =
+      merged.length < 4 ? await searchAniListMetadata(q).catch(() => []) : [];
 
     return c.json({
       status: 'ok',
       query: q,
+      search_source: animasuItems.length > 0 ? 'animasu_primary' : shapedD1.length > 0 ? 'd1_fallback' : 'anilist_fallback',
       resolution_mode: 'CLIENT_CASCADE_MKV',
-      data: shapeRows(d1Rows),
-      metadata: anilistItems,
+      data: merged,
+      metadata: anilistFallback,
     });
   }
 );
@@ -694,7 +751,8 @@ catalogRoutes.get('/play/:slug', async (c) => {
     resolution_mode: 'CLIENT_CASCADE_MKV',
     target_format: 'MKV',
     resolutions: ['1080p', '720p', '480p'],
-    source_cascade: ['otakudesu', 'samehadaku', 'oploverz', 'kusonime'],
+    source_cascade: ['animasu', 'samehadaku', 'nontonanimeid', 'oploverz', 'otakudesu', 'kusonime'],
+    animasu_base_url: urls.animasu,
     otakudesu_base_url: urls.otakudesu,
     source_urls: urls,
     sub_state: 'MKV_EMBEDDED',
@@ -735,6 +793,7 @@ catalogRoutes.get('/rules', edgeCache(1800, 3600, false), async (c) => {
     schema_version: 1,
     updated_at: Math.floor(Date.now() / 1000),
     sources: {
+      animasu: merge('animasu', DEFAULT_ENGINE_RULES.animasu),
       otakudesu: merge('otakudesu', DEFAULT_ENGINE_RULES.otakudesu),
       samehadaku: merge('samehadaku', DEFAULT_ENGINE_RULES.samehadaku),
       oploverz: merge('oploverz', DEFAULT_ENGINE_RULES.oploverz),
