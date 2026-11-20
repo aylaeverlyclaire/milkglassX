@@ -56,6 +56,26 @@ internal fun constantTimeEquals(a: String, b: String): Boolean {
     return diff == 0
 }
 
+internal fun signRequestHeaders(
+    builder: Request.Builder,
+    request: Request,
+    proofKey: String?
+): Boolean {
+    val pk = proofKey?.takeIf { it.isNotBlank() }
+    if (pk == null) {
+        builder.removeHeader("X-Milkglass-Ts")
+        builder.removeHeader("X-Milkglass-Sig")
+        return false
+    }
+    val ts = (System.currentTimeMillis() / 1000L).toString()
+    val pathAndQuery = request.url.encodedPath + (request.url.encodedQuery?.let { "?$it" } ?: "")
+    val canonical = "${request.method.uppercase()}\n$pathAndQuery\n$ts"
+    val sig = computeHmacSha256Hex(pk, canonical)
+    builder.header("X-Milkglass-Ts", ts)
+    builder.header("X-Milkglass-Sig", sig)
+    return true
+}
+
 class SessionTokenStore(
     context: Context,
     private val ioScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -76,6 +96,28 @@ class SessionTokenStore(
     @Volatile
     private var isLoadedFromDisk: Boolean = false
 
+    fun ensureLoadedBlocking() {
+        if (isLoadedFromDisk) return
+        synchronized(diskLock) {
+            if (isLoadedFromDisk) return
+            runCatching {
+                runBlocking(Dispatchers.IO) {
+                    withTimeout(2_000L) {
+                        dataStore.data.map { prefs -> prefs[KEY_REFRESH_TOKEN] to prefs[KEY_PROOF_KEY] }.first()
+                    }
+                }
+            }.onSuccess { loadedPair ->
+                if (cachedRefreshToken.isNullOrBlank()) {
+                    cachedRefreshToken = loadedPair.first
+                }
+                if (proofKey.isNullOrBlank()) {
+                    proofKey = loadedPair.second
+                }
+                isLoadedFromDisk = true
+            }
+        }
+    }
+
     fun hasActiveSession(): Boolean {
         if (!accessToken.isNullOrBlank() || !cachedRefreshToken.isNullOrBlank()) {
             return true
@@ -84,25 +126,8 @@ class SessionTokenStore(
     }
 
     fun getRefreshTokenBlocking(): String? {
-        if (isLoadedFromDisk) {
-            return cachedRefreshToken
-        }
-        synchronized(diskLock) {
-            if (isLoadedFromDisk) {
-                return cachedRefreshToken
-            }
-            val loadedPair = runCatching {
-                runBlocking(Dispatchers.IO) {
-                    withTimeout(2_000L) {
-                        dataStore.data.map { prefs -> prefs[KEY_REFRESH_TOKEN] to prefs[KEY_PROOF_KEY] }.first()
-                    }
-                }
-            }.getOrNull()
-            cachedRefreshToken = loadedPair?.first
-            if (proofKey.isNullOrBlank()) proofKey = loadedPair?.second
-            isLoadedFromDisk = true
-            return cachedRefreshToken
-        }
+        ensureLoadedBlocking()
+        return cachedRefreshToken
     }
 
     fun saveTokensBlocking(newAccessToken: String, newRefreshToken: String, newProofKey: String? = null) {
@@ -142,8 +167,12 @@ class SessionTokenStore(
     }
 
     fun verifyServerSignature(body: String, signatureHeader: String?): Boolean {
-        val pk = proofKey?.takeIf { it.isNotBlank() } ?: return true
-        val sig = signatureHeader?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return true
+        ensureLoadedBlocking()
+        val pk = proofKey?.takeIf { it.isNotBlank() }
+        if (pk == null) {
+            return !hasActiveSession()
+        }
+        val sig = signatureHeader?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return false
         val expected = computeHmacSha256Hex(pk, body)
         return constantTimeEquals(sig, expected)
     }
@@ -179,6 +208,8 @@ class AuthBearerInterceptor(
             return chain.proceed(original)
         }
 
+        tokenStore.ensureLoadedBlocking()
+
         val jwt = tokenStore.accessToken
         val builder = original.newBuilder()
         var modified = false
@@ -188,13 +219,9 @@ class AuthBearerInterceptor(
         }
         val pk = tokenStore.proofKey
         if (!pk.isNullOrBlank() && original.header("X-Milkglass-Sig") == null) {
-            val ts = (System.currentTimeMillis() / 1000L).toString()
-            val pathAndQuery = original.url.encodedPath + (original.url.encodedQuery?.let { "?$it" } ?: "")
-            val canonical = "${original.method.uppercase()}\n$pathAndQuery\n$ts"
-            val sig = computeHmacSha256Hex(pk, canonical)
-            builder.header("X-Milkglass-Ts", ts)
-            builder.header("X-Milkglass-Sig", sig)
-            modified = true
+            if (signRequestHeaders(builder, original, pk)) {
+                modified = true
+            }
         }
         return chain.proceed(if (modified) builder.build() else original)
     }
@@ -214,7 +241,7 @@ class SynchronizedTokenAuthenticator(
         .build()
 
     override fun authenticate(route: Route?, response: Response): Request? {
-        if (!isTrustedBackendHost(response.request.url.host)) return null
+        if (!response.request.isHttps || !isTrustedBackendHost(response.request.url.host)) return null
         if (responseCount(response) >= 2) return null
 
         val failedBearer = response.request.header("Authorization")
@@ -225,12 +252,14 @@ class SynchronizedTokenAuthenticator(
             runBlocking(Dispatchers.IO) {
                 withTimeout(10_000L) {
                     refreshMutex.withLock {
+                        tokenStore.ensureLoadedBlocking()
                         val currentInMemoryJwt = tokenStore.accessToken
 
                         if (!currentInMemoryJwt.isNullOrBlank() && currentInMemoryJwt != failedBearer) {
-                            return@withLock response.request.newBuilder()
+                            val retryBuilder = response.request.newBuilder()
                                 .header("Authorization", "Bearer $currentInMemoryJwt")
-                                .build()
+                            signRequestHeaders(retryBuilder, response.request, tokenStore.proofKey)
+                            return@withLock retryBuilder.build()
                         }
 
                         val savedRefreshToken = tokenStore.getRefreshTokenBlocking()
@@ -268,9 +297,10 @@ class SynchronizedTokenAuthenticator(
 
                             tokenStore.saveTokensBlocking(newAccess, newRefresh, newProofKey)
 
-                            response.request.newBuilder()
+                            val retryBuilder = response.request.newBuilder()
                                 .header("Authorization", "Bearer $newAccess")
-                                .build()
+                            signRequestHeaders(retryBuilder, response.request, newProofKey ?: tokenStore.proofKey)
+                            retryBuilder.build()
                         }
                     }
                 }

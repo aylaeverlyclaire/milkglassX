@@ -18,12 +18,14 @@ import okhttp3.Response
 import org.json.JSONObject
 import java.io.IOException
 import java.net.Inet4Address
+import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.UnknownHostException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class CloudflareChallengeException(
     val host: String,
@@ -43,18 +45,24 @@ object WebViewUserAgentProvider {
     @Volatile
     private var cachedUa: String? = null
 
+    private val fetchStarted = AtomicBoolean(false)
+
+    fun current(): String = cachedUa ?: FALLBACK_UA
+
     fun resolve(context: Context?): String {
-        cachedUa?.let { return it }
-        val ua = if (context != null) {
-            runCatching { WebSettings.getDefaultUserAgent(context) }
-                .getOrNull()
-                ?.takeIf { it.isNotBlank() }
-                ?: FALLBACK_UA
-        } else {
-            FALLBACK_UA
+        if (context != null && cachedUa == null && fetchStarted.compareAndSet(false, true)) {
+            val appCtx = context.applicationContext
+            Thread({
+                runCatching { WebSettings.getDefaultUserAgent(appCtx) }
+                    .getOrNull()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { cachedUa = it }
+            }, "milkglass-ua-resolve").apply {
+                isDaemon = true
+                start()
+            }
         }
-        cachedUa = ua
-        return ua
+        return cachedUa ?: FALLBACK_UA
     }
 }
 
@@ -214,17 +222,17 @@ class CloudflareInterceptor(
 
     private fun isCloudflareChallenge(response: Response): Boolean {
         if (response.code != 403 && response.code != 503) return false
-        val mitigated = response.header("cf-mitigated")?.lowercase()
+        val mitigated = response.header("cf-mitigated")?.trim()?.lowercase()
         if (mitigated == "challenge") return true
         val server = response.header("Server")?.lowercase().orEmpty()
         if (!server.contains("cloudflare")) return false
-        val ct = response.header("Content-Type")?.lowercase().orEmpty()
-        if (!ct.contains("text/html") && ct.isNotEmpty()) return false
-        val snippet = runCatching { response.peekBody(4096).string() }.getOrDefault("")
-        return snippet.contains("cf-challenge", ignoreCase = true) ||
-            snippet.contains("challenge-platform", ignoreCase = true) ||
-            snippet.contains("_cf_chl_opt", ignoreCase = true) ||
-            snippet.contains("Just a moment", ignoreCase = true)
+        val snippet = runCatching { response.peekBody(8192L).string().lowercase() }.getOrDefault("")
+        if (snippet.isBlank()) return false
+        return snippet.contains("cf-browser-verification") ||
+            snippet.contains("cf_chl_opt") ||
+            snippet.contains("challenges.cloudflare.com") ||
+            snippet.contains("/cdn-cgi/challenge-platform/") ||
+            (snippet.contains("just a moment...") && snippet.contains("cloudflare"))
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -275,21 +283,20 @@ class CloudflareDohDns(
     private val inFlight = ConcurrentHashMap<String, CompletableFuture<List<InetAddress>>>()
     private val dohClient = OkHttpClient.Builder()
         .connectionPool(ConnectionPool(4, 5, TimeUnit.MINUTES))
-        .connectTimeout(900, TimeUnit.MILLISECONDS)
-        .readTimeout(1200, TimeUnit.MILLISECONDS)
-        .callTimeout(1200, TimeUnit.MILLISECONDS)
+        .connectTimeout(1500, TimeUnit.MILLISECONDS)
+        .readTimeout(2, TimeUnit.SECONDS)
+        .callTimeout(2500, TimeUnit.MILLISECONDS)
         .build()
 
-    /**
-     * Bila DoH (1.1.1.1) gagal/timeout (mis. diblokir ISP), JANGAN dicoba lagi untuk setiap host baru: dulu tiap host
-     * dingin menahan sampai 4 dtk sebelum jatuh ke DNS sistem. Sekarang DoH diistirahatkan 2 menit.
-     */
     @Volatile
     private var dohBrokenUntilMs: Long = 0L
 
     override fun lookup(hostname: String): List<InetAddress> {
         val host = hostname.lowercase()
         if (host == "127.0.0.1" || host == "localhost" || host == "1.1.1.1") {
+            return Dns.SYSTEM.lookup(hostname)
+        }
+        if (host == "1.1.1.1" || host == "1.0.0.1" || host == "8.8.8.8" || host == "8.8.4.4") {
             return Dns.SYSTEM.lookup(hostname)
         }
         val now = System.currentTimeMillis()
@@ -325,7 +332,6 @@ class CloudflareDohDns(
                 val fallback = runCatching { Dns.SYSTEM.lookup(hostname) }.getOrDefault(emptyList())
                 mine.complete(fallback)
                 if (fallback.isNotEmpty()) {
-                    // Hasil DNS sistem juga di-cache (dulu tidak), supaya host yang sama tak mengulang lookup.
                     cache[host] = (System.currentTimeMillis() + 120_000L) to fallback
                     fallback
                 } else {
@@ -341,31 +347,45 @@ class CloudflareDohDns(
     }
 
     private fun resolveViaDoh(hostname: String): List<InetAddress> {
-        val url = dohEndpoint.toHttpUrl().newBuilder()
-            .addQueryParameter("name", hostname)
-            .addQueryParameter("type", "A")
-            .build()
-        val req = Request.Builder()
-            .url(url)
-            .header("Accept", "application/dns-json")
-            .build()
-        dohClient.newCall(req).execute().use { resp ->
-            // Respons non-2xx = DoH bermasalah (bukan "domain tidak ada"): lempar supaya pemutus sirkuit aktif.
-            if (!resp.isSuccessful) throw IOException("DoH HTTP ${resp.code}")
-            val body = resp.body?.string() ?: return emptyList()
-            val answers = JSONObject(body).optJSONArray("Answer") ?: return emptyList()
-            val ips = mutableListOf<InetAddress>()
-            for (i in 0 until answers.length()) {
-                val item = answers.optJSONObject(i) ?: continue
-                if (item.optInt("type") == 1) {
-                    val ip = item.optString("data").trim()
-                    if (ip.isNotEmpty()) {
-                        runCatching { InetAddress.getByName(ip) }.getOrNull()?.let { ips.add(it) }
+        val encoded = java.net.URLEncoder.encode(hostname, "UTF-8")
+        val endpoints = listOf(
+            "https://1.1.1.1/dns-query?name=$encoded&type=A",
+            "https://1.0.0.1/dns-query?name=$encoded&type=A",
+            "https://8.8.8.8/resolve?name=$encoded&type=A",
+            "https://8.8.4.4/resolve?name=$encoded&type=A"
+        )
+        var lastError: Exception? = null
+        for (url in endpoints) {
+            try {
+                val req = Request.Builder()
+                    .url(url)
+                    .header("Accept", "application/dns-json")
+                    .build()
+                dohClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        lastError = IOException("DoH HTTP ${resp.code}")
+                        return@use
                     }
+                    val body = resp.body?.string().orEmpty()
+                    val answers = JSONObject(body).optJSONArray("Answer") ?: return@use
+                    val ips = mutableListOf<InetAddress>()
+                    for (i in 0 until answers.length()) {
+                        val obj = answers.optJSONObject(i) ?: continue
+                        if (obj.optInt("type") == 1) {
+                            val ip = obj.optString("data").trim()
+                            if (ip.isNotEmpty()) {
+                                runCatching { ips.add(InetAddress.getByName(ip)) }
+                            }
+                        }
+                    }
+                    if (ips.isNotEmpty()) return ips
                 }
+            } catch (e: Exception) {
+                lastError = e
             }
-            return ips
         }
+        if (lastError != null) throw lastError
+        return emptyList()
     }
 }
 
@@ -373,13 +393,8 @@ object PublicIpGuard {
     private const val VERIFIED_TTL_MS = 5L * 60L * 1000L
     private val verifiedHosts = ConcurrentHashMap<String, Long>()
 
-    fun isPublicIpv4(address: InetAddress): Boolean {
-        if (address !is Inet4Address) return false
-        if (address.isAnyLocalAddress || address.isLoopbackAddress ||
-            address.isLinkLocalAddress || address.isSiteLocalAddress ||
-            address.isMulticastAddress
-        ) return false
-        val b = address.address
+    private fun isPublicIpv4Bytes(b: ByteArray): Boolean {
+        if (b.size != 4) return false
         val b0 = b[0].toInt() and 0xFF
         val b1 = b[1].toInt() and 0xFF
         if (b0 == 0 || b0 == 10 || b0 == 127) return false
@@ -390,6 +405,37 @@ object PublicIpGuard {
         if (b0 >= 224) return false
         return true
     }
+
+    fun isPublicIp(address: InetAddress): Boolean {
+        if (address.isAnyLocalAddress || address.isLoopbackAddress ||
+            address.isLinkLocalAddress || address.isSiteLocalAddress ||
+            address.isMulticastAddress
+        ) return false
+        return when (address) {
+            is Inet4Address -> isPublicIpv4Bytes(address.address)
+            is Inet6Address -> {
+                val b = address.address
+                if (b.size != 16) return false
+                // Tolak ULA fc00::/7
+                if ((b[0].toInt() and 0xFE) == 0xFC) return false
+                // NAT64 64:ff9b::/96
+                val isNat64 = b[0] == 0x00.toByte() && b[1] == 0x64.toByte() &&
+                    b[2] == 0xFF.toByte() && b[3] == 0x9B.toByte() &&
+                    (4..11).all { b[it] == 0.toByte() }
+                // IPv4-mapped ::ffff:0:0/96
+                val isIpv4Mapped = (0..9).all { b[it] == 0.toByte() } &&
+                    b[10] == 0xFF.toByte() && b[11] == 0xFF.toByte()
+                if (isNat64 || isIpv4Mapped) {
+                    isPublicIpv4Bytes(b.copyOfRange(12, 16))
+                } else {
+                    true
+                }
+            }
+            else -> false
+        }
+    }
+
+    fun isPublicIpv4(address: InetAddress): Boolean = isPublicIp(address)
 
     @Throws(IOException::class)
     fun verifyPublicHost(dns: Dns, host: String) {
@@ -404,12 +450,43 @@ object PublicIpGuard {
         } catch (e: UnknownHostException) {
             throw IOException("DNS lookup gagal untuk $host", e)
         }
-        val hasPublic = addresses.any { isPublicIpv4(it) }
+        val hasPublic = addresses.any { isPublicIp(it) }
         if (!hasPublic) {
-            throw IOException("Host diblokir oleh anti-SSRF (bukan IPv4 publik): $host")
+            throw IOException("Host diblokir oleh anti-SSRF (bukan IP publik): $host")
         }
         if (verifiedHosts.size > 256) verifiedHosts.clear()
         verifiedHosts[key] = now + VERIFIED_TTL_MS
+    }
+}
+
+class PublicIpGuardDns(
+    private val delegate: Dns
+) : Dns {
+    override fun lookup(hostname: String): List<InetAddress> {
+        val resolved = delegate.lookup(hostname)
+        val publicOnly = resolved.filter { PublicIpGuard.isPublicIp(it) }
+        if (publicOnly.isEmpty()) {
+            throw UnknownHostException("Host diblokir oleh anti-SSRF (bukan IP publik): $hostname")
+        }
+        return publicOnly
+    }
+}
+
+class AntiSsrfNetworkInterceptor(
+    private val dns: Dns
+) : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val hop = chain.request()
+        val hopHost = hop.url.host.lowercase()
+        val connectedAddr = chain.connection()?.route()?.socketAddress?.address
+        if (connectedAddr != null) {
+            if (!PublicIpGuard.isPublicIp(connectedAddr)) {
+                throw IOException("Redirect/koneksi diblokir oleh anti-SSRF (IP non-publik): $hopHost")
+            }
+        } else {
+            PublicIpGuard.verifyPublicHost(dns, hopHost)
+        }
+        return chain.proceed(hop)
     }
 }
 
@@ -423,6 +500,16 @@ class CrossOriginRefererInterceptor : Interceptor {
             hop
         }
         return chain.proceed(cleaned)
+    }
+}
+
+class IgnoreGzipInterceptor : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        var request = chain.request()
+        if (request.header("Accept-Encoding")?.equals("gzip", ignoreCase = true) == true) {
+            request = request.newBuilder().removeHeader("Accept-Encoding").build()
+        }
+        return chain.proceed(request)
     }
 }
 
@@ -440,14 +527,47 @@ class UncaughtExceptionInterceptor : Interceptor {
 
 class HostRateLimitInterceptor(
     private val maxPermitsPerWindow: Int = 4,
-    private val windowMs: Long = 1000L
+    private val windowMs: Long = 1000L,
+    private val maxTrackedHosts: Int = 128
 ) : Interceptor {
     private val hostQueues = ConcurrentHashMap<String, ArrayDeque<Long>>()
+
+    private fun pruneIfOversized(nowMs: Long) {
+        if (hostQueues.size < maxTrackedHosts) return
+        val cutoff = nowMs - windowMs
+        val it = hostQueues.entries.iterator()
+        while (it.hasNext()) {
+            val entry = it.next()
+            val q = entry.value
+            val isStale = synchronized(q) {
+                while (q.isNotEmpty() && q.first() <= cutoff) {
+                    q.removeFirst()
+                }
+                q.isEmpty()
+            }
+            if (isStale) {
+                it.remove()
+            }
+        }
+        if (hostQueues.size >= maxTrackedHosts) {
+            val excess = hostQueues.size - maxTrackedHosts + 1
+            var removed = 0
+            val fallbackIt = hostQueues.keys.iterator()
+            while (fallbackIt.hasNext() && removed < excess) {
+                fallbackIt.next()
+                fallbackIt.remove()
+                removed++
+            }
+        }
+    }
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val call = chain.call()
         if (call.isCanceled()) throw IOException("Canceled")
         val host = chain.request().url.host.lowercase()
+        if (!hostQueues.containsKey(host)) {
+            pruneIfOversized(System.nanoTime() / 1_000_000L)
+        }
         val queue = hostQueues.computeIfAbsent(host) { ArrayDeque() }
 
         while (true) {
@@ -484,7 +604,16 @@ class IsolatedHttpClients(
     backendAuthInterceptor: Interceptor? = null,
     backendAuthenticatorFactory: ((OkHttpClient) -> Authenticator)? = null
 ) {
-    val webViewUserAgent: String = WebViewUserAgentProvider.resolve(context)
+    private val appContext: Context? = context?.applicationContext
+
+    val userAgentProvider: () -> String = { WebViewUserAgentProvider.resolve(appContext) }
+
+    val webViewUserAgent: String
+        get() = userAgentProvider()
+
+    init {
+        WebViewUserAgentProvider.resolve(appContext)
+    }
 
     private val sharedConnectionPool = ConnectionPool(16, 5, TimeUnit.MINUTES)
     private val sharedDispatcher = Dispatcher().apply {
@@ -492,6 +621,7 @@ class IsolatedHttpClients(
         maxRequestsPerHost = 12
     }
     private val hostUserAgents = ConcurrentHashMap<String, String>()
+    private val guardedMediaDns: Dns = PublicIpGuardDns(dns)
 
     val sourceClient: OkHttpClient = OkHttpClient.Builder()
         .dns(dns)
@@ -516,16 +646,16 @@ class IsolatedHttpClients(
                 onUserAgentOverride = { h, ua -> hostUserAgents[h] = ua }
             )
         )
+        .addNetworkInterceptor(AntiSsrfNetworkInterceptor(guardedMediaDns))
         .addNetworkInterceptor(CrossOriginRefererInterceptor())
-        .connectTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
-        .callTimeout(18, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
 
     private val baseMediaAndApiClient: OkHttpClient = OkHttpClient.Builder()
-        .dns(dns)
+        .dns(guardedMediaDns)
         .dispatcher(sharedDispatcher)
         .connectionPool(sharedConnectionPool)
         .addInterceptor(UncaughtExceptionInterceptor())
@@ -536,6 +666,7 @@ class IsolatedHttpClients(
             if (orig.header("Accept-Language") == null) b.header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
             chain.proceed(b.build())
         }
+        .addNetworkInterceptor(AntiSsrfNetworkInterceptor(dns))
         .addNetworkInterceptor(CrossOriginRefererInterceptor())
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -544,9 +675,34 @@ class IsolatedHttpClients(
         .build()
 
     val mediaAndApiClient: OkHttpClient = baseMediaAndApiClient.newBuilder().apply {
+        addInterceptor(IgnoreGzipInterceptor())
         if (backendAuthInterceptor != null) addInterceptor(backendAuthInterceptor)
         if (backendAuthenticatorFactory != null) authenticator(backendAuthenticatorFactory(baseMediaAndApiClient))
     }.build()
+
+    /** Profil API Backend Milkglass (HTTP/2 keep-alive ping 25s + Bearer auth). */
+    val apiClient: OkHttpClient = mediaAndApiClient.newBuilder()
+        .pingInterval(25, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(25, TimeUnit.SECONDS)
+        .build()
+
+    /** Profil Remote CF Solver (/v1/cf/cookies & /v1/cf/html): readTimeout 35s selaras single-flight. */
+    val cfSolverClient: OkHttpClient = mediaAndApiClient.newBuilder()
+        .pingInterval(25, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
+        .callTimeout(45, TimeUnit.SECONDS)
+        .build()
+
+    /** Profil Streaming Video & Download MKV: tanpa callTimeout agar tidak memutus stream panjang. */
+    val streamingClient: OkHttpClient = mediaAndApiClient.newBuilder()
+        .pingInterval(25, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.MILLISECONDS)
+        .build()
 
     val noRedirectClient: OkHttpClient = mediaAndApiClient.newBuilder()
         .connectTimeout(6, TimeUnit.SECONDS)

@@ -31,6 +31,8 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
@@ -56,8 +58,16 @@ data class MkvDownloadRequest(
     val animeTitle: String,
     val episodeNumber: Int,
     val preferredQuality: MkvQuality = MkvQuality.P1080,
-    val allowBatchFallback: Boolean = true
+    val allowBatchFallback: Boolean = true,
+    val wifiOnly: Boolean = false
 )
+
+internal fun sanitizeDownloadSlug(raw: String): String {
+    return raw.lowercase(Locale.ROOT)
+        .replace(Regex("[^a-z0-9_-]+"), "-")
+        .trim('-', '_')
+        .take(96)
+}
 
 object RetryBackoff {
     fun nextDelayMs(
@@ -154,14 +164,22 @@ object MkvDownloadConcurrency {
 }
 
 class MkvDownloadManager(
-    private val context: Context
+    context: Context
 ) {
-    private val workManager: WorkManager? = runCatching { WorkManager.getInstance(context.applicationContext) }.getOrNull()
+    private val appContext: Context = context.applicationContext
+    private val workManager: WorkManager? = runCatching { WorkManager.getInstance(appContext) }.getOrNull()
+
+    fun buildUniqueWorkName(animeSlug: String, episode: Int, quality: String): String {
+        val safeSlug = sanitizeDownloadSlug(animeSlug).take(96).ifBlank { "anime" }
+        val safeQuality = quality.trim().lowercase(Locale.ROOT).ifBlank { MkvQuality.P1080.label }
+        return "mkv_dl_${safeSlug}_ep_${episode}_${safeQuality}"
+    }
 
     fun enqueueEpisodeDownload(req: MkvDownloadRequest): String {
-        val uniqueName = "mkv_dl_${req.animeSlug}_ep_${req.episodeNumber}_${req.preferredQuality.label}"
+        val safeSlug = sanitizeDownloadSlug(req.animeSlug).ifBlank { "anime" }
+        val uniqueName = buildUniqueWorkName(req.animeSlug, req.episodeNumber, req.preferredQuality.label)
         val input = Data.Builder()
-            .putString(MkvDownloadWorker.KEY_SLUG, req.animeSlug)
+            .putString(MkvDownloadWorker.KEY_SLUG, safeSlug)
             .putString(MkvDownloadWorker.KEY_TITLE, req.animeTitle)
             .putInt(MkvDownloadWorker.KEY_EPISODE, req.episodeNumber)
             .putString(MkvDownloadWorker.KEY_QUALITY, req.preferredQuality.name)
@@ -169,7 +187,7 @@ class MkvDownloadManager(
             .build()
 
         val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .setRequiredNetworkType(if (req.wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
             .setRequiresStorageNotLow(true)
             .build()
 
@@ -201,15 +219,39 @@ class MkvDownloadManager(
 
     fun cancelDownload(uniqueName: String) {
         workManager?.cancelUniqueWork(uniqueName)
+        if (uniqueName.startsWith("mkv_dl_")) {
+            val rest = uniqueName.removePrefix("mkv_dl_")
+            val epIdx = rest.lastIndexOf("_ep_")
+            if (epIdx > 0) {
+                val safeSlug = sanitizeDownloadSlug(rest.substring(0, epIdx))
+                val epStr = rest.substring(epIdx + 4).substringBefore('_')
+                val episode = epStr.toIntOrNull()
+                if (safeSlug.isNotBlank() && episode != null) {
+                    val dir = resolveDownloadDir(safeSlug)
+                    val prefix = "${safeSlug}_ep${episode}_"
+                    dir.listFiles()?.forEach { f ->
+                        if (f.isFile && f.name.startsWith(prefix) && f.name.endsWith(".part")) {
+                            f.delete()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun resolveDownloadDir(safeSlug: String): File {
+        val root = appContext.getExternalFilesDir("downloads") ?: appContext.filesDir
+        return File(root, safeSlug)
     }
 
     fun getDownloadedFile(animeSlug: String, episodeNumber: Int, quality: MkvQuality): File {
-        val dir = File(context.getExternalFilesDir("downloads") ?: context.filesDir, animeSlug)
-        val mkv = File(dir, "${animeSlug}_ep${episodeNumber}_${quality.label}.mkv")
-        if (mkv.exists() && mkv.length() > 1024L) return mkv
-        val mp4 = File(dir, "${animeSlug}_ep${episodeNumber}_${quality.label}.mp4")
-        if (mp4.exists() && mp4.length() > 1024L) return mp4
-        return mkv
+        val safeSlug = sanitizeDownloadSlug(animeSlug).ifBlank { "anime" }
+        val dir = resolveDownloadDir(safeSlug)
+        for (ext in listOf("mkv", "mp4")) {
+            val candidate = File(dir, "${safeSlug}_ep${episodeNumber}_${quality.label}.$ext")
+            if (candidate.exists() && candidate.length() > 1024L) return candidate
+        }
+        return File(dir, "${safeSlug}_ep${episodeNumber}_${quality.label}.mkv")
     }
 
     fun findAnyDownloadedFile(
@@ -217,12 +259,14 @@ class MkvDownloadManager(
         episodeNumber: Int,
         preferredQuality: MkvQuality
     ): Pair<File, MkvQuality>? {
-        val dir = File(context.getExternalFilesDir("downloads") ?: context.filesDir, animeSlug)
+        val safeSlug = sanitizeDownloadSlug(animeSlug)
+        if (safeSlug.isBlank()) return null
+        val dir = resolveDownloadDir(safeSlug)
         if (!dir.exists()) return null
         val order = listOf(preferredQuality) + MkvQuality.ALL_DESC.filterNot { it == preferredQuality }
         for (q in order) {
             for (ext in listOf("mkv", "mp4")) {
-                val f = File(dir, "${animeSlug}_ep${episodeNumber}_${q.label}.$ext")
+                val f = File(dir, "${safeSlug}_ep${episodeNumber}_${q.label}.$ext")
                 if (f.exists() && f.length() > 1024L) {
                     return f to q
                 }
@@ -248,10 +292,38 @@ class MkvDownloadWorker(
         const val KEY_SOURCE = "resolved_source"
         const val KEY_HOSTER = "resolved_hoster"
         const val KEY_PROGRESS = "progress_percent"
+        private const val MAX_RETRY_ATTEMPTS = 3
+    }
+
+    private enum class CandidateDownloadStatus {
+        COMPLETED,
+        FAILED_RETRYABLE,
+        FAILED_SKIP,
+        BLOCKED_CHALLENGE
+    }
+
+    private fun buildPartKey(hoster: String, quality: MkvQuality, directUrl: String): String {
+        val normalizedPath = directUrl.toHttpUrlOrNull()?.let { u ->
+            u.host.lowercase(Locale.ROOT) + u.encodedPath
+        } ?: directUrl.substringBefore('?').substringBefore('#')
+        val raw = "${hoster.trim().lowercase(Locale.ROOT)}|${quality.label}|$normalizedPath"
+        val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
+        return digest.take(8).joinToString("") { "%02x".format(it) }
+    }
+
+    private fun cleanupEpisodePartFiles(dir: File, slug: String, episode: Int) {
+        if (!dir.exists()) return
+        val prefix = "${slug}_ep${episode}_"
+        dir.listFiles()?.forEach { f ->
+            if (f.isFile && f.name.startsWith(prefix) && f.name.endsWith(".part")) {
+                f.delete()
+            }
+        }
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        val slug = inputData.getString(KEY_SLUG).orEmpty()
+        val rawSlug = inputData.getString(KEY_SLUG).orEmpty()
+        val slug = sanitizeDownloadSlug(rawSlug)
         val title = inputData.getString(KEY_TITLE).orEmpty()
         val episode = inputData.getInt(KEY_EPISODE, 1)
         val quality = runCatching {
@@ -287,6 +359,10 @@ class MkvDownloadWorker(
                         } else {
                             DownloadDrainOutcome.FAILED_PERMANENT
                         }
+                        if (outcome == DownloadDrainOutcome.FAILED_PERMANENT) {
+                            val baseDir = applicationContext.getExternalFilesDir("downloads") ?: applicationContext.filesDir
+                            cleanupEpisodePartFiles(File(baseDir, slug), slug, episode)
+                        }
                         return@withPermit Result.failure(
                             Data.Builder()
                                 .putString(KEY_OUTCOME, outcome.name)
@@ -297,10 +373,21 @@ class MkvDownloadWorker(
             }
 
             if (candidates.isEmpty()) {
+                val baseDir = applicationContext.getExternalFilesDir("downloads") ?: applicationContext.filesDir
+                cleanupEpisodePartFiles(File(baseDir, slug), slug, episode)
                 return@withPermit Result.failure(
                     Data.Builder().putString(KEY_OUTCOME, DownloadDrainOutcome.FAILED_PERMANENT.name).build()
                 )
             }
+
+            val baseDir = applicationContext.getExternalFilesDir("downloads") ?: applicationContext.filesDir
+            val dir = File(baseDir, slug)
+            if (!dir.canonicalPath.startsWith(baseDir.canonicalPath)) {
+                return@withPermit Result.failure(
+                    Data.Builder().putString(KEY_OUTCOME, DownloadDrainOutcome.FAILED_PERMANENT.name).build()
+                )
+            }
+            if (!dir.exists()) dir.mkdirs()
 
             var lastRetryable = false
             for (resolved in candidates) {
@@ -314,37 +401,40 @@ class MkvDownloadWorker(
                     resolved.container == MediaContainer.MP4 || resolved.directUrl.contains(".mp4", ignoreCase = true) -> "mp4"
                     else -> "mkv"
                 }
-                val dir = File(applicationContext.getExternalFilesDir("downloads") ?: applicationContext.filesDir, slug)
-                if (!dir.exists()) dir.mkdirs()
                 val targetFile = File(dir, "${slug}_ep${episode}_${resolved.quality.label}.$ext")
-                val partFile = File(dir, "${targetFile.name}.part")
+                val candidateKey = buildPartKey(resolved.hoster, resolved.quality, resolved.directUrl)
+                val partFile = File(dir, "${targetFile.name}.${candidateKey}.part")
                 val existingBytes = if (partFile.exists()) partFile.length() else 0L
 
                 try {
-                    val reqBuilder = Request.Builder().url(resolved.directUrl)
+                    val reqBuilder = Request.Builder()
+                        .url(resolved.directUrl)
+                        .header("User-Agent", clients.webViewUserAgent)
                     if (!resolved.referer.isNullOrBlank()) {
                         reqBuilder.header("Referer", resolved.referer)
                     }
+                    resolved.extraHeaders.forEach { (k, v) -> reqBuilder.header(k, v) }
                     if (existingBytes > 0L && resolved.supportsRange) {
                         reqBuilder.header("Range", "bytes=$existingBytes-")
                     }
 
-                    clients.mediaAndApiClient.newCall(reqBuilder.build()).execute().use { resp ->
-                        if (resp.code == 416 && existingBytes > 0L) {
+                    val status = clients.mediaAndApiClient.newCall(reqBuilder.build()).execute().use { resp ->
+                        if (resp.code == 416) {
                             partFile.delete()
-                            lastRetryable = true
-                            return@use
+                            return@use CandidateDownloadStatus.FAILED_RETRYABLE
                         }
-                        if (resp.code == 403 && resp.header("cf-mitigated") == "challenge") {
-                            return@withPermit Result.failure(
-                                Data.Builder()
-                                    .putString(KEY_OUTCOME, DownloadDrainOutcome.BLOCKED_CHALLENGE.name)
-                                    .build()
-                            )
+                        if (resp.code == 403 && resp.header("cf-mitigated")?.equals("challenge", ignoreCase = true) == true) {
+                            return@use CandidateDownloadStatus.BLOCKED_CHALLENGE
                         }
                         if (!resp.isSuccessful && resp.code != 206) {
-                            if (resp.code in 500..599 || resp.code == 429) lastRetryable = true
-                            return@use
+                            if (resp.code != 403 && resp.code != 410 && resp.code != 429 && resp.code !in 500..599) {
+                                partFile.delete()
+                            }
+                            return@use if (resp.code in 500..599 || resp.code == 429) {
+                                CandidateDownloadStatus.FAILED_RETRYABLE
+                            } else {
+                                CandidateDownloadStatus.FAILED_SKIP
+                            }
                         }
 
                         val append = resp.code == 206 && existingBytes > 0L
@@ -382,23 +472,51 @@ class MkvDownloadWorker(
                                 output.flush()
                             }
                         }
+
+                        if (totalBytes > 0L && downloaded != totalBytes) {
+                            throw IOException("Unduhan tidak lengkap ($downloaded/$totalBytes bytes)")
+                        }
+                        if (!partFile.exists() || partFile.length() <= 1024L) {
+                            partFile.delete()
+                            return@use CandidateDownloadStatus.FAILED_SKIP
+                        }
+                        CandidateDownloadStatus.COMPLETED
                     }
 
-                    if (partFile.exists() && partFile.length() > 1024L) {
-                        if (targetFile.exists()) targetFile.delete()
-                        if (!partFile.renameTo(targetFile)) {
-                            throw IOException("Gagal memindahkan file unduhan final")
+                    when (status) {
+                        CandidateDownloadStatus.BLOCKED_CHALLENGE -> {
+                            return@withPermit Result.failure(
+                                Data.Builder()
+                                    .putString(KEY_OUTCOME, DownloadDrainOutcome.BLOCKED_CHALLENGE.name)
+                                    .build()
+                            )
                         }
-                        EndpointHealthScorer.recordSuccess(resolved.hoster)
-                        EndpointHealthScorer.recordSourceSuccess(resolved.source.id)
-                        return@withPermit Result.success(
-                            Data.Builder()
-                                .putString(KEY_OUTCOME, DownloadDrainOutcome.SUCCESS.name)
-                                .putString(KEY_OUTPUT_PATH, targetFile.absolutePath)
-                                .putString(KEY_SOURCE, resolved.source.id)
-                                .putString(KEY_HOSTER, resolved.hoster)
-                                .build()
-                        )
+                        CandidateDownloadStatus.FAILED_RETRYABLE -> {
+                            EndpointHealthScorer.recordFailure(resolved.hoster)
+                            lastRetryable = true
+                            continue
+                        }
+                        CandidateDownloadStatus.FAILED_SKIP -> {
+                            EndpointHealthScorer.recordFailure(resolved.hoster)
+                            continue
+                        }
+                        CandidateDownloadStatus.COMPLETED -> {
+                            if (targetFile.exists()) targetFile.delete()
+                            if (!partFile.renameTo(targetFile)) {
+                                throw IOException("Gagal memindahkan file unduhan final")
+                            }
+                            cleanupEpisodePartFiles(dir, slug, episode)
+                            EndpointHealthScorer.recordSuccess(resolved.hoster)
+                            EndpointHealthScorer.recordSourceSuccess(resolved.source.id)
+                            return@withPermit Result.success(
+                                Data.Builder()
+                                    .putString(KEY_OUTCOME, DownloadDrainOutcome.SUCCESS.name)
+                                    .putString(KEY_OUTPUT_PATH, targetFile.absolutePath)
+                                    .putString(KEY_SOURCE, resolved.source.id)
+                                    .putString(KEY_HOSTER, resolved.hoster)
+                                    .build()
+                            )
+                        }
                     }
                 } catch (_: CloudflareChallengeException) {
                     return@withPermit Result.failure(
@@ -413,12 +531,19 @@ class MkvDownloadWorker(
                 }
             }
 
-            if (lastRetryable) {
+            if (lastRetryable && runAttemptCount < MAX_RETRY_ATTEMPTS) {
                 Result.retry()
             } else {
+                if (!lastRetryable) {
+                    cleanupEpisodePartFiles(dir, slug, episode)
+                }
                 Result.failure(
                     Data.Builder()
-                        .putString(KEY_OUTCOME, DownloadDrainOutcome.FAILED_PERMANENT.name)
+                        .putString(
+                            KEY_OUTCOME,
+                            if (lastRetryable) DownloadDrainOutcome.RETRY_NETWORK.name
+                            else DownloadDrainOutcome.FAILED_PERMANENT.name
+                        )
                         .build()
                 )
             }

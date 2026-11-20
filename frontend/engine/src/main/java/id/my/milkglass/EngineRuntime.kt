@@ -20,7 +20,10 @@ import id.my.milkglass.source.SourceSlugCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import id.my.milkglass.player.PlayerManager
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore as CoroutineSemaphore
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -170,10 +173,10 @@ class SourceConfigStore(
     }
 }
 
-class EngineRuntime private constructor(appContext: Context) {
+class EngineRuntime private constructor(private val appContext: Context) {
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val inFlightPrefetches = ConcurrentHashMap.newKeySet<String>()
-    private val prefetchGate = java.util.concurrent.Semaphore(1)
+    private val prefetchGate = CoroutineSemaphore(1)
     @Volatile private var latestPrefetchKey: String = ""
 
     @Volatile
@@ -181,6 +184,9 @@ class EngineRuntime private constructor(appContext: Context) {
 
     @Volatile
     private var lastForcedConfigRefreshMs: Long = 0L
+
+    @Volatile
+    var onRequireReLogin: (() -> Unit)? = null
 
     init {
         EndpointHealthScorer.attachContext(appContext)
@@ -196,7 +202,8 @@ class EngineRuntime private constructor(appContext: Context) {
             SynchronizedTokenAuthenticator(
                 tokenStore = sessionStore,
                 refreshHttpClient = refreshBase,
-                apiBaseUrl = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL
+                apiBaseUrl = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL,
+                onRequireReLogin = { onRequireReLogin?.invoke() }
             )
         }
     )
@@ -329,10 +336,23 @@ class EngineRuntime private constructor(appContext: Context) {
         }.getOrNull()
     }
 
+    fun prewarmCloudflareEdge() {
+        backgroundScope.launch {
+            runCatching {
+                val req = Request.Builder()
+                    .url("${MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL}/v1/health")
+                    .head()
+                    .build()
+                clients.mediaAndApiClient.newCall(req).execute().use { }
+            }
+        }
+    }
+
     fun onNetworkRestored(onIndexUpdated: (() -> Unit)? = null) {
         SourceCircuitBreaker.resetAll()
         DeadCandidateCache.clear()
         remoteCfDisabledUntilMs = 0L
+        prewarmCloudflareEdge()
         backgroundScope.launch {
             runCatching { sourceConfig.refreshIfNeeded() }
             if (!availabilityIndex.isReady) {
@@ -342,14 +362,18 @@ class EngineRuntime private constructor(appContext: Context) {
         }
     }
 
-    /** Menunggu giliran prefetch, tapi langsung menyerah begitu ada permintaan yang lebih baru. */
-    private fun acquirePrefetchGate(key: String): Boolean {
-        val deadline = System.currentTimeMillis() + 30_000L
-        while (System.currentTimeMillis() < deadline) {
-            if (latestPrefetchKey != key) return false
-            if (prefetchGate.tryAcquire(250, java.util.concurrent.TimeUnit.MILLISECONDS)) return true
+    /** Menunggu giliran prefetch secara non-blocking, langsung menyerah bila ada permintaan lebih baru. */
+    private suspend fun acquirePrefetchGate(key: String): Boolean {
+        val acquired = withTimeoutOrNull(30_000L) {
+            prefetchGate.acquire()
+            true
+        } ?: false
+        if (!acquired) return false
+        if (latestPrefetchKey != key) {
+            prefetchGate.release()
+            return false
         }
-        return false
+        return true
     }
 
     fun prefetchEpisode(
@@ -357,7 +381,8 @@ class EngineRuntime private constructor(appContext: Context) {
         romajiTitle: String,
         episode: Int,
         preferredRes: String = "1080p",
-        maxAgeMs: Long = Long.MAX_VALUE
+        maxAgeMs: Long = Long.MAX_VALUE,
+        prebuffer: Boolean = false
     ) {
         if (episode <= 0) return
         val searchTitle = romajiTitle.ifBlank { title }.trim()
@@ -371,13 +396,19 @@ class EngineRuntime private constructor(appContext: Context) {
                 held = acquirePrefetchGate(key)
                 if (!held || latestPrefetchKey != key) return@launch
                 val slug = StreamResolver.buildEpisodeSlug(searchTitle, episode)
-                streamResolver.prefetchStream(
+                val ok = streamResolver.prefetchStream(
                     slug = slug,
                     preferredRes = preferredRes,
                     title = title,
                     romajiTitle = romajiTitle,
                     maxAgeMs = maxAgeMs
                 )
+                if (ok && prebuffer && latestPrefetchKey == key) {
+                    val cachedSession = streamResolver.getCachedSession(slug, preferredRes)
+                    if (cachedSession != null) {
+                        PlayerManager.prebufferEpisode(appContext, cachedSession, slug)
+                    }
+                }
             } catch (_: Throwable) {
             } finally {
                 if (held) prefetchGate.release()
