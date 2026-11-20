@@ -287,7 +287,7 @@ ingestRoutes.post('/catalog-import', async (c) => {
 });
 
 const sourceDomainSchema = z.object({
-  source: z.enum(['otakudesu', 'samehadaku', 'oploverz', 'kusonime']).default('otakudesu'),
+  source: z.enum(['otakudesu', 'samehadaku', 'nontonanimeid', 'oploverz', 'kusonime']).default('otakudesu'),
   base_url: z.string().url().refine((u) => u.startsWith('https://'), {
     message: 'Harus HTTPS',
   }),

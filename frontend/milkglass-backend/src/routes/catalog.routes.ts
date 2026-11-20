@@ -503,8 +503,9 @@ catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
     sources: [
       { rank: 1, id: 'otakudesu', base_url: urls.otakudesu },
       { rank: 2, id: 'samehadaku', base_url: urls.samehadaku },
-      { rank: 3, id: 'oploverz', base_url: urls.oploverz },
-      { rank: 4, id: 'kusonime', base_url: urls.kusonime },
+      { rank: 3, id: 'nontonanimeid', base_url: urls.nontonanimeid },
+      { rank: 4, id: 'oploverz', base_url: urls.oploverz },
+      { rank: 5, id: 'kusonime', base_url: urls.kusonime },
     ],
   });
 });

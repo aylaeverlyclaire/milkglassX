@@ -427,7 +427,7 @@ class MkvHosterExtractorRegistry(
                 low.contains("filemoon.") || low.contains("sunrong.my.id") -> extractVidhideOrFilemoon(resolvedUrl, referer)
             low.contains("mixdrop.") -> extractMixdrop(resolvedUrl)
             low.contains("streamtape.") -> extractStreamtape(resolvedUrl)
-            else -> null
+            else -> extractGenericEmbedPlayer(resolvedUrl, referer, depth)
         }
     }
 
@@ -1201,4 +1201,73 @@ object JsUnpacker {
             if (idx != null && idx in keys.indices && keys[idx].isNotEmpty()) keys[idx] else word
         }
     }
+
+    /**
+     * Ekstraktor generik berbasis tanda tangan embed player (tahan ganti domain):
+     * Mendeteksi <video><source>, array JSON Plyr/JWPlayer, tautan media langsung, dan iframe bertingkat.
+     */
+    private fun extractGenericEmbedPlayer(url: String, referer: String?, depth: Int): ExtractedDirectMedia? {
+        if (depth >= 2) return null
+        val html = fetchText(url, referer ?: url) ?: return null
+        val doc = Jsoup.parse(html, url)
+
+        val sourceEls = doc.select("video source[src], video[src]")
+        val domCandidates = sourceEls.mapNotNull { el ->
+            val src = el.absUrl("src").trim().ifBlank { el.attr("src").trim() }
+            if (!src.startsWith("http")) return@mapNotNull null
+            val resScore = Regex("(\\d{3,4})").find(el.attr("size") + " " + el.attr("label") + " " + src)
+                ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 720
+            resScore to src
+        }.sortedByDescending { it.first }
+        domCandidates.firstOrNull()?.second?.let { best ->
+            val isHls = best.contains(".m3u8", ignoreCase = true)
+            return ExtractedDirectMedia(
+                hoster = "EmbedHTML5",
+                directUrl = best,
+                referer = url,
+                supportsRange = !isHls,
+                isHls = isHls
+            )
+        }
+
+        val plyrRegex = Regex("""["'](?:src|file)["']\s*:\s*["'](https?:\\?/\\?/[^"']+\.(?:mp4|m3u8|mkv)[^"']*)["']""", RegexOption.IGNORE_CASE)
+        val plyrMatches = plyrRegex.findAll(html).map { m ->
+            m.groupValues[1].replace("\\/", "/")
+        }.distinct().toList()
+        if (plyrMatches.isNotEmpty()) {
+            val best = plyrMatches.firstOrNull { it.contains("1080") }
+                ?: plyrMatches.firstOrNull { it.contains("720") }
+                ?: plyrMatches.first()
+            val isHls = best.contains(".m3u8", ignoreCase = true)
+            return ExtractedDirectMedia(
+                hoster = "EmbedPlyr",
+                directUrl = best,
+                referer = url,
+                supportsRange = !isHls,
+                isHls = isHls
+            )
+        }
+
+        val directMediaRegex = Regex("""https?://[^\s"'<>]+(?:\.m3u8|\.mp4|\.mkv|googlevideo\.com/videoplayback)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
+        val rawDirect = directMediaRegex.find(html)?.value?.replace("\\/", "/")?.replace("&amp;", "&")
+        if (!rawDirect.isNullOrBlank()) {
+            val isHls = rawDirect.contains(".m3u8", ignoreCase = true)
+            return ExtractedDirectMedia(
+                hoster = "EmbedDirect",
+                directUrl = rawDirect,
+                referer = if (rawDirect.contains("googlevideo.com/")) "https://youtube.googleapis.com/" else url,
+                supportsRange = !isHls,
+                isHls = isHls
+            )
+        }
+
+        val nestedIframe = doc.select("iframe[src]")
+            .mapNotNull { it.absUrl("src").trim().takeIf { s -> s.startsWith("http") && s != url } }
+            .firstOrNull { !HosterFilter.isBlacklisted("", it) }
+        if (!nestedIframe.isNullOrBlank()) {
+            return extractInternal(nestedIframe, url, depth + 1)
+        }
+        return null
+    }
+
 }

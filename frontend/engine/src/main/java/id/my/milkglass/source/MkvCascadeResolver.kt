@@ -25,8 +25,9 @@ import java.util.concurrent.atomic.AtomicInteger
 enum class SourcePriority(val rank: Int, val id: String, val defaultBaseUrl: String) {
     OTAKUDESU(1, "otakudesu", "https://otakudesu.blog"),
     SAMEHADAKU(2, "samehadaku", "https://v2.samehadaku.how"),
-    OPLOVERZ(3, "oploverz", "https://oploverz.ch"),
-    KUSONIME(4, "kusonime", "https://kusonime.com")
+    NONTONANIMEID(3, "nontonanimeid", "https://nontonanimeid.stream"),
+    OPLOVERZ(4, "oploverz", "https://oploverz.ch"),
+    KUSONIME(5, "kusonime", "https://kusonime.com")
 }
 
 enum class MediaContainer(val rank: Int, val label: String) {
@@ -900,6 +901,87 @@ class SamehadakuSourceProvider(
     }
 }
 
+
+class NontonAnimeIdSourceProvider(
+    clients: IsolatedHttpClients,
+    baseUrl: String = SourcePriority.NONTONANIMEID.defaultBaseUrl,
+    slugCache: SourceSlugCache? = null,
+    baseUrlProvider: (() -> String)? = null,
+    indexLookup: ((SourcePriority, String) -> String?)? = null,
+    remoteHtmlFetcher: ((String) -> String?)? = null
+) : BaseHtmlMkvProvider(clients, baseUrl, slugCache, baseUrlProvider, indexLookup, remoteHtmlFetcher) {
+
+    override val priority: SourcePriority = SourcePriority.NONTONANIMEID
+
+    override fun findEpisodeMkvCandidates(
+        animeTitle: String,
+        episodeNumber: Int,
+        targetQualities: Set<MkvQuality>
+    ): List<RawMkvCandidate> {
+        val root = activeBaseUrl()
+        var bestAnimeUrl: String? = lookupCachedOrIndexedUrl(animeTitle)
+        var searchUrl = "$root/"
+        if (bestAnimeUrl == null) {
+            for (q in TitleMatcher.searchQueries(animeTitle)) {
+                searchUrl = "$root/?s=${encodeQuery(q)}"
+                val searchDoc = fetchDoc(searchUrl, "$root/")
+                bestAnimeUrl = searchDoc.select("a[href*='/anime/']")
+                    .mapNotNull { a ->
+                        val href = a.absUrl("href").trim()
+                        val title = a.attr("title").ifBlank { a.selectFirst("h2, h3, .title")?.text() ?: a.text() }.trim()
+                        if (href.isBlank() || title.length < 2 || href.contains("/episode")) null
+                        else TitleMatcher.score(animeTitle, title) to href
+                    }
+                    .maxByOrNull { it.first }
+                    ?.takeIf { it.first >= 0.30 }
+                    ?.second
+                if (bestAnimeUrl != null) break
+            }
+        }
+        if (bestAnimeUrl == null) return emptyList()
+        slugCache?.put(priority, animeTitle, bestAnimeUrl)
+
+        var epUrl = SeriesEpisodeMapCache.get(priority, bestAnimeUrl, episodeNumber)
+        if (epUrl == null) {
+            val animeDoc = fetchDoc(bestAnimeUrl, searchUrl)
+            val parsedMap = linkedMapOf<Int, String>()
+            animeDoc.select("a[href*='episode']").forEach { a ->
+                val href = a.absUrl("href").trim()
+                if (href.startsWith("http")) {
+                    SeriesEpisodeMapCache.extractEpisodeNumber(a.text(), href)?.let { num ->
+                        parsedMap.putIfAbsent(num, href)
+                    }
+                }
+            }
+            SeriesEpisodeMapCache.putAll(priority, bestAnimeUrl, parsedMap)
+            epUrl = parsedMap[episodeNumber] ?: "${bestAnimeUrl.trimEnd('/')}/episode-$episodeNumber/"
+        }
+
+        val epDoc = fetchDoc(epUrl, bestAnimeUrl)
+        val results = mutableListOf<RawMkvCandidate>()
+        epDoc.select("a[href]").forEach { a ->
+            val href = a.absUrl("href").trim()
+            val label = a.text().trim()
+            if (!href.startsWith("http") || HosterFilter.isBlacklisted(label, href)) return@forEach
+            if (!HosterFilter.isKnownPlayableHost(href)) return@forEach
+            val q = MkvQuality.fromText("$label $href") ?: MkvQuality.P720
+            if (q !in targetQualities) return@forEach
+            results.add(
+                RawMkvCandidate(
+                    source = priority,
+                    quality = q,
+                    hosterLabel = label.ifBlank { "GoFile" },
+                    rawUrl = href,
+                    pageReferer = epUrl,
+                    container = MediaContainer.MP4
+                )
+            )
+        }
+        results.addAll(harvestFallbackCandidates(epDoc, epUrl, results))
+        return results
+    }
+}
+
 class OploverzSourceProvider(
     clients: IsolatedHttpClients,
     baseUrl: String = SourcePriority.OPLOVERZ.defaultBaseUrl,
@@ -1226,6 +1308,7 @@ class MkvCascadeResolver(
     private val providers: List<MkvSourceProvider> = listOf(
         OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         SamehadakuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.SAMEHADAKU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
+        NontonAnimeIdSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.NONTONANIMEID) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         OploverzSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OPLOVERZ) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         KusonimeSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.KUSONIME) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher)
     )
