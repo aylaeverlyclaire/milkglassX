@@ -148,7 +148,7 @@ catalogRoutes.get(
     ];
     if (v) {
       statements.push(
-        db.prepare(`SELECT ${LIST_COLUMNS} FROM animes ORDER BY popularity DESC LIMIT 1000`)
+        db.prepare(`SELECT ${LIST_COLUMNS} FROM animes ORDER BY popularity DESC LIMIT 5000`)
       );
     }
     const batchRes = await db.batch(statements);

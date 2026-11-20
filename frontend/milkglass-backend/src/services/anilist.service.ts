@@ -322,6 +322,11 @@ export async function syncAniListCatalogDetailed(
       clearTimeout(timeoutId);
     }
   }
+  if (totalSynced > 0) {
+    try {
+      await db.batch(metaStatements(db, 'ongoing', totalSynced, nowSec));
+    } catch {}
+  }
   return { synced: totalSynced, log };
 }
 

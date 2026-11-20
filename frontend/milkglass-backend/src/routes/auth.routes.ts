@@ -527,7 +527,8 @@ authRoutes.get('/user/state', async (c) => {
   const userId = c.get('userId');
   const db = c.env.DB;
 
-  const [historiesRes, bookmarksRes] = await db.batch([
+  const nowSec = Math.floor(Date.now() / 1000);
+  const [historiesRes, bookmarksRes, userRes] = await db.batch([
     db
       .prepare(
         `SELECT anime_id, episode_id, progress_sec, max_progress_sec, updated_at
@@ -546,9 +547,19 @@ authRoutes.get('/user/state', async (c) => {
          LIMIT 500`
       )
       .bind(userId),
+    db
+      .prepare(`SELECT entitlement, entitlement_until FROM users WHERE id = ?1`)
+      .bind(userId),
   ]);
 
-  const ent = await readUserEntitlement(db, userId, Math.floor(Date.now() / 1000));
+  const uRow = userRes.results?.[0] as { entitlement?: string; entitlement_until?: number | null } | undefined;
+  const rawEnt = uRow?.entitlement === 'premium' ? 'premium' : 'free';
+  const rawUntil = uRow?.entitlement_until ?? null;
+  const entActive = rawEnt === 'premium' && (rawUntil === null || rawUntil > nowSec);
+  const ent = {
+    entitlement: entActive ? 'premium' : 'free',
+    entitlementUntil: entActive ? rawUntil : null,
+  };
   return c.json({
     status: 'ok',
     data: {
