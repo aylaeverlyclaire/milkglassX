@@ -8,59 +8,136 @@ const BLACKLISTED_HOSTER_PATTERNS = [
   'safelink', 'ouo.io', 'ouo.press', 'shrinkme', 'exe.io', 'bc.vc',
   'adf.ly', 'bit.ly', 'tinyurl.com', 't.me', 'telegram', 'discord',
   'facebook.com', 'twitter.com', 'instagram.com', 'youtube.com', 'youtu.be',
-  'saweria', 'trakteer', 'paypal', 'javascript:', 'mailto:', '#', 'mirrored.to', 'acefile.co', '(rar)', '.rar', '(zip)', 'terabox', 'shrinkearn',
+  'saweria', 'trakteer', 'paypal', 'javascript:', 'mailto:', '#',
+  'mirrored.to', 'acefile.co', 'mega.nz', 'mega.co.nz', 'megaup',
+  'racaty', '(rar)', '.rar', '(zip)', '.zip', 'terabox',
 ];
 
 const KNOWN_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
-  'gofile.io', 'krakenfiles.com', 'kfiles.io',
-  'filedon.co', 'odfiles.com', 'buzzheavier.com', 'qiwi.gg',
-  'mediafire.com', 'wibufile.com', 'uqni.net', 'mp4upload.com',
-  'desudrive.com', 'desustream.info', 'desustream.com', 'ondesu.com',
-  'mega.nz', 'racaty.io', 'fileditchfiles.me',
-  'blogger.com', 'drive.google.com', 'vidhide', 'filelions', 'dood', 'mixdrop',
+  'gofile.io', 'buzzheavier.com', 'filedon.co', 'odfiles.com',
+  'icefile.web.id', 'qiwi.gg', 'mediafire.com', 'drive.google.com',
+  'kuramadrive.com', 'fileditchfiles.me', 'fileditch.com',
+  'desudrive.com', 'desustream.info', 'desustream.com', 'odstream', 'odcdn', 'ondesu.com',
+  'blogger.com', 'streamruby', 'rubyvidhub.com', 'vidhide', 'filemoon',
+  'mixdrop', 'streamtape', 'dood', 'krakenfiles.com', 'kfiles.io',
 ];
 
-export function normalizeTitle(raw) {
-  return String(raw || '')
+const HOST_RELIABILITY_RANK = [
+  'pixeldrain', 'pdrain', 'gofile', 'buzzheavier', 'filedon', 'odfiles',
+  'icefile', 'drive.google', 'qiwi', 'mediafire', 'fileditch',
+  'odcdn', 'odstream', 'desustream', 'blogger', 'streamruby',
+  'vidhide', 'filemoon', 'mixdrop', 'streamtape', 'dood', 'krakenfiles', 'kfiles',
+];
+
+export function unwrapShortenerUrl(rawUrl) {
+  const s = String(rawUrl || '').trim();
+  if (!s) return '';
+  try {
+    const parsed = new URL(s);
+    if (parsed.hostname.toLowerCase().includes('shrinkearn')) {
+      const encoded = parsed.searchParams.get('url') || parsed.searchParams.get('u');
+      if (encoded) {
+        const decoded = Buffer.from(encoded, 'base64').toString('utf8').trim();
+        if (decoded.startsWith('http://') || decoded.startsWith('https://')) {
+          return decoded;
+        }
+      }
+      return '';
+    }
+  } catch {}
+  return s;
+}
+
+export function parseTitleMeta(raw) {
+  const cleaned = String(raw || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\[\](){}]/g, ' ');
+
+  let formatKind = 'TV';
+  if (/\b(?:movie|gekijouban|film)\b/i.test(cleaned)) formatKind = 'MOVIE';
+  else if (/\b(?:ova|oad)\b/i.test(cleaned)) formatKind = 'OVA';
+  else if (/\b(?:side\s*story|gaiden|spin[\s-]*off)\b/i.test(cleaned)) formatKind = 'SIDE_STORY';
+  else if (/\b(?:special|recap|sp)\b/i.test(cleaned)) formatKind = 'SPECIAL';
+  else if (/\bona\b/i.test(cleaned)) formatKind = 'ONA';
+
+  let season = null;
+  const sMatch =
+    cleaned.match(/\bseason\s*(\d+)\b/i) ||
+    cleaned.match(/\bs(\d+)\b/i) ||
+    cleaned.match(/\b(\d+)(?:st|nd|rd|th)\s+season\b/i);
+  if (sMatch) {
+    season = Number.parseInt(sMatch[1], 10);
+  } else {
+    const roman = cleaned.match(/\b(II|III|IV|V)\b/);
+    if (roman) {
+      season = { II: 2, III: 3, IV: 4, V: 5 }[roman[1]] ?? null;
+    }
+  }
+
+  let part = null;
+  const pMatch = cleaned.match(/\b(?:part|cour)\s*(\d+)\b/i);
+  if (pMatch) {
+    part = Number.parseInt(pMatch[1], 10);
+  }
+
+  const base = cleaned
     .toLowerCase()
-    .replace(/\b(subtitle indonesia|sub indo|batch|bd|ova|movie|special)\b/g, ' ')
+    .replace(/\b(subtitle indonesia|sub indo|batch|bd)\b/g, ' ')
+    .replace(/\b(?:season|part|cour)\s*\d+\b/gi, ' ')
+    .replace(/\bs\d+\b/gi, ' ')
+    .replace(/\b\d+(?:st|nd|rd|th)\s+season\b/gi, ' ')
+    .replace(/\b(?:movie|gekijouban|film|ova|oad|ona|special|recap|side\s*story|gaiden)\b/gi, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
+
+  const tokens = new Set(base.split(' ').filter((t) => t.length >= 2));
+  return { base, formatKind, season, part, tokens };
+}
+
+export function normalizeTitle(raw) {
+  return parseTitleMeta(raw).base;
 }
 
 export function titleTokens(raw) {
-  return new Set(
-    normalizeTitle(raw)
-      .split(' ')
-      .filter((t) => t.length >= 2)
-  );
+  return parseTitleMeta(raw).tokens;
 }
 
 export function scoreTitleMatch(catalogTitle, candidateTitle) {
-  const normA = normalizeTitle(catalogTitle);
-  const normB = normalizeTitle(candidateTitle);
-  if (!normA || !normB) return 0;
-  if (normA === normB) return 1.0;
+  const mA = parseTitleMeta(catalogTitle);
+  const mB = parseTitleMeta(candidateTitle);
+  if (!mA.base || !mB.base) return 0;
 
-  const tokA = titleTokens(normA);
-  const tokB = titleTokens(normB);
-  if (tokA.size === 0 || tokB.size === 0) return 0;
+  if (mA.formatKind !== mB.formatKind) {
+    return 0;
+  }
+
+  if (mA.season !== null && mB.season !== null && mA.season !== mB.season) {
+    return 0;
+  }
+  if (mA.season === null && mB.season !== null && mB.season > 1) {
+    return 0;
+  }
+  if (mA.season !== null && mA.season > 1 && mB.season === null) {
+    return 0;
+  }
+  if (mA.part !== null && mB.part !== null && mA.part !== mB.part) {
+    return 0;
+  }
+
+  if (mA.base === mB.base) return 1.0;
+  if (mA.tokens.size === 0 || mB.tokens.size === 0) return 0;
 
   let inter = 0;
-  for (const t of tokA) {
-    if (tokB.has(t)) inter++;
+  for (const t of mA.tokens) {
+    if (mB.tokens.has(t)) inter++;
   }
   if (inter === 0) return 0;
 
-  const jaccard = inter / (tokA.size + tokB.size - inter);
-  const containment = inter / Math.min(tokA.size, tokB.size);
-  const seasonA = normA.match(/\b(?:season|s)\s*(\d+)\b/)?.[1] ?? null;
-  const seasonB = normB.match(/\b(?:season|s)\s*(\d+)\b/)?.[1] ?? null;
-  if (seasonA && seasonB && seasonA !== seasonB) {
-    return jaccard * 0.35;
-  }
+  const jaccard = inter / (mA.tokens.size + mB.tokens.size - inter);
+  const containment = inter / Math.min(mA.tokens.size, mB.tokens.size);
   return Math.max(jaccard, containment * 0.88);
 }
 
@@ -75,6 +152,7 @@ export function parseQuality(text) {
 
 export function parseContainer(blockTitle, qualityText) {
   const combined = `${blockTitle || ''} ${qualityText || ''}`.toLowerCase();
+  if (combined.includes('m3u8') || combined.includes('hls')) return 'hls';
   if (combined.includes('mkv')) return 'mkv';
   return 'mp4';
 }
@@ -82,12 +160,19 @@ export function parseContainer(blockTitle, qualityText) {
 export function isBlacklistedUrl(label, url) {
   const low = `${label || ''} ${url || ''}`.toLowerCase();
   if (!url || (!url.startsWith('https://') && !url.startsWith('http://'))) return true;
+  if (low.includes('shrinkearn')) return true;
   return BLACKLISTED_HOSTER_PATTERNS.some((p) => low.includes(p));
 }
 
 export function isKnownHoster(url) {
   const low = String(url || '').toLowerCase();
   return KNOWN_HOSTER_DOMAINS.some((d) => low.includes(d));
+}
+
+function hostReliabilityIndex(label, url) {
+  const low = `${label || ''} ${url || ''}`.toLowerCase();
+  const idx = HOST_RELIABILITY_RANK.findIndex((k) => low.includes(k));
+  return idx >= 0 ? idx : HOST_RELIABILITY_RANK.length;
 }
 
 export function extractEpisodeNumber(text, url) {
@@ -126,6 +211,23 @@ export function parseSamehadakuAnimeList(html) {
     if (url.startsWith('http') && title.length >= 2 && !seen.has(url)) {
       seen.add(url);
       out.push({ title, url, provider: 'samehadaku' });
+    }
+  }
+  return out;
+}
+
+export function parseNontonAnimeIdList(html, baseUrl = 'https://nontonanimeid.stream') {
+  const out = [];
+  const seen = new Set();
+  const re = /<a[^>]+href="([^"]*\/anime\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    let url = m[1].trim();
+    if (url.startsWith('/')) url = `${baseUrl}${url}`;
+    const title = m[2].replace(/<[^>]+>/g, '').trim();
+    if (url.startsWith('http') && !/\/episode/i.test(url) && title.length >= 2 && !seen.has(url)) {
+      seen.add(url);
+      out.push({ title, url, provider: 'nontonanimeid' });
     }
   }
   return out;
@@ -173,7 +275,6 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
   const results = [];
   const seen = new Set();
 
-  // 1) Structured quality rows: <li><strong>720p</strong>...<a href="...">...</a></li> or <div class="soraurlx">...
   const rowRe = /<(?:li|div[^>]*class="[^"]*soraurlx[^"]*")[^>]*>([\s\S]*?)<\/(?:li|div)>/gi;
   let rowMatch;
   while ((rowMatch = rowRe.exec(html)) !== null) {
@@ -188,7 +289,8 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     const linkRe = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
     let linkMatch;
     while ((linkMatch = linkRe.exec(rowHtml)) !== null) {
-      const href = linkMatch[1].trim().replace(/&amp;/g, '&');
+      const rawHref = linkMatch[1].trim().replace(/&amp;/g, '&');
+      const href = unwrapShortenerUrl(rawHref);
       const label = linkMatch[2].replace(/<[^>]+>/g, '').trim() || 'Hoster';
       if (isBlacklistedUrl(label, href)) continue;
       const dedupKey = `${quality}|${href}`;
@@ -205,12 +307,12 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     }
   }
 
-  // 2) Fallback: scan any known hoster links on the page (handles Samehadaku / modern Tailwind layouts)
   if (results.length === 0) {
     const anyLinkRe = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
     let m;
     while ((m = anyLinkRe.exec(html)) !== null) {
-      const href = m[1].trim().replace(/&amp;/g, '&');
+      const rawHref = m[1].trim().replace(/&amp;/g, '&');
+      const href = unwrapShortenerUrl(rawHref);
       const label = m[2].replace(/<[^>]+>/g, '').trim() || 'Hoster';
       if (isBlacklistedUrl(label, href)) continue;
       if (!isKnownHoster(href)) continue;
@@ -229,11 +331,11 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     }
   }
 
-  // Keep balanced multi-hoster coverage across qualities (max 5 per quality, max 16 total)
+  results.sort((a, b) => hostReliabilityIndex(a.hoster, a.url) - hostReliabilityIndex(b.hoster, b.url));
   const byQuality = new Map();
   for (const item of results) {
     const arr = byQuality.get(item.quality) || [];
-    if (arr.length < 5) {
+    if (arr.length < 4) {
       arr.push(item);
       byQuality.set(item.quality, arr);
     }
@@ -259,8 +361,9 @@ export function extractHostersFromOploverzEpisodeJson(epObj, pageUrl) {
     if (typeof node === 'object') {
       const q = parseQuality(node.quality || node.resolution || node.res || node.name || '') || qualityHint;
       const fmt = parseContainer(node.format || node.type || '', node.name || '') || formatHint;
-      const url = node.url || node.link || node.href || node.downloadUrl || node.streamUrl;
-      if (typeof url === 'string' && url.startsWith('http') && !isBlacklistedUrl(node.name || node.server || '', url)) {
+      const rawUrl = node.url || node.link || node.href || node.downloadUrl || node.streamUrl;
+      const url = typeof rawUrl === 'string' ? unwrapShortenerUrl(rawUrl) : '';
+      if (url && url.startsWith('http') && !isBlacklistedUrl(node.name || node.server || '', url)) {
         const label = String(node.server || node.hoster || node.name || 'Hoster').trim().slice(0, 60) || 'Hoster';
         const dedup = `${q}|${url}`;
         if (!seen.has(dedup)) {
@@ -312,9 +415,24 @@ async function fetchText(url, referer = '', timeoutMs = 15000) {
     'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
   };
   if (referer) headers.Referer = referer;
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  return res.text();
+  try {
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
+    if (res.ok) return await res.text();
+    if (res.status !== 403 && res.status !== 503) {
+      throw new Error(`HTTP ${res.status} for ${url}`);
+    }
+  } catch (err) {
+    if (!process.env.CF_HANDLER_URL) throw err;
+  }
+
+  const cfHandler = (process.env.CF_HANDLER_URL || '').trim().replace(/\/+$/, '');
+  if (!cfHandler) throw new Error(`Blocked fetching ${url}`);
+  const proxyRes = await fetch(`${cfHandler}/fetch?url=${encodeURIComponent(url)}`, {
+    headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,*/*' },
+    signal: AbortSignal.timeout(timeoutMs + 10000),
+  });
+  if (!proxyRes.ok) throw new Error(`CF_HANDLER HTTP ${proxyRes.status} for ${url}`);
+  return proxyRes.text();
 }
 
 async function fetchJson(url, headers = {}, timeoutMs = 20000) {
@@ -374,7 +492,7 @@ async function main() {
     throw new Error('ADMIN_SECRET wajib diisi.');
   }
 
-  const maxAnimes = Math.max(1, Number.parseInt(process.env.MAX_ANIMES || '300', 10) || 300);
+  const maxAnimes = Math.max(1, Number.parseInt(process.env.MAX_ANIMES || '1500', 10) || 1500);
   const maxEps = Math.max(1, Number.parseInt(process.env.MAX_EPS_PER_ANIME || '4', 10) || 4);
   const concurrency = Math.max(1, Math.min(12, Number.parseInt(process.env.CONCURRENCY || '6', 10) || 6));
 
@@ -386,28 +504,36 @@ async function main() {
 
   const catalog = (catJson.data || []).slice(0, maxAnimes);
   const sourcesMap = new Map((srcJson.sources || []).map((s) => [s.id, s.base_url]));
-  const otakuBase = (sourcesMap.get('otakudesu') || 'https://otakudesu.blog').replace(/\/+$/, '');
   const sameBase = (sourcesMap.get('samehadaku') || 'https://v2.samehadaku.how').replace(/\/+$/, '');
+  const nontonBase = (sourcesMap.get('nontonanimeid') || 'https://nontonanimeid.stream').replace(/\/+$/, '');
+  const otakuBase = (sourcesMap.get('otakudesu') || 'https://otakudesu.blog').replace(/\/+$/, '');
   const oploBase = (sourcesMap.get('oploverz') || 'https://oploverz.ch').replace(/\/+$/, '');
 
   const providerIndices = [];
-  const [otakuRes, sameRes, oploRes] = await Promise.allSettled([
-    fetchText(`${otakuBase}/anime-list/`, `${otakuBase}/`, 20000).then(parseOtakudesuAnimeList),
+  const [sameRes, nontonRes, otakuRes, oploRes] = await Promise.allSettled([
     fetchText(`${sameBase}/daftar-anime-2/?list`, `${sameBase}/`, 20000).then(parseSamehadakuAnimeList),
+    fetchText(`${nontonBase}/anime/`, `${nontonBase}/`, 20000).then((h) => parseNontonAnimeIdList(h, nontonBase)),
+    fetchText(`${otakuBase}/anime-list/`, `${otakuBase}/`, 20000).then(parseOtakudesuAnimeList),
     fetchOploverzIndex(oploBase),
   ]);
 
-  if (otakuRes.status === 'fulfilled' && otakuRes.value.length > 0) {
-    console.log(`[otakudesu] indexed ${otakuRes.value.length} anime`);
-    providerIndices.push({ provider: 'otakudesu', base: otakuBase, list: otakuRes.value });
-  } else {
-    console.warn(`[otakudesu] unavailable: ${otakuRes.status === 'rejected' ? otakuRes.reason?.message : 'empty'}`);
-  }
   if (sameRes.status === 'fulfilled' && sameRes.value.length > 0) {
     console.log(`[samehadaku] indexed ${sameRes.value.length} anime`);
     providerIndices.push({ provider: 'samehadaku', base: sameBase, list: sameRes.value });
   } else {
     console.warn(`[samehadaku] unavailable: ${sameRes.status === 'rejected' ? sameRes.reason?.message : 'empty'}`);
+  }
+  if (nontonRes.status === 'fulfilled' && nontonRes.value.length > 0) {
+    console.log(`[nontonanimeid] indexed ${nontonRes.value.length} anime`);
+    providerIndices.push({ provider: 'nontonanimeid', base: nontonBase, list: nontonRes.value });
+  } else {
+    console.warn(`[nontonanimeid] unavailable: ${nontonRes.status === 'rejected' ? nontonRes.reason?.message : 'empty'}`);
+  }
+  if (otakuRes.status === 'fulfilled' && otakuRes.value.length > 0) {
+    console.log(`[otakudesu] indexed ${otakuRes.value.length} anime`);
+    providerIndices.push({ provider: 'otakudesu', base: otakuBase, list: otakuRes.value });
+  } else {
+    console.warn(`[otakudesu] unavailable: ${otakuRes.status === 'rejected' ? otakuRes.reason?.message : 'empty'}`);
   }
   if (oploRes.status === 'fulfilled' && oploRes.value.length > 0) {
     console.log(`[oploverz] indexed ${oploRes.value.length} anime`);
@@ -436,7 +562,7 @@ async function main() {
           }
         }
       }
-      if (best && bestScore >= 0.45) {
+      if (best && bestScore >= 0.55) {
         hits.push({ ...best, base: pIdx.base, score: bestScore });
       }
     }
@@ -483,15 +609,10 @@ async function main() {
 
     for (const source of hits) {
       try {
-        // Fast JSON path for Oploverz BackAPI
         if (source.provider === 'oploverz' && source.slug) {
           try {
             const detail = await fetchJson(`https://backapi.oploverz.ac/api/series/${encodeURIComponent(source.slug)}`, {}, 15000);
             const rawEpArr = detail?.episodes || detail?.data?.episodes || [];
-            if (diagLogs < 3) {
-              diagLogs++;
-              console.log(`[diag:oploverz-api] slug=${source.slug} keys=${Object.keys(detail || {}).join(',')} eps=${rawEpArr.length}`);
-            }
             const parsedEps = rawEpArr
               .map((e) => ({
                 ep: Number.parseInt(String(e?.episodeNumber ?? e?.episode ?? e?.number ?? ''), 10),
@@ -540,20 +661,12 @@ async function main() {
             ? parseOtakudesuEpisodes(animeHtml)
             : parseGenericEpisodes(animeHtml, source.base);
         const eps = selectEpisodesToIndex(rawEps, maxEps);
-        if (diagLogs < 6 && eps.length === 0) {
-          diagLogs++;
-          console.log(`[diag:${source.provider}] 0 eps on ${source.url} (html len=${animeHtml.length})`);
-        }
         if (eps.length === 0) continue;
 
         for (const epItem of eps) {
           try {
             const epHtml = await fetchText(epItem.url, source.url, 15000);
             const hosters = parseEpisodeHostersFromHtml(epHtml, epItem.url, source.provider);
-            if (diagLogs < 6 && hosters.length === 0) {
-              diagLogs++;
-              console.log(`[diag:${source.provider}] 0 hosters on ${epItem.url} (html len=${epHtml.length})`);
-            }
             if (hosters.length > 0) {
               const existing = epHostersMap.get(epItem.ep) || [];
               const existingUrls = new Set(existing.map((x) => x.url));
@@ -602,7 +715,7 @@ async function main() {
     }
   });
 
-  await flushBatch(true);
+  await flushBatch(syncedAnimes >= 100);
   console.log(
     `DONE: syncedAnimes=${syncedAnimes}, totalEpisodes=${totalEpisodes}, totalHosters=${totalHosters}`
   );
