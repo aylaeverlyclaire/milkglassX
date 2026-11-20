@@ -10,13 +10,20 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
+import id.my.milkglass.player.PlaybackBandwidthGate
+import id.my.milkglass.player.PlayerManager
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val WARM_W = 264
 private const val WARM_H = 352
 
 suspend fun prefetchPosters(context: Context, urls: List<String>, parallelism: Int = 6) {
     if (urls.isEmpty()) return
+    if (PlayerManager.isVideoBuffering.value) {
+        withTimeoutOrNull(4_000L) { PlayerManager.isVideoBuffering.first { !it } }
+    }
     val loader = context.imageLoader
 
     val gate = Semaphore(parallelism.coerceIn(1, 8))
@@ -24,6 +31,7 @@ suspend fun prefetchPosters(context: Context, urls: List<String>, parallelism: I
         urls.distinct().map { url ->
             async {
                 gate.withPermit {
+                    if (!PlaybackBandwidthGate.awaitClear(maxWaitMs = 8_000L)) return@withPermit
                     runCatching {
                         loader.execute(
                             ImageRequest.Builder(context)

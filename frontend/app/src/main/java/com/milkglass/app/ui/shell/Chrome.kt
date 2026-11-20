@@ -278,7 +278,7 @@ private fun SheetBody(ctl: AppController, o: Overlay, vh: androidx.compose.ui.un
                     MilkButton(tr.t("common.understood"), { ctl.closeOverlay() }, wide = true, variant = ButtonVariant.Tonal)
                 }
                 Overlay.QualityPicker -> {
-                    listOf("Auto", "1080p", "720p", "480p").forEach { q ->
+                    ctl.availablePlayerQualities.forEach { q ->
                         RadioRow(
                             ctl.persisted.settings.quality == q,
                             if (q == "Auto") tr.t("player.automatic") else q,

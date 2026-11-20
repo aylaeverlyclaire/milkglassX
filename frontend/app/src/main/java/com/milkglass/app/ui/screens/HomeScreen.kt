@@ -156,7 +156,7 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
     androidx.compose.runtime.LaunchedEffect(d.anime.id, d.resume?.episode, ctl.persisted.settings.quality, ctl.online) {
         val ep = d.resume?.episode ?: 1
         if (ctl.online && ctl.episodeAccess(d.anime, ep) == com.milkglass.app.core.app.Access.Ok) {
-            kotlinx.coroutines.delay(1_200)
+            kotlinx.coroutines.delay(250)
             id.my.milkglass.EngineRuntime.get(heroCtx).prefetchEpisode(
                 d.anime.title, d.anime.romaji, ep, ctl.persisted.settings.quality,
             )

@@ -105,10 +105,18 @@ fun DetailScreen(ctl: AppController, id: Int) {
     LaunchedEffect(a.id) { ctl.loadEpisodeMeta(a) }
     LaunchedEffect(a.id) { ctl.loadExtras(a) }
     val detailCtx = LocalContext.current.applicationContext
-    LaunchedEffect(a.id, resume?.episode, ctl.persisted.settings.quality) {
-        val targetEp = resume?.episode ?: 1
-        if (ctl.online && ctl.episodeAccess(a, targetEp) == Access.Ok) {
-            EngineRuntime.get(detailCtx).prefetchEpisode(a.title, a.romaji, targetEp, ctl.persisted.settings.quality)
+    LaunchedEffect(a.id, resume?.episode, resume?.waiting, ctl.persisted.settings.quality, ctl.online) {
+        val targetEp = when {
+            resume == null -> 1
+            resume.waiting && resume.completed -> 1
+            resume.waiting -> null
+            else -> resume.episode ?: 1
+        }
+        if (targetEp != null && ctl.online && ctl.episodeAccess(a, targetEp) == Access.Ok) {
+            EngineRuntime.get(detailCtx).prefetchEpisode(
+                a.title, a.romaji, targetEp, ctl.persisted.settings.quality,
+                prebuffer = !com.milkglass.app.core.poster.isMeteredNetwork(detailCtx),
+            )
         }
     }
 

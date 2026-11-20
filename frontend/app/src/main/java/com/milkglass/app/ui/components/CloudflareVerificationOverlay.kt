@@ -1,6 +1,7 @@
 package com.milkglass.app.ui.components
 
 import android.annotation.SuppressLint
+import android.os.SystemClock
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -19,10 +20,7 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -32,6 +30,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import id.my.milkglass.net.CloudflareChallengeCoordinator
 import kotlinx.coroutines.delay
+import java.util.concurrent.atomic.AtomicBoolean
+
+private const val CF_POLL_INTERVAL_MS = 500L
+private const val CF_POLL_TIMEOUT_MS = 90_000L
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -40,7 +42,13 @@ fun CloudflareVerificationOverlay(
     targetUrl: String,
     onDismiss: () -> Unit
 ) {
-    var verified by remember(host, targetUrl) { mutableStateOf(false) }
+    val completed = remember(host, targetUrl) { AtomicBoolean(false) }
+
+    fun completeOnce(success: Boolean) {
+        if (completed.compareAndSet(false, true)) {
+            CloudflareChallengeCoordinator.complete(host, success)
+        }
+    }
 
     LaunchedEffect(host, targetUrl) {
         val cookieManager = CookieManager.getInstance()
@@ -49,31 +57,39 @@ fun CloudflareVerificationOverlay(
                 ?.substringAfter("=")?.takeIf { it.isNotBlank() }
 
         val initialClearance = extractClearance(cookieManager.getCookie(targetUrl).orEmpty())
-        while (!verified) {
-            delay(500L)
+        val deadlineMs = SystemClock.elapsedRealtime() + CF_POLL_TIMEOUT_MS
+        while (!completed.get() && SystemClock.elapsedRealtime() < deadlineMs) {
+            delay(CF_POLL_INTERVAL_MS)
             val currentClearance = extractClearance(cookieManager.getCookie(targetUrl).orEmpty())
             if (currentClearance != null && currentClearance != initialClearance) {
                 cookieManager.flush()
-                verified = true
-                CloudflareChallengeCoordinator.complete(host, true)
+                completeOnce(true)
                 onDismiss()
+                return@LaunchedEffect
             }
+        }
+        if (!completed.get()) {
+            completeOnce(false)
+            onDismiss()
         }
     }
 
-    DisposableEffect(host) {
+    DisposableEffect(host, targetUrl) {
         onDispose {
             runCatching { CookieManager.getInstance().flush() }
-            if (!verified) {
-                CloudflareChallengeCoordinator.complete(host, false)
-            }
+            completeOnce(false)
         }
     }
 
+    androidx.activity.compose.BackHandler {
+        completeOnce(false)
+        onDismiss()
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF0E1015))
+            .padding(top = 28.dp)
     ) {
         Row(
             modifier = Modifier
@@ -90,7 +106,7 @@ fun CloudflareVerificationOverlay(
                 text = "Tutup",
                 style = TextStyle(color = Color(0xFF8FB8FF), fontSize = 14.sp),
                 modifier = Modifier.clickable {
-                    CloudflareChallengeCoordinator.complete(host, false)
+                    completeOnce(false)
                     onDismiss()
                 }
             )
@@ -115,11 +131,17 @@ fun CloudflareVerificationOverlay(
                         ): Boolean {
                             val reqHost = request?.url?.host?.lowercase().orEmpty()
                             val rootHost = host.lowercase().removePrefix("www.")
-                            return reqHost.isNotEmpty() && !reqHost.endsWith(rootHost)
+                            val allowed = reqHost == rootHost || reqHost.endsWith(".$rootHost")
+                            return reqHost.isNotEmpty() && !allowed
                         }
                     }
                     loadUrl(targetUrl)
                 }
+            },
+            onRelease = { wv ->
+                wv.stopLoading()
+                wv.removeAllViews()
+                wv.destroy()
             }
         )
     }

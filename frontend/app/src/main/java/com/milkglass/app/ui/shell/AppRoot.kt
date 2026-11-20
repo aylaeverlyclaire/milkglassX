@@ -28,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -62,7 +63,10 @@ import com.milkglass.app.ui.screens.FireworksCanvas
 import com.milkglass.app.ui.screens.ScheduleScreen
 import com.milkglass.app.ui.screens.SearchScreen
 import com.milkglass.app.ui.screens.SplashScreen
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 
 @Composable
@@ -99,7 +103,28 @@ fun AppRoot(ctl: AppController) {
 
             launch { ctl.loadRemoteCatalog() }
             launch { while (true) { delay(20_000); ctl.tick = System.currentTimeMillis() } }
-            while (true) { delay(4_000); ctl.saveInBackground() }
+            var pendingSave: Job? = null
+            var firstDirtyAtMs = 0L
+            snapshotFlow { ctl.persisted }
+                .distinctUntilChanged()
+                .drop(1)
+                .collect {
+                    val nowMs = System.currentTimeMillis()
+                    if (firstDirtyAtMs == 0L) firstDirtyAtMs = nowMs
+                    if (nowMs - firstDirtyAtMs >= 15_000L) {
+                        pendingSave?.cancel()
+                        pendingSave = null
+                        firstDirtyAtMs = 0L
+                        ctl.saveInBackground()
+                    } else {
+                        pendingSave?.cancel()
+                        pendingSave = launch {
+                            delay(2_000L)
+                            firstDirtyAtMs = 0L
+                            ctl.saveInBackground()
+                        }
+                    }
+                }
         }
     }
     DisposableEffect(owner) {
@@ -213,7 +238,7 @@ private fun MainFlow(ctl: AppController) {
                 state = pagerState,
                 modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.Top,
-                beyondViewportPageCount = TAB_PAGES.size,
+                beyondViewportPageCount = 1,
                 flingBehavior = PagerDefaults.flingBehavior(pagerState, snapPositionalThreshold = .28f),
             ) { page ->
                 PaneFxBox(page, fx) {
@@ -232,15 +257,16 @@ private fun MainFlow(ctl: AppController) {
 
         val shown = ctl.viewStack.mapIndexed { i, e -> Triple(i, e, 0) } + ctl.exitingViews.map { Triple(it.index, it.entry, it.id) }
         shown.sortedBy { it.first }.forEach { (idx, entry, exitId) ->
-            key(idx, entry) {
+            val compKey: Any = if (exitId == 0 && entry is ViewEntry.Player) "player" else entry
+            key(idx, compKey) {
 
                 if (!(covered && idx != ctl.viewStack.lastIndex)) {
 
-                    val stateKey = "$idx:${System.identityHashCode(entry)}"
+                    val stateKey = if (exitId == 0 && entry is ViewEntry.Player) "$idx:player" else "$idx:${System.identityHashCode(entry)}"
                     holder.SaveableStateProvider(stateKey) {
 
                         DisposableEffect(stateKey) {
-                            onDispose { if (ctl.viewStack.getOrNull(idx) !== entry) holder.removeState(stateKey) }
+                            onDispose { val cur = ctl.viewStack.getOrNull(idx); if (cur !== entry && !(entry is ViewEntry.Player && cur is ViewEntry.Player)) holder.removeState(stateKey) }
                         }
                         PushedView(
                             isNew = exitId == 0 && idx == ctl.viewStack.lastIndex && ctl.navKind == NavKind.Push,

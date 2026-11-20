@@ -112,6 +112,15 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         ).also { it.initialize() }
     }
     val snap by playerManager.snapshot.collectAsState()
+    LaunchedEffect(e, playerManager) {
+        playerManager.progress.collect { prog ->
+            if (prog.durationMs > 0L) {
+                val durSec = (prog.durationMs / 1000L).toInt().coerceAtLeast(1)
+                if (e.nativeDurationSeconds != durSec) e.nativeDurationSeconds = durSec
+                if (playerManager.snapshot.value.isReady) e.syncFromNativePlayer(prog.positionMs)
+            }
+        }
+    }
     var cfChallenge by remember { mutableStateOf<Pair<String, String>?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
@@ -121,6 +130,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         }
         CloudflareChallengeCoordinator.uiLauncher = myLauncher
         onDispose {
+            mainHandler.removeCallbacksAndMessages(null)
             if (CloudflareChallengeCoordinator.uiLauncher === myLauncher) {
                 CloudflareChallengeCoordinator.uiLauncher = null
             }
@@ -157,6 +167,11 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         }
     }
 
+    LaunchedEffect(snap.availableResolutions) {
+        if (snap.availableResolutions.isNotEmpty()) {
+            ctl.availablePlayerQualities = snap.availableResolutions
+        }
+    }
     LaunchedEffect(snap) {
         e.nativeStreamActive = snap.isReady
         e.nativeBuffering = snap.isLoading
@@ -167,7 +182,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         } else {
             e.nativeDurationSeconds = null
         }
-        if (snap.isReady && snap.durationMs > 0L && (snap.positionMs > 0L || e.position < 1.0)) {
+        if (snap.isReady && snap.durationMs > 0L) {
             e.syncFromNativePlayer(snap.positionMs)
         }
         if (snap.phase == PlaybackPhase.ENDED && snap.durationMs > 0L) {
@@ -182,12 +197,13 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
     val nearEnd by androidx.compose.runtime.remember(e) {
         androidx.compose.runtime.derivedStateOf { e.duration > 0 && e.duration - e.position <= 240.0 }
     }
-    LaunchedEffect(snap.isReady, e.anime.id, e.episode, ctl.persisted.settings.quality, nearEnd, ctl.persisted.settings.autoplayNext) {
-        if (snap.isReady && ctl.online && (ctl.persisted.settings.autoplayNext != 0 || nearEnd)) {
+    LaunchedEffect(snap.isReady, e.anime.id, e.episode, ctl.persisted.settings.quality, nearEnd) {
+        if (snap.isReady && ctl.online) {
             ctl.nextPlayableEpisode(e.anime, e.episode)?.let { nextEp ->
                 EngineRuntime.get(context.applicationContext).prefetchEpisode(
                     e.anime.title, e.anime.romaji, nextEp, ctl.persisted.settings.quality,
                     maxAgeMs = if (nearEnd) 5L * 60L * 1000L else Long.MAX_VALUE,
+                    prebuffer = nearEnd && !com.milkglass.app.core.poster.isMeteredNetwork(context.applicationContext),
                 )
             }
         }
@@ -313,19 +329,18 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
         val subLines by playerManager.subtitleLines.collectAsState()
         val videoAspect by playerManager.videoAspectRatio.collectAsState()
         Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
-            if (e.nativeStreamActive) {
-                AndroidView(
-                    factory = { ctx ->
-                        TextureView(ctx).also { tv ->
-                            playerManager.attachTextureView(tv)
-                        }
-                    },
-                    update = { tv ->
+            AndroidView(
+                factory = { ctx ->
+                    TextureView(ctx).also { tv ->
                         playerManager.attachTextureView(tv)
-                    },
-                    modifier = Modifier.fillMaxHeight().aspectRatio(videoAspect, matchHeightConstraintsFirst = true)
-                )
-            }
+                    }
+                },
+                update = { tv ->
+                    playerManager.attachTextureView(tv)
+                },
+                onRelease = { tv -> playerManager.detachTextureView(tv) },
+                modifier = Modifier.fillMaxHeight().aspectRatio(videoAspect, matchHeightConstraintsFirst = true)
+            )
         }
         if (e.nativeStreamActive && subLines.isNotEmpty()) {
             Column(
@@ -440,7 +455,9 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
                         .padding(horizontal = 12.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    MilkText(ctl.effectiveQuality(), ty.style(12f, 600), Color.White)
+                    val activeRes = playerManager.snapshot.collectAsState().value.activeResolution
+                    val qualityLabel = if (ctl.persisted.settings.quality == "Auto") "Otomatis · $activeRes" else activeRes
+                    MilkText(qualityLabel, ty.style(12f, 600), Color.White)
                 }
                 Box(
                     Modifier.size(36.dp, 40.dp).clip(RoundedCornerShape(20.dp)).milkClickable(enabled = !e.faded, pressDim = false) { e.toggleFullscreen() },
@@ -536,7 +553,7 @@ private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Mo
             StreamResolver.buildEpisodeSlug(a.romaji.ifBlank { a.title }, ep).substringBefore("-ep-")
         }
         val workName = remember(animeSlug, ep, targetQuality) {
-            "mkv_dl_${animeSlug}_ep_${ep}_${targetQuality.label}"
+            dlManager.buildUniqueWorkName(animeSlug, ep, targetQuality.label)
         }
         val dlStatus by dlManager.observeDownload(workName).collectAsState(initial = MkvDownloadStatus())
         val alreadyDownloaded = remember(animeSlug, ep, targetQuality, dlStatus.isSucceeded) {
@@ -563,7 +580,8 @@ private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Mo
                                         animeSlug = animeSlug,
                                         animeTitle = a.romaji.ifBlank { a.title },
                                         episodeNumber = ep,
-                                        preferredQuality = targetQuality
+                                        preferredQuality = targetQuality,
+                                        wifiOnly = ctl.persisted.settings.wifiOnlyDownloads != 0
                                     )
                                 )
                             }.onFailure { err ->
