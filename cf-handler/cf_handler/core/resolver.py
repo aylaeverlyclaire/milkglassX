@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, urljoin, urlparse
 
 from curl_cffi.requests import AsyncSession
+from cf_handler.core.animasu import (
+    parse_animasu_detail,
+    parse_animasu_episode_mirrors,
+    parse_animasu_search,
+)
 
 IP_AGNOSTIC_HOSTS = (
     "pixeldrain.com",
@@ -15,6 +20,8 @@ IP_AGNOSTIC_HOSTS = (
     "filedon.co",
     "mediafire.com",
     "qiwi.gg",
+    "drive.google.com",
+    "drive.usercontent.google.com",
 )
 
 IP_LOCKED_HOSTS = (
@@ -32,6 +39,11 @@ IP_LOCKED_HOSTS = (
     "doodstream.",
     "streamtape.",
     "blogger.com",
+    "yourupload.com",
+    "vidhidepre.com",
+    "berkasdrive.com",
+    "mitedrive.com",
+    "short.ink",
 )
 
 BLACKLIST_HOSTS = (
@@ -273,6 +285,88 @@ async def _extract_ip_agnostic(
     return None
 
 
+async def _resolve_animasu(
+    session: AsyncSession,
+    base_url: str,
+    title: str,
+    ep: int,
+    cf_handler: Any,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    root = base_url.rstrip("/")
+    search_url = f"{root}/?s={quote_plus(title)}"
+    search_html = await _fetch_html(session, search_url, f"{root}/", cf_handler)
+    if not search_html:
+        return ([], [])
+
+    items = parse_animasu_search(search_html, root)
+    best_series: Optional[str] = None
+    best_score = 0.0
+    for item in items:
+        sc = score_title(title, item.get("title", ""))
+        if sc > best_score and sc >= 0.35:
+            best_score = sc
+            best_series = item["url"]
+    if not best_series:
+        return ([], [])
+
+    series_html = await _fetch_html(session, best_series, search_url, cf_handler)
+    if not series_html:
+        return ([], [])
+
+    detail = parse_animasu_detail(series_html, best_series)
+    ep_url: Optional[str] = None
+    for row in detail.get("episodes", []):
+        if row.get("episode") == ep or _matches_episode(row.get("label", ""), row.get("url", ""), ep):
+            ep_url = row["url"]
+            break
+    if not ep_url:
+        return ([], [])
+
+    ep_html = await _fetch_html(session, ep_url, best_series, cf_handler)
+    if not ep_html:
+        return ([], [])
+
+    directs: List[Dict[str, Any]] = []
+    ip_locked_list: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for m in parse_animasu_episode_mirrors(ep_html, ep_url):
+        raw_url = m.get("raw_url", "")
+        if not raw_url or raw_url in seen:
+            continue
+        host = (urlparse(raw_url).hostname or "").lower()
+        if any(b in host for b in BLACKLIST_HOSTS) or "terabox." in host:
+            continue
+        seen.add(raw_url)
+        ip_locked_list.append(
+            {
+                "source": "animasu",
+                "quality": m.get("quality") or "720p",
+                "hoster": m.get("hoster") or m.get("label") or host or "Embed",
+                "raw_url": raw_url,
+                "referer": ep_url,
+                "container": "MP4",
+                "ip_locked": True,
+            }
+        )
+        unwrapped = m.get("unwrapped_url")
+        if unwrapped and unwrapped not in seen:
+            seen.add(unwrapped)
+            ip_locked_list.append(
+                {
+                    "source": "animasu",
+                    "quality": m.get("quality") or "720p",
+                    "hoster": (urlparse(unwrapped).hostname or "MiteDrive"),
+                    "raw_url": unwrapped,
+                    "referer": raw_url,
+                    "container": "MP4",
+                    "ip_locked": True,
+                }
+            )
+
+    return (directs, ip_locked_list)
+
+
 async def _resolve_from_source(
     session: AsyncSession,
     source_id: str,
@@ -281,6 +375,8 @@ async def _resolve_from_source(
     ep: int,
     cf_handler: Any,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if source_id == "animasu":
+        return await _resolve_animasu(session, base_url, title, ep, cf_handler)
     root = base_url.rstrip("/")
     search_url = f"{root}/?s={quote_plus(title)}&post_type=anime" if source_id in ("otakudesu", "samehadaku") else f"{root}/?s={quote_plus(title)}"
     search_html = await _fetch_html(session, search_url, f"{root}/", cf_handler)
@@ -416,7 +512,7 @@ async def resolve_split_plane(
         ip_locked: List[Dict[str, Any]] = []
         ordered = [
             (sid, source_urls[sid])
-            for sid in ("otakudesu", "samehadaku", "oploverz")
+            for sid in ("animasu", "otakudesu", "samehadaku", "oploverz")
             if sid in source_urls and source_urls[sid].startswith("https://")
         ]
 
@@ -425,7 +521,7 @@ async def resolve_split_plane(
                 d_list, lock_list = await _resolve_from_source(session, sid, burl, title, ep, cf_handler)
                 directs.extend(d_list)
                 ip_locked.extend(lock_list)
-                if directs:
+                if directs or (sid == "animasu" and ip_locked):
                     break
 
         q_rank = {preferred_quality.lower(): 0, "1080p": 1, "720p": 2, "480p": 3, "360p": 4}
