@@ -11,6 +11,16 @@ const BLACKLISTED_HOSTER_PATTERNS = [
   'saweria', 'trakteer', 'paypal', 'javascript:', 'mailto:', '#',
 ];
 
+const KNOWN_HOSTER_DOMAINS = [
+  'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
+  'gofile.io', 'acefile.co', 'krakenfiles.com', 'kfiles.io',
+  'filedon.co', 'odfiles.com', 'buzzheavier.com', 'qiwi.gg',
+  'mediafire.com', 'wibufile.com', 'uqni.net', 'mp4upload.com',
+  'desudrive.com', 'desustream.info', 'desustream.com', 'ondesu.com',
+  'mega.nz', 'mirror.xyz', 'mirrored.to', 'racaty.io', 'fileditchfiles.me',
+  'blogger.com', 'drive.google.com', 'vidhide', 'filelions', 'dood', 'mixdrop',
+];
+
 export function normalizeTitle(raw) {
   return String(raw || '')
     .toLowerCase()
@@ -73,6 +83,11 @@ export function isBlacklistedUrl(label, url) {
   const low = `${label || ''} ${url || ''}`.toLowerCase();
   if (!url || (!url.startsWith('https://') && !url.startsWith('http://'))) return true;
   return BLACKLISTED_HOSTER_PATTERNS.some((p) => low.includes(p));
+}
+
+export function isKnownHoster(url) {
+  const low = String(url || '').toLowerCase();
+  return KNOWN_HOSTER_DOMAINS.some((d) => low.includes(d));
 }
 
 export function extractEpisodeNumber(text, url) {
@@ -143,7 +158,7 @@ export function parseGenericEpisodes(html, baseUrl = '') {
     if (!url.startsWith('http')) continue;
     const text = m[2].replace(/<[^>]+>/g, '').trim();
     if (!/episode|eps/i.test(url) && !/episode|eps/i.test(text)) continue;
-    if (/batch|daftar-anime|anime-list/i.test(url)) continue;
+    if (/batch|daftar-anime|anime-list|schedule|jadwal/i.test(url)) continue;
     const ep = extractEpisodeNumber(text, url);
     if (ep && !map.has(ep)) {
       map.set(ep, url);
@@ -158,8 +173,7 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
   const results = [];
   const seen = new Set();
 
-  // Match Otakudesu/Samehadaku <li><strong>...</strong><a href="...">...</a></li>
-  // and Oploverz <div class="soraurlx"><strong>720p</strong><a href="...">...</a></div>
+  // 1) Structured quality rows: <li><strong>720p</strong>...<a href="...">...</a></li> or <div class="soraurlx">...
   const rowRe = /<(?:li|div[^>]*class="[^"]*soraurlx[^"]*")[^>]*>([\s\S]*?)<\/(?:li|div)>/gi;
   let rowMatch;
   while ((rowMatch = rowRe.exec(html)) !== null) {
@@ -191,6 +205,30 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     }
   }
 
+  // 2) Fallback: scan any known hoster links on the page (handles Samehadaku / modern Tailwind layouts)
+  if (results.length === 0) {
+    const anyLinkRe = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = anyLinkRe.exec(html)) !== null) {
+      const href = m[1].trim().replace(/&amp;/g, '&');
+      const label = m[2].replace(/<[^>]+>/g, '').trim() || 'Hoster';
+      if (isBlacklistedUrl(label, href)) continue;
+      if (!isKnownHoster(href)) continue;
+      const quality = parseQuality(`${label} ${href}`) || '720p';
+      const dedupKey = `${quality}|${href}`;
+      if (seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
+      results.push({
+        url: href,
+        quality,
+        hoster: label.slice(0, 60),
+        provider,
+        container: parseContainer('', `${label} ${href}`),
+        referer: pageUrl,
+      });
+    }
+  }
+
   // Keep balanced multi-hoster coverage across qualities (max 5 per quality, max 16 total)
   const byQuality = new Map();
   for (const item of results) {
@@ -207,6 +245,45 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     }
   }
   return balanced;
+}
+
+export function extractHostersFromOploverzEpisodeJson(epObj, pageUrl) {
+  const results = [];
+  const seen = new Set();
+  const walk = (node, qualityHint = '720p', formatHint = 'mp4') => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, qualityHint, formatHint);
+      return;
+    }
+    if (typeof node === 'object') {
+      const q = parseQuality(node.quality || node.resolution || node.res || node.name || '') || qualityHint;
+      const fmt = parseContainer(node.format || node.type || '', node.name || '') || formatHint;
+      const url = node.url || node.link || node.href || node.downloadUrl || node.streamUrl;
+      if (typeof url === 'string' && url.startsWith('http') && !isBlacklistedUrl(node.name || node.server || '', url)) {
+        const label = String(node.server || node.hoster || node.name || 'Hoster').trim().slice(0, 60) || 'Hoster';
+        const dedup = `${q}|${url}`;
+        if (!seen.has(dedup)) {
+          seen.add(dedup);
+          results.push({
+            url,
+            quality: q,
+            hoster: label,
+            provider: 'oploverz',
+            container: fmt,
+            referer: pageUrl,
+          });
+        }
+      }
+      for (const [k, v] of Object.entries(node)) {
+        if (typeof v === 'object' && v !== null) {
+          walk(v, parseQuality(k) || q, parseContainer(k, '') || fmt);
+        }
+      }
+    }
+  };
+  walk(epObj);
+  return results.slice(0, 16);
 }
 
 export function selectEpisodesToIndex(episodes, maxEps) {
@@ -343,7 +420,6 @@ async function main() {
     throw new Error('Tidak ada satu pun provider sumber anime yang dapat diakses.');
   }
 
-  // Match each catalog anime to best candidate(s) across reachable providers
   const matched = [];
   for (const anime of catalog) {
     const titles = [anime.title, anime.title_alt].filter(Boolean);
@@ -373,6 +449,7 @@ async function main() {
   let totalHosters = 0;
   let totalEpisodes = 0;
   let syncedAnimes = 0;
+  let diagLogs = 0;
   const batchBuffer = [];
 
   async function flushBatch(forceReconcile = false) {
@@ -406,18 +483,77 @@ async function main() {
 
     for (const source of hits) {
       try {
+        // Fast JSON path for Oploverz BackAPI
+        if (source.provider === 'oploverz' && source.slug) {
+          try {
+            const detail = await fetchJson(`https://backapi.oploverz.ac/api/series/${encodeURIComponent(source.slug)}`, {}, 15000);
+            const rawEpArr = detail?.episodes || detail?.data?.episodes || [];
+            if (diagLogs < 3) {
+              diagLogs++;
+              console.log(`[diag:oploverz-api] slug=${source.slug} keys=${Object.keys(detail || {}).join(',')} eps=${rawEpArr.length}`);
+            }
+            const parsedEps = rawEpArr
+              .map((e) => ({
+                ep: Number.parseInt(String(e?.episodeNumber ?? e?.episode ?? e?.number ?? ''), 10),
+                raw: e,
+              }))
+              .filter((x) => Number.isFinite(x.ep) && x.ep >= 1 && x.ep <= 2000)
+              .sort((a, b) => a.ep - b.ep);
+
+            for (const item of selectEpisodesToIndex(parsedEps, maxEps)) {
+              let hosters = extractHostersFromOploverzEpisodeJson(item.raw, source.url);
+              if (hosters.length === 0 && (item.raw?.slug || item.raw?.id)) {
+                const epSlug = item.raw.slug || item.raw.id;
+                try {
+                  const epDetail = await fetchJson(
+                    `https://backapi.oploverz.ac/api/series/${encodeURIComponent(source.slug)}/episodes/${encodeURIComponent(epSlug)}`,
+                    {},
+                    12000
+                  );
+                  hosters = extractHostersFromOploverzEpisodeJson(epDetail, source.url);
+                } catch {}
+              }
+              if (hosters.length > 0) {
+                const existing = epHostersMap.get(item.ep) || [];
+                const existingUrls = new Set(existing.map((x) => x.url));
+                for (const h of hosters) {
+                  if (!existingUrls.has(h.url) && existing.length < 20) {
+                    existing.push(h);
+                    existingUrls.add(h.url);
+                  }
+                }
+                epHostersMap.set(item.ep, existing);
+              }
+            }
+            if (epHostersMap.size >= 2) break;
+          } catch (err) {
+            if (diagLogs < 4) {
+              diagLogs++;
+              console.log(`[diag:oploverz-api-err] ${source.slug}: ${err.message}`);
+            }
+          }
+        }
+
         const animeHtml = await fetchText(source.url, `${source.base}/`, 15000);
         const rawEps =
           source.provider === 'otakudesu'
             ? parseOtakudesuEpisodes(animeHtml)
             : parseGenericEpisodes(animeHtml, source.base);
         const eps = selectEpisodesToIndex(rawEps, maxEps);
+        if (diagLogs < 6 && eps.length === 0) {
+          diagLogs++;
+          console.log(`[diag:${source.provider}] 0 eps on ${source.url} (html len=${animeHtml.length})`);
+        }
         if (eps.length === 0) continue;
 
         for (const epItem of eps) {
           try {
             const epHtml = await fetchText(epItem.url, source.url, 15000);
             const hosters = parseEpisodeHostersFromHtml(epHtml, epItem.url, source.provider);
+            if (diagLogs < 6 && hosters.length === 0) {
+              diagLogs++;
+              console.log(`[diag:${source.provider}] 0 hosters on ${epItem.url} (html len=${epHtml.length})`);
+            }
             if (hosters.length > 0) {
               const existing = epHostersMap.get(epItem.ep) || [];
               const existingUrls = new Set(existing.map((x) => x.url));
@@ -429,11 +565,20 @@ async function main() {
               }
               epHostersMap.set(epItem.ep, existing);
             }
-          } catch {}
+          } catch (err) {
+            if (diagLogs < 6) {
+              diagLogs++;
+              console.log(`[diag:${source.provider}-ep-err] ${epItem.url}: ${err.message}`);
+            }
+          }
         }
-        // If we already got multi-hoster coverage from primary provider, skip secondary to keep run fast
         if (epHostersMap.size >= 2) break;
-      } catch {}
+      } catch (err) {
+        if (diagLogs < 6) {
+          diagLogs++;
+          console.log(`[diag:${source.provider}-series-err] ${source.url}: ${err.message}`);
+        }
+      }
     }
 
     if (epHostersMap.size > 0) {
