@@ -116,12 +116,14 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
     DisposableEffect(playerManager) {
-        CloudflareChallengeCoordinator.uiLauncher = { host, url ->
+        val myLauncher: (String, String) -> Unit = { host, url ->
             mainHandler.post { cfChallenge = host to url }
         }
+        CloudflareChallengeCoordinator.uiLauncher = myLauncher
         onDispose {
-            CloudflareChallengeCoordinator.uiLauncher = null
-            ctl.onQualityChanged = null
+            if (CloudflareChallengeCoordinator.uiLauncher === myLauncher) {
+                CloudflareChallengeCoordinator.uiLauncher = null
+            }
             playerManager.release()
         }
     }
@@ -131,7 +133,8 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         e.onNativeSeekMs = { ms -> playerManager.seekTo(ms) }
         e.onNativePlayPause = { play -> if (play) playerManager.resume() else playerManager.pause() }
         e.onNativeRetry = { playerManager.retry() }
-        ctl.onQualityChanged = { newQuality -> playerManager.switchResolution(newQuality) }
+        val myQualityHandler: (String) -> Unit = { newQuality -> playerManager.switchResolution(newQuality) }
+        ctl.onQualityChanged = myQualityHandler
 
         playerManager.load(
             PlaybackRequest(
@@ -145,6 +148,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         )
 
         onDispose {
+            if (ctl.onQualityChanged === myQualityHandler) ctl.onQualityChanged = null
             e.onNativeSeekMs = null
             e.onNativePlayPause = null
             e.onNativeRetry = null
@@ -163,7 +167,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         } else {
             e.nativeDurationSeconds = null
         }
-        if (snap.isReady && snap.durationMs > 0L) {
+        if (snap.isReady && snap.durationMs > 0L && (snap.positionMs > 0L || e.position < 1.0)) {
             e.syncFromNativePlayer(snap.positionMs)
         }
         if (snap.phase == PlaybackPhase.ENDED && snap.durationMs > 0L) {
@@ -178,8 +182,8 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
     val nearEnd by androidx.compose.runtime.remember(e) {
         androidx.compose.runtime.derivedStateOf { e.duration > 0 && e.duration - e.position <= 240.0 }
     }
-    LaunchedEffect(snap.isReady, e.anime.id, e.episode, ctl.persisted.settings.quality, nearEnd) {
-        if (snap.isReady && ctl.online) {
+    LaunchedEffect(snap.isReady, e.anime.id, e.episode, ctl.persisted.settings.quality, nearEnd, ctl.persisted.settings.autoplayNext) {
+        if (snap.isReady && ctl.online && (ctl.persisted.settings.autoplayNext != 0 || nearEnd)) {
             ctl.nextPlayableEpisode(e.anime, e.episode)?.let { nextEp ->
                 EngineRuntime.get(context.applicationContext).prefetchEpisode(
                     e.anime.title, e.anime.romaji, nextEp, ctl.persisted.settings.quality,

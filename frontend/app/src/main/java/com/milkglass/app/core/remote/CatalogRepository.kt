@@ -170,20 +170,26 @@ class CatalogRepository(
         if (snapFetch.body == null) {
             return if (snapFetch.httpCode == 404 || snapFetch.httpCode == 405) RefreshOutcome.Unsupported else failed(store, st, now)
         }
-        val resp = decodeSnapshot(snapFetch.body) ?: return failed(store, st, now)
+        val decoded = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val r = decodeSnapshot(snapFetch.body) ?: return@withContext null
+            r to r.data.map(RemoteMapper::toEntry)
+        } ?: return failed(store, st, now)
+        val (resp, entries) = decoded
         val complete = resp.meta.count in 1..resp.data.size
 
-        store.writeBody(snapFetch.body)
-        saveState(
-            store,
-            SnapshotState(
-                version = resp.meta.version ?: version,
-                fetchedAtMs = now,
-                validUntilMs = now + recheckMs,
-                complete = complete,
-            ),
-        )
-        return RefreshOutcome.Updated(resp.data.map(RemoteMapper::toEntry), complete)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            store.writeBody(snapFetch.body)
+            saveState(
+                store,
+                SnapshotState(
+                    version = resp.meta.version ?: version,
+                    fetchedAtMs = now,
+                    validUntilMs = now + recheckMs,
+                    complete = complete,
+                ),
+            )
+        }
+        return RefreshOutcome.Updated(entries, complete)
     }
 
     private fun failed(store: SnapshotStore, st: SnapshotState?, now: Long): RefreshOutcome {
