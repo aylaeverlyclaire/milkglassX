@@ -21,7 +21,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -36,7 +36,7 @@ jobs:
           yes | "$SDKM" --licenses > /dev/null 2>&1 || true
           "$SDKM" --install "platforms;android-35" "build-tools;34.0.0" "platform-tools" | tail -n 3
           echo "sdk.dir=$ANDROID_HOME" > local.properties
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Unduh font Roboto
         run: |
           D=app/src/main/res/font; mkdir -p "$D"
@@ -55,7 +55,7 @@ jobs:
             echo "::error title=apk::$MSG"
           fi
           exit $RC
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: milkglass-release-apk
           path: frontend/app/build/outputs/apk/release/*.apk
