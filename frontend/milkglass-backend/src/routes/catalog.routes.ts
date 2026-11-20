@@ -245,11 +245,13 @@ catalogRoutes.get(
       const target = new URL(c.req.url);
       target.search = `?v=${encodeURIComponent(version)}`;
       c.header('Cache-Control', 'no-store');
+      c.header('X-Milkglass-Source', 'D1');
       return c.redirect(target.toString(), 307);
     }
     if (total === 0) {
       c.header('X-Milkglass-NoCache', '1');
     }
+    c.header('X-Milkglass-Source', 'D1');
     const results = (batchRes[2]?.results ?? []) as Array<Record<string, unknown>>;
     const shaped = shapeRows(results);
     return c.json({
@@ -266,20 +268,53 @@ catalogRoutes.get(
   }
 );
 
-const emptyToUndefined = (v: unknown) => (v === '' || v === null ? undefined : v);
+const emptyToUndefined = (v: unknown) => {
+  if (v === null || v === undefined) return undefined;
+  if (typeof v === 'string') {
+    const t = v.trim();
+    return t === '' ? undefined : t;
+  }
+  return v;
+};
+
+const STATUS_NAME_MAP: Record<string, number> = {
+  RELEASING: 1,
+  FINISHED: 2,
+  NOT_YET_RELEASED: 3,
+  HIATUS: 4,
+  CANCELLED: 5,
+};
+
+const statusPreprocess = (v: unknown) => {
+  const cleaned = emptyToUndefined(v);
+  if (typeof cleaned === 'string') {
+    const mapped = STATUS_NAME_MAP[cleaned.toUpperCase()];
+    if (mapped !== undefined) return mapped;
+  }
+  return cleaned;
+};
+
+function buildFtsQuery(raw: string): string {
+  const tokens = raw
+    .trim()
+    .split(/[^a-zA-Z0-9]+/)
+    .filter((tok) => tok.length > 0);
+  const usable = tokens.length >= 2 ? tokens : tokens.filter((tok) => tok.length >= 2);
+  return usable.slice(0, 8).map((tok) => `"${tok}"*`).join(' ');
+}
 
 const browseQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),
   genre: z.string().trim().max(40).optional(),
-  status: z.preprocess(emptyToUndefined, z.coerce.number().int().min(1).max(5).optional()),
+  status: z.preprocess(statusPreprocess, z.coerce.number().int().min(1).max(5).optional()),
   schedule_day: z.preprocess(emptyToUndefined, z.coerce.number().int().min(0).max(7).optional()),
   page: z.preprocess(emptyToUndefined, z.coerce.number().int().min(1).max(100).default(1)),
 });
 
 catalogRoutes.get(
   '/browse',
-  rateLimit(40, 60),
   edgeCache(300, 600, true, { allowedQueryParams: ['q', 'genre', 'status', 'schedule_day', 'page'] }),
+  rateLimit(40, 60),
   zValidatorQuery(browseQuerySchema),
   async (c) => {
     const { q, genre, status, schedule_day, page } = c.req.valid('query');
@@ -289,11 +324,17 @@ catalogRoutes.get(
     const params: Array<string | number> = [];
 
     if (q && q.length > 0) {
-      const escapedQ = escapeSqlLike(q);
-      params.push(`%${escapedQ}%`);
-      conditions.push(
-        `(title LIKE ?${params.length} ESCAPE '\\' OR title_alt LIKE ?${params.length} ESCAPE '\\')`
-      );
+      const ftsQ = buildFtsQuery(q);
+      if (ftsQ.length > 0) {
+        params.push(ftsQ);
+        conditions.push(`id IN (SELECT rowid FROM animes_fts WHERE animes_fts MATCH ?${params.length})`);
+      } else {
+        const escapedQ = escapeSqlLike(q);
+        params.push(`%${escapedQ}%`);
+        conditions.push(
+          `(title LIKE ?${params.length} ESCAPE '\\' OR title_alt LIKE ?${params.length} ESCAPE '\\')`
+        );
+      }
     }
     if (genre && genre.length > 0) {
       const escapedGenre = escapeSqlLike(genre);
@@ -463,31 +504,26 @@ catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
 
 catalogRoutes.get(
   '/search',
-  rateLimit(30, 60),
   edgeCache(300, 600, true, { allowedQueryParams: ['q'] }),
+  rateLimit(30, 60),
   async (c) => {
-    const q = (c.req.query('q') || '').trim();
+    const q = (c.req.query('q') || '').trim().slice(0, 100);
     if (q.length < 2) {
-      return c.json({ status: 'ok', data: [], metadata: [], resolution_mode: 'CLIENT_CASCADE_MKV' });
+      return c.json({ status: 'ok', query: q, data: [], metadata: [], resolution_mode: 'CLIENT_CASCADE_MKV' });
     }
 
     const escapedQ = escapeSqlLike(q);
     const pattern = `%${escapedQ}%`;
-    const ftsQuery = q
-      .trim()
-      .split(/\s+/)
-      .map((tok) => tok.replace(/[^a-zA-Z0-9]/g, ''))
-      .filter((tok) => tok.length >= 2)
-      .map((tok) => `"${tok}"*`)
-      .join(' ');
+    const ftsQuery = buildFtsQuery(q);
     const queryD1Search = async () => {
       if (ftsQuery.length > 0) {
         try {
           return await readDb(c.env).prepare(
-            `SELECT ${LIST_COLUMNS}
-             FROM animes
-             WHERE id IN (SELECT rowid FROM animes_fts WHERE animes_fts MATCH ?1)
-             ORDER BY popularity DESC
+            `SELECT ${LIST_COLUMNS.split(',').map((col) => 'a.' + col.trim()).join(', ')}
+             FROM animes_fts
+             JOIN animes a ON a.id = animes_fts.rowid
+             WHERE animes_fts MATCH ?1
+             ORDER BY (bm25(animes_fts, 2.0, 1.0) - (2.0 * CAST(a.popularity AS REAL) / (CAST(a.popularity AS REAL) + 50000.0))) ASC, a.popularity DESC
              LIMIT 24`
           )
             .bind(ftsQuery)
@@ -505,16 +541,16 @@ catalogRoutes.get(
         .bind(pattern)
         .all<Record<string, unknown>>();
     };
-    const [d1Animes, anilistItems] = await Promise.all([
-      queryD1Search(),
-      searchAniListMetadata(q),
-    ]);
+    const d1Animes = await queryD1Search();
+    const d1Rows = d1Animes.results ?? [];
+    // Conditional AniList enrichment: skip slow external GraphQL round-trip when D1 already has >= 3 matches.
+    const anilistItems = d1Rows.length >= 3 ? [] : await searchAniListMetadata(q);
 
     return c.json({
       status: 'ok',
       query: q,
       resolution_mode: 'CLIENT_CASCADE_MKV',
-      data: shapeRows(d1Animes.results),
+      data: shapeRows(d1Rows),
       metadata: anilistItems,
     });
   }

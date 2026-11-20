@@ -5,6 +5,7 @@ export interface EdgeCacheOptions {
   allowedQueryParams?: string[];
   privateClientCache?: boolean;
   varyByAsn?: boolean;
+  normalizeTitleParam?: boolean;
 }
 
 const CORS_RESPONSE_HEADERS = [
@@ -30,11 +31,31 @@ function appendVaryOrigin(headers: Headers): void {
   }
   const parts = existing
     .split(',')
-    .map((p) => p.trim().toLowerCase())
+    .map((p) => p.trim())
     .filter(Boolean);
-  if (!parts.includes('origin')) {
-    headers.set('Vary', `${existing}, Origin`);
+  const seen = new Set(parts.map((p) => p.toLowerCase()));
+  if (!seen.has('origin')) {
+    parts.push('Origin');
   }
+  headers.set('Vary', parts.join(', '));
+}
+
+function stripVaryOrigin(headers: Headers): void {
+  const existing = headers.get('Vary');
+  if (!existing) return;
+  const remaining = existing
+    .split(',')
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0 && p.toLowerCase() !== 'origin');
+  if (remaining.length === 0) {
+    headers.delete('Vary');
+  } else {
+    headers.set('Vary', remaining.join(', '));
+  }
+}
+
+export function normalizeCacheTitle(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ').slice(0, 120);
 }
 
 async function weakEtag(body: string): Promise<string> {
@@ -53,12 +74,14 @@ function etagMatches(ifNoneMatch: string | undefined, etag: string | null): bool
   return ifNoneMatch.split(',').some((t) => strip(t) === want);
 }
 
-function notModified(etag: string, cacheControl: string | null): Response {
+function notModified(etag: string, cacheControl: string | null, varyHeader: string | null = null): Response {
   const h = new Headers({
     ETag: etag,
     'X-Milkglass-Cache': 'REVALIDATED',
-    Vary: 'Origin',
   });
+  if (varyHeader) h.set('Vary', varyHeader);
+  // Global cors() middleware appends Vary: Origin; strip Origin here to avoid "Origin, Origin".
+  stripVaryOrigin(h);
   if (cacheControl) h.set('Cache-Control', cacheControl);
   return new Response(null, { status: 304, headers: h });
 }
@@ -83,9 +106,15 @@ export function edgeCache(
     const normalizedUrl = new URL(c.req.url);
     if (allowedSet) {
       const filtered = new URLSearchParams();
-      for (const [key, value] of normalizedUrl.searchParams.entries()) {
+      for (const [key, rawValue] of normalizedUrl.searchParams.entries()) {
         if (allowedSet.has(key)) {
-          filtered.append(key, value);
+          const value =
+            options.normalizeTitleParam && key === 'title'
+              ? normalizeCacheTitle(rawValue)
+              : rawValue.trim();
+          if (value.length > 0) {
+            filtered.set(key, value);
+          }
         }
       }
       filtered.sort();
@@ -114,12 +143,14 @@ export function edgeCache(
       if (etagMatches(c.req.header('If-None-Match'), cachedResponse.headers.get('ETag'))) {
         return notModified(
           cachedResponse.headers.get('ETag') as string,
-          hitCacheControl
+          hitCacheControl,
+          cachedResponse.headers.get('Vary')
         );
       }
       const hitHeaders = new Headers(cachedResponse.headers);
       stripCorsHeaders(hitHeaders);
-      appendVaryOrigin(hitHeaders);
+      // Global cors() middleware appends Vary: Origin on exit; avoid duplicating "Origin, Origin".
+      stripVaryOrigin(hitHeaders);
       if (options.privateClientCache) {
         hitHeaders.set('Cache-Control', 'private, no-store');
       }
@@ -136,41 +167,52 @@ export function edgeCache(
     if (skipCache) {
       const h = new Headers(c.res.headers);
       h.delete('X-Milkglass-NoCache');
+      h.delete('X-Milkglass-ShortCache');
       h.set('Cache-Control', 'no-store');
       c.res = new Response(c.res.body, { status: c.res.status, headers: h });
       return;
     }
 
     if (c.res.status === 200) {
+      const shortCacheRaw = c.res.headers.get('X-Milkglass-ShortCache');
+      const shortCacheSec = shortCacheRaw !== null ? Number(shortCacheRaw) : NaN;
+      const hasShortCache = Number.isFinite(shortCacheSec) && shortCacheSec > 0;
+      const effectiveSMaxAge = hasShortCache
+        ? Math.min(sMaxAgeSeconds, Math.floor(shortCacheSec))
+        : sMaxAgeSeconds;
+      const effectiveSwr = hasShortCache ? 0 : staleWhileRevalidateSeconds;
+
       const bodyText = await c.res.text();
       const etag = await weakEtag(bodyText);
       const mutableHeaders = new Headers(c.res.headers);
-      const shortCacheSec = Number(c.res.headers.get('X-Milkglass-ShortCache') || '0');
       mutableHeaders.delete('X-Milkglass-ShortCache');
-      const edgeControl = shortCacheSec > 0
-        ? `public, s-maxage=${shortCacheSec}, stale-while-revalidate=${shortCacheSec}`
-        : options.immutable
-          ? `public, max-age=${sMaxAgeSeconds}, s-maxage=${sMaxAgeSeconds}, immutable`
-          : `public, s-maxage=${sMaxAgeSeconds}, stale-while-revalidate=${staleWhileRevalidateSeconds}`;
+      mutableHeaders.delete('X-Milkglass-NoCache');
+
+      const internalCacheControl =
+        options.immutable && !hasShortCache
+          ? `public, max-age=${effectiveSMaxAge}, s-maxage=${effectiveSMaxAge}, immutable`
+          : `public, s-maxage=${effectiveSMaxAge}, stale-while-revalidate=${effectiveSwr}`;
       const clientCacheControl = options.privateClientCache
         ? 'private, no-store'
-        : edgeControl;
+        : internalCacheControl;
 
       mutableHeaders.set('ETag', etag);
-      appendVaryOrigin(mutableHeaders);
       mutableHeaders.set('X-Milkglass-Cache', 'MISS');
 
       const cacheableHeaders = new Headers(mutableHeaders);
-      cacheableHeaders.set('Cache-Control', edgeControl);
+      appendVaryOrigin(cacheableHeaders);
+      cacheableHeaders.set('Cache-Control', internalCacheControl);
       stripCorsHeaders(cacheableHeaders);
 
+      // Global cors() middleware appends Vary: Origin on exit; avoid duplicating "Origin, Origin".
+      stripVaryOrigin(mutableHeaders);
       mutableHeaders.set('Cache-Control', clientCacheControl);
 
       c.executionCtx.waitUntil(
         cache.put(cacheKey, new Response(bodyText, { status: 200, headers: cacheableHeaders }))
       );
       c.res = etagMatches(c.req.header('If-None-Match'), etag)
-        ? notModified(etag, clientCacheControl)
+        ? notModified(etag, clientCacheControl, mutableHeaders.get('Vary'))
         : new Response(bodyText, { status: 200, headers: mutableHeaders });
     }
   };
@@ -213,7 +255,11 @@ export async function purgeSourcesCache(requestUrl: string): Promise<void> {
   try {
     const origin = new URL(requestUrl).origin;
     const cache = (caches as unknown as { default: Cache }).default;
-    await cache.delete(new Request(`${origin}/v1/catalog/sources`, { method: 'GET' }));
+    await Promise.all(
+      ['sources', 'rules'].map((name) =>
+        cache.delete(new Request(`${origin}/v1/catalog/${name}`, { method: 'GET' }))
+      )
+    );
   } catch {
   }
 }
@@ -225,11 +271,12 @@ export async function purgePlayResolveCache(
 ): Promise<void> {
   try {
     const origin = new URL(requestUrl).origin;
+    const cache = (caches as unknown as { default: Cache }).default;
+    const normTitle = normalizeCacheTitle(title);
     const u = new URL(`${origin}/v1/play/resolve`);
     u.searchParams.set('ep', String(ep));
-    u.searchParams.set('title', title);
+    u.searchParams.set('title', normTitle);
     u.searchParams.sort();
-    const cache = (caches as unknown as { default: Cache }).default;
     await cache.delete(new Request(u.toString(), { method: 'GET' }));
   } catch {
   }

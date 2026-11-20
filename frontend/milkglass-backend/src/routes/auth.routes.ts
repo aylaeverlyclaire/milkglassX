@@ -120,7 +120,7 @@ export async function verifyRequestProof(
   claims: VerifiedAccessClaims,
   jwtSecret: string | undefined
 ): Promise<boolean> {
-  if (!claims.sessionId) return true;
+  if (!claims.sessionId) return false;
   if (!tsHeader || !sigHeader) return false;
   const ts = Number(tsHeader);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -145,9 +145,9 @@ async function readUserEntitlement(
       .bind(userId)
       .first<{ entitlement?: string; entitlement_until?: number }>();
     const rawEnt = typeof row?.entitlement === 'string' ? row.entitlement : 'free';
-    const until = Number(row?.entitlement_until ?? 0);
-    if (rawEnt !== 'free' && until > nowSec) {
-      return { entitlement: rawEnt, entitlementUntil: until };
+    const rawUntil = row?.entitlement_until;
+    if (rawEnt !== 'free' && (rawUntil === null || rawUntil === undefined || Number(rawUntil) > nowSec)) {
+      return { entitlement: rawEnt, entitlementUntil: rawUntil == null ? 0 : Number(rawUntil) };
     }
   } catch {
   }

@@ -43,7 +43,7 @@ app.use(
     origin: (origin) => (origin && isAllowedOrigin(origin) ? origin : ''),
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Authorization', 'Content-Type', 'If-None-Match', 'X-Admin-Secret', 'X-Milkglass-Ts', 'X-Milkglass-Sig'],
-    exposeHeaders: ['X-Milkglass-Server-Sig', 'ETag', 'Retry-After', 'X-Milkglass-Cache'],
+    exposeHeaders: ['X-Milkglass-Server-Sig', 'X-Milkglass-Server-Time', 'ETag', 'Retry-After', 'X-Milkglass-Cache', 'X-Milkglass-Source'],
     maxAge: 600,
   })
 );
@@ -56,6 +56,9 @@ app.use('*', async (c, next) => {
     }
   }
   await next();
+  if (c.res.status === 401 && !c.res.headers.has('X-Milkglass-Server-Time')) {
+    c.header('X-Milkglass-Server-Time', String(Math.floor(Date.now() / 1000)));
+  }
   c.header('X-Content-Type-Options', 'nosniff');
   c.header('X-Frame-Options', 'DENY');
   c.header('Referrer-Policy', 'no-referrer');

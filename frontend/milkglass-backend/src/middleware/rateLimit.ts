@@ -5,8 +5,7 @@ export interface RateBucket {
   resetAt: number;
 }
 
-const isolateBuckets = new Map<string, RateBucket>();
-const MAX_BUCKETS = 5000;
+const DEFAULT_MAX_BUCKETS_PER_ROUTE = 1000;
 
 function evictBucketsIfNeeded(
   buckets: Map<string, RateBucket>,
@@ -81,14 +80,16 @@ export function normalizeClientIp(rawIp: string | undefined): string {
   return `${fullGroups.slice(0, 4).join(':')}::/64`;
 }
 
-export function rateLimit(maxRequests: number, windowSeconds: number) {
+export function rateLimit(maxRequests: number, windowSeconds: number, maxBuckets = DEFAULT_MAX_BUCKETS_PER_ROUTE) {
+  const routeBuckets = new Map<string, RateBucket>();
+
   return async (c: Context, next: Next) => {
     const rawIp = c.req.header('CF-Connecting-IP') || '0.0.0.0';
     const clientIp = normalizeClientIp(rawIp);
     const normalizedRoute = c.req.routePath || c.req.path;
     const routeKey = `${c.req.method}:${normalizedRoute}:${clientIp}`;
 
-    const quota = checkBoundedQuota(isolateBuckets, routeKey, maxRequests, windowSeconds, MAX_BUCKETS);
+    const quota = checkBoundedQuota(routeBuckets, routeKey, maxRequests, windowSeconds, maxBuckets);
     if (!quota.allowed) {
       c.header('Retry-After', String(quota.retryAfter));
       return c.json({ status: 'error', message: 'Server lagi sibuk.' }, 429);

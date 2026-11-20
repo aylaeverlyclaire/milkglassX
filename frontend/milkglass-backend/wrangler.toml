@@ -8,7 +8,7 @@ crons = ["*/15 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "milkglass_db"
-database_id = "e6256510-99d9-4899-b16e-c47249b9deca"
+database_id = "877e9cd1-0897-4766-8d1c-f1442a3c18ff"
 
 [vars]
 ENVIRONMENT = "production"
