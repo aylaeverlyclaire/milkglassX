@@ -82,8 +82,8 @@ fun SearchScreen(ctl: AppController) {
     LaunchedEffect(ctl.submittedQuery) {
         if (ctl.submittedQuery.isNotBlank()) {
             fm.clearFocus(); kb?.hide()
-            ctl.searchRemote(ctl.submittedQuery)
             ctl.searchUniversalIfNeeded(ctl.submittedQuery)
+            ctl.searchRemote(ctl.submittedQuery)
         }
     }
 
