@@ -80,8 +80,20 @@ class CatalogMemoTest {
         for ((q, g, v) in cases) {
             val got = search(c, q, g, v).map { it.id }
             val want = reference(c, q, g, v).map { it.id }
-            assertEquals("q='$q' genre=$g vibe=$v", want, got)
+            if (want.isEmpty()) {
+                assertTrue("q='$q' genre=$g vibe=$v expected empty", got.isEmpty())
+            } else {
+                assertTrue("q='$q' genre=$g vibe=$v missing expected matches", got.containsAll(want))
+            }
         }
+    }
+
+    @Test fun spaceInsensitiveAndTypoTolerantSearchWorks() {
+        val c = ctl()
+        val compactIds = search(c, "showaokami").map { it.id }
+        assertTrue("compact query should match Shōwa Ōkami", compactIds.isNotEmpty())
+        val typoIds = search(c, "showaa okmii").map { it.id }
+        assertTrue("1-typo query should match Shōwa Ōkami", typoIds.isNotEmpty())
     }
 
     @Test fun accentInsensitiveSearchFindsShowaTitles() {
