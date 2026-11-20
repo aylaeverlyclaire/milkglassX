@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS brave
+FROM python:3.14-slim AS brave
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
@@ -17,7 +17,7 @@ RUN mkdir -p /out/lib && find /opt/brave.com/brave/locales -type f ! -name 'en-U
        | xargs -n1 realpath | sort -u | xargs -I{} cp -L --parents {} /out/lib/ \
     && cp -a --parents /etc/fonts /usr/share/fonts/truetype/liberation /usr/share/fontconfig /usr/bin/tini /out/lib/
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY --from=brave /out/lib/ /
 COPY --from=brave /opt/brave.com/brave /opt/brave.com/brave
@@ -31,7 +31,7 @@ COPY tests/test-requirements.txt tests/
 RUN pip install -r server_requirements.txt \
     && if [ "$INSTALL_TEST_DEPS" = "1" ]; then pip install -r tests/test-requirements.txt; \
        else pip uninstall -y pip setuptools wheel; fi \
-    && find /usr/local/lib/python3.12 -name '__pycache__' -prune -exec rm -rf {} +
+    && find /usr/local/lib/python3.14 -name '__pycache__' -prune -exec rm -rf {} +
 COPY cf_handler cf_handler
 COPY server.py healthcheck.py ./
 RUN chown -R app:app /app

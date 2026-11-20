@@ -1,6 +1,7 @@
-fastapi>=0.68.0
-uvicorn>=0.15.0
-pydantic>=2.0.0
+fastapi>=0.115.0
+uvicorn>=0.34.0
+pydantic>=2.10.0
 DrissionPage>=4.1.1.4,<4.2
 python-socks[asyncio]>=2.5
-curl_cffi
+curl_cffi>=0.17.0
+beautifulsoup4>=4.12.0
