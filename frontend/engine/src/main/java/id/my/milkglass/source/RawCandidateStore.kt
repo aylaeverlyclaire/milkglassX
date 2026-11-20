@@ -68,6 +68,13 @@ class RawCandidateStore(context: Context?) {
         persistAsync()
     }
 
+    fun invalidate(key: String) {
+        ensureLoaded()
+        if (entries.remove(key) != null) {
+            persistAsync()
+        }
+    }
+
     fun clear() {
         synchronized(this) {
             loaded = true
@@ -84,8 +91,16 @@ class RawCandidateStore(context: Context?) {
                 entries.forEach { (k, e) ->
                     root.put(k, JSONObject().put("t", e.savedAtMs).put("l", encodeList(e.list)))
                 }
+                var payload = root.toString()
+                if (payload.length > MAX_FILE_BYTES) {
+                    val trimmed = JSONObject()
+                    entries.entries.sortedByDescending { it.value.savedAtMs }.take(MAX_ENTRIES / 2).forEach { (k, e) ->
+                        trimmed.put(k, JSONObject().put("t", e.savedAtMs).put("l", encodeList(e.list)))
+                    }
+                    payload = trimmed.toString()
+                }
                 val tmp = File(f.parentFile, f.name + ".tmp")
-                tmp.writeText(root.toString())
+                tmp.writeText(payload)
                 if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
             }
         }

@@ -39,6 +39,7 @@ class SourceAvailabilityIndex(
 
     @Volatile
     private var lastSyncedAtMs: Long = 0L
+    @Volatile private var syncedSourceCount: Int = 0
 
     private val diskLoaded = java.util.concurrent.CountDownLatch(1)
 
@@ -74,7 +75,8 @@ class SourceAvailabilityIndex(
     fun refreshIfNeeded(force: Boolean = false): Int {
         awaitDiskLoad()
         val now = System.currentTimeMillis()
-        if (!force && isReady && (now - lastSyncedAtMs) < INDEX_TTL_MS) {
+        val activeTtlMs = if (syncedSourceCount >= SourcePriority.entries.size) INDEX_TTL_MS else PARTIAL_INDEX_RETRY_MS
+        if (!force && isReady && (now - lastSyncedAtMs) < activeTtlMs) {
             return entries.size
         }
 
@@ -115,6 +117,7 @@ class SourceAvailabilityIndex(
             }
             if (merged.size >= MIN_VALID_ENTRIES) {
                 applyEntries(merged)
+                syncedSourceCount = merged.map { it.source }.toSet().size
                 lastSyncedAtMs = now
                 saveToDisk(merged, now)
             }
@@ -225,20 +228,30 @@ class SourceAvailabilityIndex(
 
     private fun fetchOploverzIndex(): List<IndexedAnimeEntry> {
         val base = baseUrlProvider(SourcePriority.OPLOVERZ).trimEnd('/')
+        val pagePool = Executors.newFixedThreadPool(4) { r ->
+            Thread(r, "milkglass-oplo-idx").apply { isDaemon = true }
+        }
         val out = mutableListOf<IndexedAnimeEntry>()
-        for (page in 1..4) {
-            val apiJson = fetchHtml("https://backapi.oploverz.ac/api/series?page=$page&pageSize=250", null) ?: break
-            val arr = runCatching { JSONObject(apiJson).optJSONArray("data") }.getOrNull() ?: break
-            if (arr.length() == 0) break
-            for (i in 0 until arr.length()) {
-                val obj = arr.optJSONObject(i) ?: continue
-                val title = obj.optString("title")
-                val slug = obj.optString("slug")
-                if (title.isNotBlank() && slug.isNotBlank()) {
-                    buildEntry(SourcePriority.OPLOVERZ, title, "$base/series/$slug")?.let { out.add(it) }
+        try {
+            val futs = (1..4).map { page ->
+                pagePool.submit<String?> {
+                    fetchHtml("https://backapi.oploverz.ac/api/series?page=$page&pageSize=250", null)
                 }
             }
-            if (arr.length() < 250) break
+            for (fut in futs) {
+                val apiJson = runCatching { fut.get(12, TimeUnit.SECONDS) }.getOrNull() ?: continue
+                val arr = runCatching { JSONObject(apiJson).optJSONArray("data") }.getOrNull() ?: continue
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val title = obj.optString("title")
+                    val slug = obj.optString("slug")
+                    if (title.isNotBlank() && slug.isNotBlank()) {
+                        buildEntry(SourcePriority.OPLOVERZ, title, "$base/series/$slug")?.let { out.add(it) }
+                    }
+                }
+            }
+        } finally {
+            pagePool.shutdownNow()
         }
         return out
     }
@@ -290,7 +303,7 @@ class SourceAvailabilityIndex(
         val p = prefs ?: return
         runCatching {
             val arr = JSONArray()
-            for (item in list.take(4000)) {
+            for (item in list.take(8000)) {
                 arr.put(
                     JSONObject()
                         .put("s", item.source.name)
@@ -320,6 +333,7 @@ class SourceAvailabilityIndex(
             }
             if (list.isNotEmpty()) {
                 applyEntries(list)
+                syncedSourceCount = list.map { it.source }.toSet().size
                 lastSyncedAtMs = ts
             }
         }
@@ -329,6 +343,7 @@ class SourceAvailabilityIndex(
         private val WHITESPACE = Regex("\\s+")
         private val NON_ALNUM = Regex("[^a-z0-9\\s]+")
         const val INDEX_TTL_MS = 12L * 60L * 60L * 1000L
+        const val PARTIAL_INDEX_RETRY_MS = 10L * 60L * 1000L
         const val MIN_VALID_ENTRIES = 15
     }
 }

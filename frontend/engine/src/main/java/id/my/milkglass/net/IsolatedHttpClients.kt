@@ -654,7 +654,7 @@ class IsolatedHttpClients(
         .followSslRedirects(true)
         .build()
 
-    private val baseMediaAndApiClient: OkHttpClient = OkHttpClient.Builder()
+    internal val baseMediaAndApiClient: OkHttpClient = OkHttpClient.Builder()
         .dns(guardedMediaDns)
         .dispatcher(sharedDispatcher)
         .connectionPool(sharedConnectionPool)

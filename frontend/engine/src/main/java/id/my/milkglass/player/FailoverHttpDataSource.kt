@@ -144,6 +144,9 @@ class FailoverHttpDataSource(
                 lastError = e
             } catch (e: IOException) {
                 runCatching { delegate.close() }
+                if (Thread.currentThread().isInterrupted || e.message.equals("Canceled", ignoreCase = true)) {
+                    throw e
+                }
                 EndpointHealthScorer.recordFailure(cand.hoster)
                 onCandidateFailure?.invoke(cand, 0)
                 lastError = e

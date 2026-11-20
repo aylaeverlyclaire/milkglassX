@@ -12,11 +12,13 @@ import id.my.milkglass.resolver.StreamResolver
 import id.my.milkglass.source.DeadCandidateCache
 import id.my.milkglass.source.MkvCascadeResolver
 import id.my.milkglass.source.RawCandidateStore
+import id.my.milkglass.source.RemoteRulesStore
 import id.my.milkglass.source.RawMkvCandidate
 import id.my.milkglass.source.SourceCircuitBreaker
 import id.my.milkglass.source.SourceAvailabilityIndex
 import id.my.milkglass.source.SourcePriority
 import id.my.milkglass.source.SourceSlugCache
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -208,41 +210,51 @@ class EngineRuntime private constructor(private val appContext: Context) {
         }
     )
 
-    val slugCache: SourceSlugCache = SourceSlugCache(appContext)
+    val slugCache: SourceSlugCache by lazy { SourceSlugCache(appContext) }
     val sourceConfig: SourceConfigStore = SourceConfigStore(appContext, clients)
+    val remoteRules: RemoteRulesStore by lazy { RemoteRulesStore(appContext, clients) }
 
-    val availabilityIndex: SourceAvailabilityIndex = SourceAvailabilityIndex(
-        context = appContext,
-        clients = clients,
-        slugCache = slugCache,
-        baseUrlProvider = { sourceConfig.baseUrlFor(it) }
-    )
+    private fun resolveSourceBaseUrl(source: SourcePriority): String =
+        remoteRules.baseUrlFor(source) ?: sourceConfig.baseUrlFor(source)
 
-    val rawCandidateStore: RawCandidateStore = RawCandidateStore(appContext)
+    val availabilityIndex: SourceAvailabilityIndex by lazy {
+        SourceAvailabilityIndex(
+            context = appContext,
+            clients = clients,
+            slugCache = slugCache,
+            baseUrlProvider = { resolveSourceBaseUrl(it) }
+        )
+    }
+
+    val rawCandidateStore: RawCandidateStore by lazy { RawCandidateStore(appContext) }
 
     /** Diisi setelah streamResolver dibuat (cascade dibuat lebih dulu). */
     @Volatile private var hintSink: ((String, List<RawMkvCandidate>) -> Unit)? = null
 
-    val cascadeResolver: MkvCascadeResolver = MkvCascadeResolver(
-        clients = clients,
-        slugCache = slugCache,
-        baseUrlProvider = { sourceConfig.baseUrlFor(it) },
-        indexLookup = { source, title -> availabilityIndex.lookupBestUrl(source, title) },
-        remoteHtmlFetcher = { url -> fetchRemoteHtml(url) },
-        onAllSourcesFailed = { triggerSourceConfigRecovery() },
-        rawStore = rawCandidateStore,
-        onEpisodeResolved = { key, list -> hintSink?.invoke(key, list) }
-    )
+    val cascadeResolver: MkvCascadeResolver by lazy {
+        MkvCascadeResolver(
+            clients = clients,
+            slugCache = slugCache,
+            baseUrlProvider = { resolveSourceBaseUrl(it) },
+            indexLookup = { source, title -> availabilityIndex.lookupBestUrl(source, title) },
+            remoteHtmlFetcher = { url -> fetchRemoteHtml(url) },
+            onAllSourcesFailed = { triggerSourceConfigRecovery() },
+            rawStore = rawCandidateStore,
+            onEpisodeResolved = { key, list -> hintSink?.invoke(key, list) }
+        )
+    }
 
-    val streamResolver: StreamResolver = StreamResolver(
-        context = appContext,
-        backendBaseUrl = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL,
-        clients = clients,
-        slugCache = slugCache,
-        hasAuthSession = { sessionStore.hasActiveSession() },
-        serverSignatureVerifier = { body, sig -> sessionStore.verifyServerSignature(body, sig) },
-        cascadeResolver = cascadeResolver
-    ).also { resolver -> hintSink = resolver::reportHint }
+    val streamResolver: StreamResolver by lazy {
+        StreamResolver(
+            context = appContext,
+            backendBaseUrl = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL,
+            clients = clients,
+            slugCache = slugCache,
+            hasAuthSession = { sessionStore.hasActiveSession() },
+            serverSignatureVerifier = { body, sig -> sessionStore.verifyServerSignature(body, sig) },
+            cascadeResolver = cascadeResolver
+        ).also { resolver -> hintSink = resolver::reportHint }
+    }
 
     val httpTextClient: EngineHttpTextClient = object : EngineHttpTextClient {
         private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -277,6 +289,7 @@ class EngineRuntime private constructor(private val appContext: Context) {
         lastForcedConfigRefreshMs = now
         backgroundScope.launch {
             runCatching { sourceConfig.refreshIfNeeded(force = true) }
+            runCatching { remoteRules.refreshIfNeeded(force = true) }
         }
     }
 
@@ -292,8 +305,8 @@ class EngineRuntime private constructor(private val appContext: Context) {
             .build()
 
         return runCatching {
-            clients.mediaAndApiClient.newCall(req).execute().use { resp ->
-                if (resp.code == 503) {
+            clients.cfSolverClient.newCall(req).execute().use { resp ->
+                if (resp.code == 503 || resp.code == 429) {
                     remoteCfDisabledUntilMs = System.currentTimeMillis() + 5L * 60L * 1000L
                     return@use null
                 }
@@ -319,8 +332,8 @@ class EngineRuntime private constructor(private val appContext: Context) {
             .build()
 
         return runCatching {
-            clients.mediaAndApiClient.newCall(req).execute().use { resp ->
-                if (resp.code == 503) {
+            clients.cfSolverClient.newCall(req).execute().use { resp ->
+                if (resp.code == 503 || resp.code == 429) {
                     remoteCfDisabledUntilMs = System.currentTimeMillis() + 5L * 60L * 1000L
                     return@use null
                 }
@@ -343,7 +356,7 @@ class EngineRuntime private constructor(private val appContext: Context) {
                     .url("${MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL}/v1/health")
                     .head()
                     .build()
-                clients.mediaAndApiClient.newCall(req).execute().use { }
+                clients.baseMediaAndApiClient.newCall(req).execute().use { }
             }
         }
     }
@@ -355,6 +368,7 @@ class EngineRuntime private constructor(private val appContext: Context) {
         prewarmCloudflareEdge()
         backgroundScope.launch {
             runCatching { sourceConfig.refreshIfNeeded() }
+            runCatching { remoteRules.refreshIfNeeded() }
             if (!availabilityIndex.isReady) {
                 val count = runCatching { availabilityIndex.refreshIfNeeded() }.getOrDefault(0)
                 if (count > 0) onIndexUpdated?.invoke()
@@ -387,9 +401,9 @@ class EngineRuntime private constructor(private val appContext: Context) {
         if (episode <= 0) return
         val searchTitle = romajiTitle.ifBlank { title }.trim()
         if (searchTitle.length < 2) return
-        val key = "${searchTitle.lowercase(Locale.ROOT)}#$episode"
-        if (!inFlightPrefetches.add(key)) return
+        val key = "${searchTitle.lowercase(Locale.ROOT)}#$episode#${preferredRes.lowercase(Locale.ROOT)}#$prebuffer"
         latestPrefetchKey = key
+        if (!inFlightPrefetches.add(key)) return
         backgroundScope.launch {
             var held = false
             try {
@@ -409,6 +423,8 @@ class EngineRuntime private constructor(private val appContext: Context) {
                         PlayerManager.prebufferEpisode(appContext, cachedSession, slug)
                     }
                 }
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (_: Throwable) {
             } finally {
                 if (held) prefetchGate.release()

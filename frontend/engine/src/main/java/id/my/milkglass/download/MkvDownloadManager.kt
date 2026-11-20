@@ -418,7 +418,7 @@ class MkvDownloadWorker(
                         reqBuilder.header("Range", "bytes=$existingBytes-")
                     }
 
-                    val status = clients.mediaAndApiClient.newCall(reqBuilder.build()).execute().use { resp ->
+                    val status = clients.streamingClient.newCall(reqBuilder.build()).execute().use { resp ->
                         if (resp.code == 416) {
                             partFile.delete()
                             return@use CandidateDownloadStatus.FAILED_RETRYABLE
