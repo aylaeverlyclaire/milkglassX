@@ -60,7 +60,7 @@ class RawCandidateStore(context: Context?) {
         ensureLoaded()
         val prev = entries[key]
         // Hindari tulis disk berulang untuk data yang sama dalam 10 menit.
-        if (prev != null && nowMs - prev.savedAtMs < 10L * 60_000L && prev.list.size == list.size) return
+        if (prev != null && nowMs - prev.savedAtMs < 10L * 60_000L && prev.list == list) return
         entries[key] = Entry(nowMs, list)
         if (entries.size > MAX_ENTRIES) {
             entries.entries.sortedBy { it.value.savedAtMs }.take(entries.size - MAX_ENTRIES).forEach { entries.remove(it.key) }
@@ -69,7 +69,10 @@ class RawCandidateStore(context: Context?) {
     }
 
     fun clear() {
-        entries.clear()
+        synchronized(this) {
+            loaded = true
+            entries.clear()
+        }
         persistAsync()
     }
 
