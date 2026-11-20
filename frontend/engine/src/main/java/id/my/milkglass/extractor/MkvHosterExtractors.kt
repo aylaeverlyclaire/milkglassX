@@ -37,7 +37,7 @@ object HosterFilter {
         "pixeldrain", "pdrain", "gofile", "buzzheavier", "filedon", "odfiles",
         "gdrive", "drive.google", "qiwi", "mediafire", "kuramadrive",
         "icefile.web.id", "odstream", "ondesu", "desustream", "blogger", "streamruby",
-        "vidhide", "filemoon", "mixdrop", "streamtape", "dood", "krakenfiles", "kfiles"
+        "vidhide", "vidhidepre", "yourupload", "berkasdrive", "mitedrive", "short.ink", "filemoon", "mixdrop", "streamtape", "dood", "krakenfiles", "kfiles"
     )
 
     fun isBlacklisted(hosterLabel: String, url: String): Boolean {

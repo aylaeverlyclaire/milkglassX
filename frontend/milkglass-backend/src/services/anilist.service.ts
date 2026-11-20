@@ -48,6 +48,7 @@ export interface AniListSearchMetadata {
 }
 
 export interface SourceBaseUrls {
+  animasu: string;
   otakudesu: string;
   samehadaku: string;
   nontonanimeid: string;
@@ -56,6 +57,7 @@ export interface SourceBaseUrls {
 }
 
 export const DEFAULT_SOURCE_BASE_URLS: Readonly<SourceBaseUrls> = {
+  animasu: 'https://animasu.love',
   otakudesu: 'https://otakudesu.blog',
   samehadaku: 'https://v2.samehadaku.how',
   nontonanimeid: 'https://nontonanimeid.stream',
@@ -487,14 +489,15 @@ export async function getSourceBaseUrls(db: D1ReadClient): Promise<SourceBaseUrl
     const { results } = await db
       .prepare(
         `SELECT key, value FROM catalog_meta
-         WHERE key IN ('otakudesu_base_url', 'samehadaku_base_url', 'nontonanimeid_base_url', 'oploverz_base_url', 'kusonime_base_url')`
+         WHERE key IN ('animasu_base_url', 'otakudesu_base_url', 'samehadaku_base_url', 'nontonanimeid_base_url', 'oploverz_base_url', 'kusonime_base_url')`
       )
       .all<{ key: string; value: string }>();
 
     for (const row of results ?? []) {
       const clean = (row.value || '').trim().replace(/\/+$/, '');
       if (!clean.startsWith('https://')) continue;
-      if (row.key === 'otakudesu_base_url') resolved.otakudesu = clean;
+      if (row.key === 'animasu_base_url') resolved.animasu = clean;
+      else if (row.key === 'otakudesu_base_url') resolved.otakudesu = clean;
       else if (row.key === 'samehadaku_base_url') resolved.samehadaku = clean;
       else if (row.key === 'nontonanimeid_base_url') resolved.nontonanimeid = clean;
       else if (row.key === 'oploverz_base_url') resolved.oploverz = clean;

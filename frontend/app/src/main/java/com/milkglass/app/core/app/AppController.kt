@@ -121,6 +121,7 @@ class AppController(
     private val firstCatalogLoad = kotlinx.coroutines.CompletableDeferred<Unit>().also { if (initialCatalog != null || catalogRepo == null) it.complete(Unit) }
     private var lastRefreshFailed = false
     private val searchedQueries = HashSet<String>()
+    private var animasuSearchResults by mutableStateOf<Map<String, List<Anime>>>(emptyMap())
 
     /**
      * Hasil cek ketersediaan per anime. Dihitung di thread latar (pencocokan judul mahal) dan
@@ -317,12 +318,14 @@ class AppController(
         val repo = catalogRepo ?: return
         val query = q.trim()
         if (query.length < 2) return
-        val key = "xdcc:${query.lowercase()}"
+        val normKey = normalizeText(query)
+        val key = "animasu:$normKey"
         if (key in searchedQueries) return
         searchedQueries.add(key)
         val universal = repo.searchUniversal(query)
         if (universal.isNotEmpty()) {
             mergeRemote(universal)
+            animasuSearchResults = animasuSearchResults + (normKey to universal.map { it.anime })
         }
     }
 
@@ -620,8 +623,11 @@ class AppController(
         val qCompact = q.replace(" ", "")
         val genre = searchGenre
         val vibe = searchVibe
-        searchMemoKey?.let { k ->
-            if (k.catalog === cat && k.q == q && k.genre == genre && k.vibe == vibe) return searchMemo
+        val directAnimasu = if (q.isNotEmpty()) animasuSearchResults[q] else null
+        if (directAnimasu.isNullOrEmpty()) {
+            searchMemoKey?.let { k ->
+                if (k.catalog === cat && k.q == q && k.genre == genre && k.vibe == vibe) return searchMemo
+            }
         }
         val idx = searchIndex
         val scored = cat.mapNotNull { a ->
@@ -632,12 +638,24 @@ class AppController(
             if (qCompact.isNotEmpty() && sc <= 0) return@mapNotNull null
             a to sc
         }
-        val out = scored.sortedWith { (a, sa), (b, sb) ->
+        val localSorted = scored.sortedWith { (a, sa), (b, sb) ->
             if (sa != sb) sb.compareTo(sa) else b.rating.compareTo(a.rating)
         }.map { it.first }
-        searchMemo = out
+        if (!directAnimasu.isNullOrEmpty()) {
+            val primary = directAnimasu.filter { a ->
+                (genre == "all" || a.genres.isEmpty() || a.genres.contains(genre)) &&
+                    (vibe == "all" || a.genres.isEmpty() || vibesOf(a.genres).contains(vibe))
+            }
+            val seenIds = primary.mapTo(HashSet()) { it.id }
+            val seenTitles = primary.mapTo(HashSet()) { normalizeText(it.title) }
+            val secondary = localSorted.filter { a ->
+                a.id !in seenIds && normalizeText(a.title) !in seenTitles
+            }
+            return primary + secondary
+        }
+        searchMemo = localSorted
         searchMemoKey = SearchKey(cat, q, genre, vibe)
-        return out
+        return localSorted
     }
 
     fun showToast(text: String, ms: Long = 2600, actionLabel: String? = null, onAction: (() -> Unit)? = null) {

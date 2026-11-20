@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, Query, Depends
 
 from cf_handler.core.handler import CFhandler
 from cf_handler.core.resolver import resolve_split_plane
+from cf_handler.core.animasu import search_animasu, DEFAULT_ANIMASU_BASE_URL
 from cf_handler.core.mirror import RequestMirror
 from cf_handler.server.models import (
     BrowserPoolResponse, CookieResponse, CacheStatsResponse, CacheClearResponse, ErrorResponse,
@@ -382,17 +383,30 @@ def setup_routes(app: FastAPI):
             logger.error(f"Error solving Turnstile for {url}: {e}")
             raise HTTPException(status_code=500, detail="Internal server error")
 
+    @app.get("/search/animasu")
+    async def animasu_search_endpoint(
+        q: str = Query(..., min_length=2, max_length=120),
+        base_url: str = Query(DEFAULT_ANIMASU_BASE_URL),
+        handler: CFhandler = Depends(get_handler),
+    ):
+        if not is_safe_url(base_url):
+            raise HTTPException(status_code=400, detail="Invalid or unsafe base_url")
+        items = await search_animasu(q, base_url=base_url, cf_handler=handler)
+        return {"status": "ok", "source": "animasu", "query": q, "items": items}
+
     @app.get("/resolve")
     async def resolve_episode(
         title: str = Query(..., min_length=2, max_length=160),
         ep: int = Query(..., ge=1, le=2000),
         quality: str = Query("1080p"),
+        animasu: str = Query(DEFAULT_ANIMASU_BASE_URL),
         otakudesu: str = Query("https://otakudesu.blog"),
         samehadaku: str = Query("https://v2.samehadaku.how"),
         oploverz: str = Query("https://oploverz.ch"),
         handler: CFhandler = Depends(get_handler),
     ):
         source_urls = {
+            "animasu": animasu,
             "otakudesu": otakudesu,
             "samehadaku": samehadaku,
             "oploverz": oploverz,
