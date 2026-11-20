@@ -1,34 +1,45 @@
 import { Hono } from 'hono';
-import { zValidator } from '@hono/zod-validator';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { z } from 'zod';
 import { edgeCache } from '../middleware/edgeCache';
-import { rateLimit } from '../middleware/rateLimit';
+import { checkBoundedQuota, rateLimit, RateBucket } from '../middleware/rateLimit';
+import { zValidatorQuery } from '../middleware/validator';
 import { getSourceBaseUrls } from '../services/anilist.service';
-import { deriveSessionProofKey, hmacSha256Hex, verifyAccessTokenClaims, verifyRequestProof, VerifiedAccessClaims } from './auth.routes';
+import { isSafePublicHttpsUrl } from '../utils/urlSecurity';
+import {
+  deriveSessionProofKey,
+  hmacSha256Hex,
+  verifyAccessTokenClaims,
+  verifyRequestProof,
+  VerifiedAccessClaims,
+} from './auth.routes';
 import { AppBindings } from '../index';
 
 export const cfRoutes = new Hono<{ Bindings: AppBindings }>();
 
-const userCfBuckets = new Map<string, { count: number; resetAt: number }>();
+const userCfBuckets = new Map<string, RateBucket>();
 
-function checkUserCfQuota(userId: string, maxPerMin: number): boolean {
-  const now = Math.floor(Date.now() / 1000);
-  const b = userCfBuckets.get(userId);
-  if (!b || b.resetAt <= now) {
-    if (userCfBuckets.size > 2000) userCfBuckets.clear();
-    userCfBuckets.set(userId, { count: 1, resetAt: now + 60 });
-    return true;
-  }
-  b.count += 1;
-  return b.count <= maxPerMin;
+function checkUserCfQuota(userId: string, maxPerMin: number): { allowed: boolean; retryAfter: number } {
+  return checkBoundedQuota(userCfBuckets, userId, maxPerMin, 60, 2000);
 }
 
 async function enforceCfAuth(
-  c: { req: { method: string; url: string; header: (name: string) => string | undefined }; env: AppBindings; header: (k: string, v: string) => void; json: (body: unknown, status?: number) => Response },
+  c: {
+    req: { method: string; url: string; header: (name: string) => string | undefined };
+    env: AppBindings;
+    header: (k: string, v: string) => void;
+    json: (body: unknown, status?: ContentfulStatusCode) => Response;
+  },
   maxPerMin: number
 ): Promise<{ blocked: Response | null; claims: VerifiedAccessClaims | null }> {
-  if (c.env.CF_REQUIRE_AUTH === 'false') return { blocked: null, claims: null };
-  if (!c.env.JWT_SECRET || c.env.JWT_SECRET.trim().length < 32) return { blocked: null, claims: null };
+  if (c.env.CF_REQUIRE_AUTH === 'false' && (c.env as any).ENVIRONMENT !== 'production') return { blocked: null, claims: null };
+  if (!c.env.JWT_SECRET || c.env.JWT_SECRET.trim().length < 32) {
+    c.header('X-Milkglass-NoCache', '1');
+    return {
+      blocked: c.json({ status: 'error', message: 'Konfigurasi autentikasi server belum siap.' }, 503),
+      claims: null,
+    };
+  }
   const auth = c.req.header('Authorization') || '';
   if (!auth.startsWith('Bearer ')) {
     c.header('X-Milkglass-NoCache', '1');
@@ -49,12 +60,19 @@ async function enforceCfAuth(
   );
   if (!proofOk) {
     c.header('X-Milkglass-NoCache', '1');
-    return { blocked: c.json({ status: 'error', message: 'Tanda tangan permintaan tidak valid.' }, 401), claims: null };
+    return {
+      blocked: c.json({ status: 'error', message: 'Tanda tangan permintaan tidak valid.' }, 401),
+      claims: null,
+    };
   }
-  if (!checkUserCfQuota(claims.userId, maxPerMin)) {
+  const quota = checkUserCfQuota(claims.userId, maxPerMin);
+  if (!quota.allowed) {
     c.header('X-Milkglass-NoCache', '1');
-    c.header('Retry-After', '60');
-    return { blocked: c.json({ status: 'error', message: 'Batas permintaan akun tercapai.' }, 429), claims: null };
+    c.header('Retry-After', String(quota.retryAfter));
+    return {
+      blocked: c.json({ status: 'error', message: 'Batas permintaan akun tercapai.' }, 429),
+      claims: null,
+    };
   }
   return { blocked: null, claims };
 }
@@ -105,27 +123,6 @@ const ALLOWED_HOST_SUFFIXES = [
   'streamwish.to',
 ];
 
-function isSafePublicHttpsUrl(rawUrl: string): URL | null {
-  try {
-    const u = new URL(rawUrl);
-    if (u.protocol !== 'https:') return null;
-    if (u.username || u.password) return null;
-    const host = u.hostname.toLowerCase();
-    if (
-      !host ||
-      host === 'localhost' ||
-      host.endsWith('.local') ||
-      host.includes(':') ||
-      /^(127\.|10\.|192\.168\.|169\.254\.|0\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)/.test(host)
-    ) {
-      return null;
-    }
-    return u;
-  } catch {
-    return null;
-  }
-}
-
 async function isAllowedCfHost(db: D1Database, host: string): Promise<boolean> {
   const h = host.toLowerCase();
   if (ALLOWED_HOST_SUFFIXES.some((s) => h === s || h.endsWith(`.${s}`))) {
@@ -134,12 +131,11 @@ async function isAllowedCfHost(db: D1Database, host: string): Promise<boolean> {
   try {
     const dynamicSources = await getSourceBaseUrls(db);
     for (const baseUrl of Object.values(dynamicSources)) {
-      try {
-        const srcHost = new URL(baseUrl).hostname.toLowerCase();
-        if (srcHost && (h === srcHost || h.endsWith(`.${srcHost}`))) {
-          return true;
-        }
-      } catch {
+      const safe = isSafePublicHttpsUrl(baseUrl);
+      if (!safe) continue;
+      const srcHost = safe.hostname.toLowerCase();
+      if (srcHost && (h === srcHost || h.endsWith(`.${srcHost}`))) {
+        return true;
       }
     }
   } catch {
@@ -177,8 +173,8 @@ cfRoutes.get(
     await next();
     c.res = await attachServerSignature(c.res, claims, c.env.JWT_SECRET);
   },
-  edgeCache(900, 120, true),
-  zValidator('query', targetUrlQuerySchema),
+  edgeCache(900, 120, true, { allowedQueryParams: ['url'], privateClientCache: true }),
+  zValidatorQuery(targetUrlQuerySchema),
   async (c) => {
     const handlerBase = (c.env.CF_HANDLER_URL || '').trim().replace(/\/+$/, '');
     if (!handlerBase.startsWith('http://') && !handlerBase.startsWith('https://')) {
@@ -216,15 +212,18 @@ cfRoutes.get(
         {
           method: 'GET',
           headers,
-          signal: AbortSignal.timeout(30_000),
+          redirect: 'error',
+          signal: AbortSignal.timeout(12_000),
         }
       );
 
       if (!upstream.ok) {
+        await upstream.body?.cancel().catch(() => {});
         c.header('X-Milkglass-NoCache', '1');
+        const statusOut = [429, 502, 503, 504].includes(upstream.status) ? 503 : 502;
         return c.json(
           { status: 'error', message: `CF handler gagal (HTTP ${upstream.status}).` },
-          502
+          statusOut
         );
       }
 
@@ -233,7 +232,7 @@ cfRoutes.get(
         user_agent?: string;
       };
 
-      if (!payload || !payload.cookies || !payload.user_agent) {
+      if (!payload || !payload.cookies || Object.keys(payload.cookies).length === 0 || !payload.user_agent) {
         c.header('X-Milkglass-NoCache', '1');
         return c.json(
           { status: 'error', message: 'Respons CF handler tidak lengkap.' },
@@ -268,8 +267,8 @@ cfRoutes.get(
     await next();
     c.res = await attachServerSignature(c.res, claims, c.env.JWT_SECRET);
   },
-  edgeCache(300, 60, true),
-  zValidator('query', targetUrlQuerySchema),
+  edgeCache(300, 60, true, { allowedQueryParams: ['url'], privateClientCache: true }),
+  zValidatorQuery(targetUrlQuerySchema),
   async (c) => {
     const handlerBase = (c.env.CF_HANDLER_URL || '').trim().replace(/\/+$/, '');
     if (!handlerBase.startsWith('http://') && !handlerBase.startsWith('https://')) {
@@ -306,16 +305,29 @@ cfRoutes.get(
         {
           method: 'GET',
           headers,
-          signal: AbortSignal.timeout(35_000),
+          redirect: 'error',
+          signal: AbortSignal.timeout(15_000),
         }
       );
 
       if (!upstream.ok) {
+        await upstream.body?.cancel().catch(() => {});
         c.header('X-Milkglass-NoCache', '1');
+        const statusOut = [429, 502, 503, 504].includes(upstream.status) ? 503 : 502;
         return c.json(
           { status: 'error', message: `CF HTML handler gagal (HTTP ${upstream.status}).` },
-          502
+          statusOut
         );
+      }
+
+      const finalUrlHeader = upstream.headers.get('x-cf-handler-final-url');
+      if (finalUrlHeader) {
+        const finalParsed = isSafePublicHttpsUrl(finalUrlHeader);
+        if (!finalParsed || !(await isAllowedCfHost(c.env.DB, finalParsed.hostname))) {
+          await upstream.body?.cancel().catch(() => {});
+          c.header('X-Milkglass-NoCache', '1');
+          return c.json({ status: 'error', message: 'Redirect akhir CF handler tidak diizinkan.' }, 502);
+        }
       }
 
       const html = await upstream.text();

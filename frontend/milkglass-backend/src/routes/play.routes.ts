@@ -1,26 +1,20 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
-import { edgeCache, purgePlayResolveCache } from '../middleware/edgeCache';
-import { rateLimit } from '../middleware/rateLimit';
+import { edgeCache } from '../middleware/edgeCache';
+import { checkBoundedQuota, rateLimit, RateBucket } from '../middleware/rateLimit';
+import { isSafePublicHttpsUrl } from '../utils/urlSecurity';
 import { getSourceBaseUrls } from '../services/anilist.service';
 import { deriveSessionProofKey, hmacSha256Hex, verifyAccessTokenClaims, verifyRequestProof, VerifiedAccessClaims } from './auth.routes';
 import { AppBindings } from '../index';
+import { D1ReadClient, readDb } from '../utils/db';
 
 export const playRoutes = new Hono<{ Bindings: AppBindings }>();
 
-const userPlayBuckets = new Map<string, { count: number; resetAt: number }>();
+const userPlayBuckets = new Map<string, RateBucket>();
 
 function checkUserPlayQuota(userId: string, maxPerMin: number): boolean {
-  const now = Math.floor(Date.now() / 1000);
-  const b = userPlayBuckets.get(userId);
-  if (!b || b.resetAt <= now) {
-    if (userPlayBuckets.size > 2000) userPlayBuckets.clear();
-    userPlayBuckets.set(userId, { count: 1, resetAt: now + 60 });
-    return true;
-  }
-  b.count += 1;
-  return b.count <= maxPerMin;
+  return checkBoundedQuota(userPlayBuckets, userId, maxPerMin, 60, 2000).allowed;
 }
 
 
@@ -32,30 +26,50 @@ function checkUserPlayQuota(userId: string, maxPerMin: number): boolean {
 const HINT_MAX_AGE_SEC = 12 * 3600;
 const HINT_REFRESH_AFTER_SEC = 20 * 60;
 const HINT_MAX_CANDIDATES = 8;
-const HOSTER_TOKENS = [
-  'pixeldrain', 'pdrain', 'filedon', 'odfiles', 'buzzheavier', 'qiwi', 'mediafire', 'gofile',
-  'krakenfiles', 'kfiles', 'acefile', 'desustream', 'ondesu', 'wibufile', 'uqni', 'mp4upload',
+const IP_AGNOSTIC_HOSTER_DOMAINS = [
+  'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
+  'filedon.co', 'odfiles.com', 'buzzheavier.com', 'qiwi.gg', 'spyderrock.com',
+  'mediafire.com', 'krakenfiles.com', 'kfiles.io', 'wibufile.com', 'uqni.net',
 ];
+const IP_LOCKED_HOSTER_DOMAINS = [
+  'gofile.io', 'acefile.co', 'desustream.info', 'desustream.com', 'ondesu.com', 'mp4upload.com',
+];
+const ALL_HOSTER_DOMAINS = [...IP_AGNOSTIC_HOSTER_DOMAINS, ...IP_LOCKED_HOSTER_DOMAINS];
 
-function isPublicHttpsUrl(raw: string): URL | null {
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== 'https:' || u.username || u.password) return null;
-    if (u.port && u.port !== '443') return null;
-    const h = u.hostname.toLowerCase();
-    if (!h.includes('.') || h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal')) return null;
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(':')) return null;
-    return u;
-  } catch {
-    return null;
-  }
+function matchesDomainList(host: string, domains: readonly string[]): boolean {
+  const h = host.toLowerCase();
+  return domains.some((d) => h === d || h.endsWith('.' + d));
 }
 
-function isKnownHosterUrl(raw: string): boolean {
-  const u = isPublicHttpsUrl(raw);
+function isPublicHttpsUrl(raw: string): URL | null {
+  return isSafePublicHttpsUrl(raw);
+}
+
+export function isKnownHosterUrl(raw: string): boolean {
+  const u = isSafePublicHttpsUrl(raw);
   if (!u) return false;
-  const h = u.hostname.toLowerCase();
-  return HOSTER_TOKENS.some((t) => h.includes(t));
+  return matchesDomainList(u.hostname, ALL_HOSTER_DOMAINS);
+}
+
+let cfHandlerFailures = 0;
+let cfHandlerCircuitOpenUntil = 0;
+
+async function purgePlayResolveCache(requestUrl: string, title: string, ep: number): Promise<void> {
+  try {
+    const cache = (caches as unknown as { default: Cache }).default;
+    const base = new URL(requestUrl);
+    const qualities = ['1080p', '720p', '480p', '360p'];
+    await Promise.all(
+      qualities.map((q) => {
+        const u = new URL('/v1/play/resolve', base.origin);
+        u.searchParams.set('ep', String(ep));
+        // q excluded from /resolve cache key
+        u.searchParams.set('title', title);
+        return cache.delete(new Request(u.toString(), { method: 'GET' }));
+      })
+    );
+  } catch {
+  }
 }
 
 export function hintKey(title: string, ep: number): string {
@@ -83,8 +97,12 @@ const hintBodySchema = z.object({
 type StoredHint = { source: string; quality: string; hoster: string; raw_url: string; referer?: string };
 
 async function requireVerifiedUser(c: any): Promise<{ claims: VerifiedAccessClaims | null; deny: Response | null }> {
-  if (c.env.CF_REQUIRE_AUTH === 'false' || !c.env.JWT_SECRET || c.env.JWT_SECRET.trim().length < 32) {
+  if (c.env.CF_REQUIRE_AUTH === 'false' && c.env.ENVIRONMENT !== 'production') {
     return { claims: null, deny: null };
+  }
+  if (!c.env.JWT_SECRET || c.env.JWT_SECRET.trim().length < 32) {
+    c.header('X-Milkglass-NoCache', '1');
+    return { claims: null, deny: c.json({ status: 'error', message: 'Konfigurasi autentikasi server belum siap.' }, 503) as Response };
   }
   const auth = c.req.header('Authorization') || '';
   const deny = (status: 401 | 429, message: string) => {
@@ -126,19 +144,23 @@ playRoutes.post('/hint', rateLimit(20, 60), zValidator('json', hintBodySchema), 
 
   const key = hintKey(title, ep);
   const now = Math.floor(Date.now() / 1000);
-  const res = await c.env.DB.prepare(
-    `INSERT INTO play_hints (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
-     ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1
-     WHERE (?3 - play_hints.updated_at) >= ?4`
-  ).bind(key, JSON.stringify(clean), now, HINT_REFRESH_AFTER_SEC).run();
-  const stored = (res.meta?.changes ?? 0) > 0;
-  if (stored) {
+  try {
+    const existing = await c.env.DB.prepare('SELECT updated_at FROM play_hints WHERE key = ?1').bind(key).first<{ updated_at: number }>();
+    if (existing && now - existing.updated_at < HINT_REFRESH_AFTER_SEC) {
+      return c.json({ status: 'ok', stored: false, fresh: true });
+    }
+    await c.env.DB.prepare(
+      `INSERT INTO play_hints (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
+       ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1`
+    ).bind(key, JSON.stringify(clean), now).run();
     c.executionCtx.waitUntil(purgePlayResolveCache(c.req.url, title, ep));
+    return c.json({ status: 'ok', stored: true });
+  } catch {
+    return c.json({ status: 'ok', stored: false, degraded: true });
   }
-  return c.json({ status: 'ok', stored, fresh: !stored });
 });
 
-async function lookupHint(db: D1Database, title: string, ep: number): Promise<StoredHint[] | null> {
+async function lookupHint(db: D1ReadClient, title: string, ep: number): Promise<StoredHint[] | null> {
   try {
     const row = await db
       .prepare('SELECT payload, updated_at FROM play_hints WHERE key = ?1')
@@ -194,13 +216,10 @@ type StoredDirect = {
   is_hls: boolean;
 };
 
-function isAcceptableDirect(c: { hoster: string; direct_url: string }): boolean {
-  const u = isPublicHttpsUrl(c.direct_url);
+export function isAcceptableDirect(c: { hoster: string; direct_url: string }): boolean {
+  const u = isSafePublicHttpsUrl(c.direct_url);
   if (!u) return false;
-  // Hanya hoster dikenal (lewat label atau host), supaya klien tak bisa menyuntik URL sembarang ke pengguna lain.
-  const label = c.hoster.toLowerCase();
-  const host = u.hostname.toLowerCase();
-  return HOSTER_TOKENS.some((t) => label.includes(t) || host.includes(t));
+  return matchesDomainList(u.hostname, IP_AGNOSTIC_HOSTER_DOMAINS);
 }
 
 playRoutes.post('/direct', rateLimit(20, 60), zValidator('json', directBodySchema), async (c) => {
@@ -228,19 +247,24 @@ playRoutes.post('/direct', rateLimit(20, 60), zValidator('json', directBodySchem
 
   const key = hintKey(title, ep);
   const now = Math.floor(Date.now() / 1000);
-  const res = await c.env.DB.prepare(
-    `INSERT INTO play_direct (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
-     ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1
-     WHERE (?3 - play_direct.updated_at) >= ?4`
-  ).bind(key, JSON.stringify(clean), now, DIRECT_REFRESH_AFTER_SEC).run();
-  const stored = (res.meta?.changes ?? 0) > 0;
-  if (stored) {
+  try {
+    const existing = await c.env.DB.prepare('SELECT updated_at FROM play_direct WHERE key = ?1').bind(key).first<{ updated_at: number }>();
+    if (existing && now - existing.updated_at < DIRECT_REFRESH_AFTER_SEC) {
+      return c.json({ status: 'ok', stored: false, fresh: true });
+    }
+    await c.env.DB.prepare(
+      `INSERT INTO play_direct (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
+       ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1`
+    ).bind(key, JSON.stringify(clean), now).run();
+    c.executionCtx?.waitUntil?.(purgePlayResolveCache(c.req.url, title, ep));
     c.executionCtx.waitUntil(purgePlayResolveCache(c.req.url, title, ep));
+    return c.json({ status: 'ok', stored: true });
+  } catch {
+    return c.json({ status: 'ok', stored: false, degraded: true });
   }
-  return c.json({ status: 'ok', stored, fresh: !stored });
 });
 
-async function lookupDirect(db: D1Database, title: string, ep: number): Promise<StoredDirect[] | null> {
+async function lookupDirect(db: D1ReadClient, title: string, ep: number): Promise<StoredDirect[] | null> {
   try {
     const row = await db
       .prepare('SELECT payload, updated_at FROM play_direct WHERE key = ?1')
@@ -267,7 +291,12 @@ playRoutes.get(
   rateLimit(30, 60),
   async (c, next) => {
     let verifiedClaims: VerifiedAccessClaims | null = null;
-    if (c.env.CF_REQUIRE_AUTH !== 'false' && c.env.JWT_SECRET && c.env.JWT_SECRET.trim().length >= 32) {
+    const bypassAuth = c.env.CF_REQUIRE_AUTH === 'false' && c.env.ENVIRONMENT !== 'production';
+    if (!bypassAuth) {
+      if (!c.env.JWT_SECRET || c.env.JWT_SECRET.trim().length < 32) {
+        c.header('X-Milkglass-NoCache', '1');
+        return c.json({ status: 'error', message: 'Konfigurasi autentikasi server belum siap.' }, 503);
+      }
       const auth = c.req.header('Authorization') || '';
       if (!auth.startsWith('Bearer ')) {
         c.header('X-Milkglass-NoCache', '1');
@@ -299,7 +328,7 @@ playRoutes.get(
     }
     await next();
     if (verifiedClaims && verifiedClaims.sessionId && c.res.status === 200) {
-      const bodyText = await c.res.clone().text();
+      const bodyText = await c.res.text();
       const proofKey = await deriveSessionProofKey(
         verifiedClaims.userId,
         verifiedClaims.sessionId,
@@ -311,42 +340,21 @@ playRoutes.get(
       c.res = new Response(bodyText, { status: c.res.status, headers: signedHeaders });
     }
   },
-  edgeCache(900, 120, true, { excludeParams: ['q'] }),
   zValidator('query', resolveQuerySchema),
+  edgeCache(900, 120, true, { allowedQueryParams: ['title', 'ep'], privateClientCache: true }),
   async (c) => {
     const { title, ep, q } = c.req.valid('query');
 
     // 1) Jalur cepat dari D1 (tanpa scrape, tanpa Cloudflare-challenge): URL direct terverifikasi + hint hoster mentah.
-    const key = hintKey(title, ep);
-    const nowSec = Math.floor(Date.now() / 1000);
-    const [directRes, hintRes] = await c.env.DB.batch([
-      c.env.DB.prepare('SELECT payload, updated_at FROM play_direct WHERE key = ?1').bind(key),
-      c.env.DB.prepare('SELECT payload, updated_at FROM play_hints WHERE key = ?1').bind(key),
-    ]);
-    let direct: StoredDirect[] | null = null;
-    try {
-      const dRow = directRes.results?.[0] as { payload: string; updated_at: number } | undefined;
-      if (dRow && nowSec - dRow.updated_at <= DIRECT_MAX_AGE_SEC) {
-        const arr = JSON.parse(dRow.payload) as StoredDirect[];
-        const ok = (Array.isArray(arr) ? arr : []).filter((d) => d && isAcceptableDirect({ hoster: d.hoster || '', direct_url: d.direct_url }));
-        if (ok.length) direct = ok;
-      }
-    } catch {}
-    let hinted: StoredHint[] | null = null;
-    try {
-      const hRow = hintRes.results?.[0] as { payload: string; updated_at: number } | undefined;
-      if (hRow && nowSec - hRow.updated_at <= HINT_MAX_AGE_SEC) {
-        const arr = JSON.parse(hRow.payload) as StoredHint[];
-        const ok = (Array.isArray(arr) ? arr : []).filter((h) => h && isKnownHosterUrl(h.raw_url));
-        if (ok.length) hinted = ok;
-      }
-    } catch {}
+    const rdb = readDb(c.env);
+    const asn = getClientAsn(c);
+    const [direct, hinted, asnStats] = await Promise.all([lookupDirect(rdb, title, ep), lookupHint(rdb, title, ep), loadAsnStats(rdb, asn)]);
     if (direct || hinted) {
       return c.json({
         status: 'ok',
         data: {
-          direct_candidates: direct ?? [],
-          client_extract_candidates: hinted ?? [],
+          direct_candidates: rankByAsn(direct ?? [], q, asnStats),
+          client_extract_candidates: rankByAsn(hinted ?? [], q, asnStats),
           source: direct ? 'direct' : 'hint',
         },
       });
@@ -360,7 +368,7 @@ playRoutes.get(
       return c.json({ status: 'ok', data: { direct_candidates: [], client_extract_candidates: [] } });
     }
 
-    const sourceMap = await getSourceBaseUrls(c.env.DB);
+    const sourceMap = await getSourceBaseUrls(rdb);
     const params = new URLSearchParams({
       title,
       ep: String(ep),
@@ -380,7 +388,7 @@ playRoutes.get(
         method: 'GET',
         headers,
         // Klien menyerah di ~3,5 dtk dan kini balapan dengan cascade lokal; menahan Worker 25 dtk hanya buang kuota.
-        signal: AbortSignal.timeout(3_000),
+        signal: AbortSignal.timeout(3_200),
       });
       if (!upstream.ok) {
         c.header('X-Milkglass-NoCache', '1');
@@ -403,6 +411,182 @@ playRoutes.get(
     } catch {
       c.header('X-Milkglass-NoCache', '1');
       return c.json({ status: 'error', message: 'Server resolver tidak dapat dijangkau.' }, 504);
+    }
+  }
+);
+
+const reportDeadSchema = z.object({
+  title: z.string().trim().min(2).max(160),
+  ep: z.number().int().min(1).max(2000),
+  kind: z.enum(['direct', 'hint']),
+  url: z.string().trim().pipe(z.string().url().max(2048)),
+  http_status: z.enum(['403', '404', '410', 'expired', 'timeout']),
+});
+
+playRoutes.post(
+  '/report',
+  rateLimit(30, 60),
+  zValidator('json', reportDeadSchema),
+  async (c) => {
+    const { deny } = await requireVerifiedUser(c);
+    if (deny) return deny;
+    const { title, ep, kind, url } = c.req.valid('json');
+    const key = hintKey(title, ep);
+    const table = kind === 'direct' ? 'play_direct' : 'play_hints';
+    try {
+      const row = await c.env.DB.prepare(`SELECT payload FROM ${table} WHERE key = ?1`)
+        .bind(key)
+        .first<{ payload: string }>();
+      if (!row) return c.json({ status: 'ok', evicted: false });
+      const arr = JSON.parse(row.payload) as Array<Record<string, unknown>>;
+      const filtered = arr.filter((item) => (kind === 'direct' ? item.direct_url : item.raw_url) !== url);
+      if (filtered.length === 0) {
+        await c.env.DB.prepare(`DELETE FROM ${table} WHERE key = ?1`).bind(key).run();
+      } else if (filtered.length !== arr.length) {
+        await c.env.DB.prepare(`UPDATE ${table} SET payload = ?2 WHERE key = ?1`)
+          .bind(key, JSON.stringify(filtered))
+          .run();
+      }
+      if (filtered.length !== arr.length) {
+        c.executionCtx?.waitUntil?.(purgePlayResolveCache(c.req.url, title, ep));
+      }
+      return c.json({ status: 'ok', evicted: filtered.length !== arr.length, remaining: filtered.length });
+    } catch {
+      return c.json({ status: 'ok', evicted: false });
+    }
+  }
+);
+
+// Wave 2: Per-ASN Hoster Telemetry (hemat D1 Free Plan)
+const TELEMETRY_WRITE_COOLDOWN_SEC = 45;
+const TELEMETRY_MIN_TTFF_MS = 50;
+const TELEMETRY_MAX_TTFF_MS = 15_000;
+const telemetryWriteGate = new Map<string, number>();
+const ASN_STATS_CACHE_TTL_MS = 5 * 60 * 1000;
+const ASN_STATS_MAX_AGE_SEC = 14 * 86400;
+type AsnHosterStat = { ema_ttff_ms: number; ok_count: number; err_count: number };
+const asnStatsCache = new Map<number, { ts: number; map: Map<string, AsnHosterStat> }>();
+
+function scoreAsnStat(st: AsnHosterStat | undefined): number {
+  if (!st) return 0.65;
+  const total = st.ok_count + st.err_count;
+  const sr = (st.ok_count + 1.6) / (total + 2.0);
+  const clampedTtff = Math.min(TELEMETRY_MAX_TTFF_MS, Math.max(TELEMETRY_MIN_TTFF_MS, st.ema_ttff_ms));
+  const speed = 1 - (clampedTtff - TELEMETRY_MIN_TTFF_MS) / (TELEMETRY_MAX_TTFF_MS - TELEMETRY_MIN_TTFF_MS);
+  return sr * 0.7 + speed * 0.3;
+}
+
+async function loadAsnStats(db: D1ReadClient, asn: number): Promise<Map<string, AsnHosterStat>> {
+  const nowMs = Date.now();
+  const cached = asnStatsCache.get(asn);
+  if (cached && nowMs - cached.ts < ASN_STATS_CACHE_TTL_MS) return cached.map;
+  const merged = new Map<string, AsnHosterStat>();
+  try {
+    const cutoff = Math.floor(nowMs / 1000) - ASN_STATS_MAX_AGE_SEC;
+    const { results } = await db
+      .prepare(`SELECT asn, hoster, ema_ttff_ms, ok_count, err_count FROM hoster_asn_stats WHERE asn IN (?1, 0) AND updated_at >= ?2`)
+      .bind(asn, cutoff)
+      .all<{ asn: number; hoster: string; ema_ttff_ms: number; ok_count: number; err_count: number }>();
+    const fallback = new Map<string, AsnHosterStat>();
+    for (const r of results ?? []) {
+      const st = { ema_ttff_ms: r.ema_ttff_ms, ok_count: r.ok_count, err_count: r.err_count };
+      if (r.asn === asn && asn !== 0 && r.ok_count + r.err_count >= 2) merged.set(r.hoster, st);
+      else if (r.asn === 0) fallback.set(r.hoster, st);
+    }
+    for (const [k, v] of fallback) if (!merged.has(k)) merged.set(k, v);
+  } catch {}
+  if (asnStatsCache.size >= 128) asnStatsCache.clear();
+  asnStatsCache.set(asn, { ts: nowMs, map: merged });
+  return merged;
+}
+
+function rankByAsn<T extends { hoster?: string; quality?: string }>(
+  list: T[],
+  preferredQuality: string,
+  stats: Map<string, AsnHosterStat>
+): T[] {
+  if (list.length <= 1) return list;
+  return [...list].sort((a, b) => {
+    const qa = a.quality === preferredQuality ? 0 : 1;
+    const qb = b.quality === preferredQuality ? 0 : 1;
+    if (qa !== qb) return qa - qb;
+    const sa = scoreAsnStat(stats.get(normalizeHosterKey(a.hoster || '')));
+    const sb = scoreAsnStat(stats.get(normalizeHosterKey(b.hoster || '')));
+    return sb - sa;
+  });
+}
+
+function getClientAsn(c: { req: { raw: Request } }): number {
+  const raw = Number((c.req.raw as unknown as { cf?: { asn?: number } })?.cf?.asn ?? 0);
+  return Number.isInteger(raw) && raw > 0 && raw <= 4_294_967_295 ? raw : 0;
+}
+
+function normalizeHosterKey(raw: string): string {
+  const s = raw.toLowerCase().trim();
+  if (s.includes('pixeldrain') || s.includes('pdrain')) return 'pixeldrain';
+  if (s.includes('filedon')) return 'filedon';
+  if (s.includes('odfiles')) return 'odfiles';
+  if (s.includes('buzzheavier')) return 'buzzheavier';
+  if (s.includes('qiwi')) return 'qiwi';
+  if (s.includes('mediafire')) return 'mediafire';
+  if (s.includes('kraken') || s.includes('kfiles')) return 'krakenfiles';
+  if (s.includes('gofile')) return 'gofile';
+  if (s.includes('acefile')) return 'acefile';
+  if (s.includes('desustream') || s.includes('ondesu')) return 'desustream';
+  return s.replace(/[^a-z0-9]+/g, '').slice(0, 32) || 'unknown';
+}
+
+const telemetryBodySchema = z.object({
+  hoster: z.string().trim().min(2).max(40),
+  ok: z.boolean(),
+  ttff_ms: z.number().finite().optional(),
+});
+
+playRoutes.post(
+  '/telemetry',
+  rateLimit(15, 60),
+  zValidator('json', telemetryBodySchema),
+  async (c) => {
+    const { deny } = await requireVerifiedUser(c);
+    if (deny) return deny;
+
+    const { hoster, ok, ttff_ms } = c.req.valid('json');
+    const asn = getClientAsn(c);
+    const normHoster = normalizeHosterKey(hoster);
+    if (normHoster === 'unknown') return c.json({ status: 'ok', stored: false });
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const gateKey = `${asn}:${normHoster}`;
+    const lastWrite = telemetryWriteGate.get(gateKey) ?? 0;
+    if (nowSec - lastWrite < TELEMETRY_WRITE_COOLDOWN_SEC) {
+      return c.json({ status: 'ok', stored: false, throttled: true });
+    }
+    if (telemetryWriteGate.size >= 512) telemetryWriteGate.clear();
+    telemetryWriteGate.set(gateKey, nowSec);
+
+    const clampedTtff = Math.min(
+      TELEMETRY_MAX_TTFF_MS,
+      Math.max(TELEMETRY_MIN_TTFF_MS, Math.round(ttff_ms ?? (ok ? 2500 : TELEMETRY_MAX_TTFF_MS)))
+    );
+
+    try {
+      await c.env.DB.prepare(
+        `INSERT INTO hoster_asn_stats (asn, hoster, ema_ttff_ms, ok_count, err_count, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(asn, hoster) DO UPDATE SET
+           ema_ttff_ms = CASE
+             WHEN excluded.ok_count = 1 THEN (hoster_asn_stats.ema_ttff_ms * 0.8) + (excluded.ema_ttff_ms * 0.2)
+             ELSE hoster_asn_stats.ema_ttff_ms
+           END,
+           ok_count = MIN(hoster_asn_stats.ok_count + excluded.ok_count, 1000000),
+           err_count = MIN(hoster_asn_stats.err_count + excluded.err_count, 1000000),
+           updated_at = excluded.updated_at`
+      )
+        .bind(asn, normHoster, clampedTtff, ok ? 1 : 0, ok ? 0 : 1, nowSec)
+        .run();
+      return c.json({ status: 'ok', stored: true, asn, hoster: normHoster });
+    } catch {
+      return c.json({ status: 'ok', stored: false, degraded: true });
     }
   }
 );

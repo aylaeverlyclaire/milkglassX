@@ -1,3 +1,4 @@
+import type { D1ReadClient } from '../utils/db';
 const ANILIST_GRAPHQL_URL = 'https://graphql.anilist.co';
 
 export type AniListMediaItem = AniListRawMedia;
@@ -58,6 +59,57 @@ export const DEFAULT_SOURCE_BASE_URLS: Readonly<SourceBaseUrls> = {
   oploverz: 'https://oploverz.ch',
   kusonime: 'https://kusonime.com',
 };
+
+function parseRetryAfterMs(headerVal: string | null, fallbackMs = 1500, maxMs = 5000): number {
+  if (!headerVal) return fallbackMs;
+  const trimmed = headerVal.trim();
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(maxMs, Math.max(250, Math.ceil(seconds * 1000)));
+  }
+  const dateMs = Date.parse(trimmed);
+  if (Number.isFinite(dateMs)) {
+    return Math.min(maxMs, Math.max(250, dateMs - Date.now()));
+  }
+  return fallbackMs;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchAniListGraphQL(
+  body: string,
+  timeoutMs: number,
+  userAgent = 'MilkglassCatalogSync/2.0',
+  contextLabel = 'request'
+): Promise<Response> {
+  const doFetch = () =>
+    fetch(ANILIST_GRAPHQL_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'User-Agent': userAgent,
+      },
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+  let response = await doFetch();
+  if (response.status === 429) {
+    const retryAfterHeader = response.headers.get('Retry-After');
+    const delayMs = parseRetryAfterMs(retryAfterHeader);
+    console.error('[AniList] rate limited (429), retrying after backoff', {
+      context: contextLabel,
+      retryAfter: retryAfterHeader,
+      delayMs,
+    });
+    await sleep(delayMs);
+    response = await doFetch();
+  }
+  return response;
+}
 
 const MEDIA_FIELDS = `
   id
@@ -281,23 +333,21 @@ export async function syncAniListCatalogDetailed(
   for (const plan of syncPlans) {
     const entry: SyncPageLog = { page: plan.page, status: plan.status ?? 'ALL' };
     log.push(entry);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
     try {
-      const response = await fetch(ANILIST_GRAPHQL_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          'User-Agent': 'MilkglassCatalogSync/2.0',
-        },
-        body: JSON.stringify({
+      const response = await fetchAniListGraphQL(
+        JSON.stringify({
           query: CATALOG_PAGE_QUERY,
           variables: { page: plan.page, perPage, status: plan.status },
         }),
-        signal: controller.signal,
-      });
+        8000,
+        'MilkglassCatalogSync/2.0',
+        `sync:page=${plan.page}:status=${plan.status ?? 'ALL'}`
+      );
       entry.http = response.status;
+      if (response.status === 429) {
+        entry.error = 'rate_limited (429)';
+        break;
+      }
       if (!response.ok) {
         entry.error = (await response.text().catch(() => '')).slice(0, 200);
         continue;
@@ -318,8 +368,11 @@ export async function syncAniListCatalogDetailed(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       entry.error = msg.slice(0, 200);
-    } finally {
-      clearTimeout(timeoutId);
+      console.error('[AniList] syncAniListCatalogDetailed page failed', {
+        page: plan.page,
+        status: plan.status ?? 'ALL',
+        error: msg,
+      });
     }
   }
   if (totalSynced > 0) {
@@ -373,22 +426,16 @@ export async function enrichSingleAnimeFromAniListAsync(
   db: D1Database,
   animeId: number
 ): Promise<void> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 3500);
   try {
-    const response = await fetch(ANILIST_GRAPHQL_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        'User-Agent': 'MilkglassCatalogSync/2.0',
-      },
-      body: JSON.stringify({
+    const response = await fetchAniListGraphQL(
+      JSON.stringify({
         query: SINGLE_MEDIA_QUERY,
         variables: { id: animeId },
       }),
-      signal: controller.signal,
-    });
+      3500,
+      'MilkglassCatalogSync/2.0',
+      `enrich:animeId=${animeId}`
+    );
     if (response.ok) {
       const payload = (await response.json()) as { data?: { Media?: AniListRawMedia } };
       const media = payload.data?.Media;
@@ -397,14 +444,26 @@ export async function enrichSingleAnimeFromAniListAsync(
         await bindAnimeUpsert(db, media, nowSec).run();
       }
     }
-  } catch {
-
-  } finally {
-    clearTimeout(timeoutId);
+  } catch (err: unknown) {
+    console.error('[AniList] enrichSingleAnimeFromAniListAsync failed', {
+      animeId,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
-export async function getSourceBaseUrls(db: D1Database): Promise<SourceBaseUrls> {
+let cachedSourceUrls: { expiresAt: number; value: SourceBaseUrls } | null = null;
+const SOURCE_URLS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+export function invalidateSourceBaseUrlsCache(): void {
+  cachedSourceUrls = null;
+}
+
+export async function getSourceBaseUrls(db: D1ReadClient): Promise<SourceBaseUrls> {
+  const now = Date.now();
+  if (cachedSourceUrls && cachedSourceUrls.expiresAt > now) {
+    return { ...cachedSourceUrls.value };
+  }
   const resolved: SourceBaseUrls = { ...DEFAULT_SOURCE_BASE_URLS };
   try {
     const { results } = await db
@@ -422,13 +481,16 @@ export async function getSourceBaseUrls(db: D1Database): Promise<SourceBaseUrls>
       else if (row.key === 'oploverz_base_url') resolved.oploverz = clean;
       else if (row.key === 'kusonime_base_url') resolved.kusonime = clean;
     }
-  } catch {
-
+    cachedSourceUrls = { expiresAt: now + SOURCE_URLS_CACHE_TTL_MS, value: { ...resolved } };
+  } catch (err: unknown) {
+    console.error('[AniList] getSourceBaseUrls D1 read failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
   return resolved;
 }
 
-export async function getOtakudesuBaseUrl(db: D1Database): Promise<string> {
+export async function getOtakudesuBaseUrl(db: D1ReadClient): Promise<string> {
   return (await getSourceBaseUrls(db)).otakudesu;
 }
 
@@ -451,12 +513,12 @@ export async function searchAniListMetadata(searchQuery: string): Promise<AniLis
   `;
 
   try {
-    const res = await fetch(ANILIST_GRAPHQL_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ query: graphqlQuery, variables: { search: searchQuery } }),
-      signal: AbortSignal.timeout(5000),
-    });
+    const res = await fetchAniListGraphQL(
+      JSON.stringify({ query: graphqlQuery, variables: { search: searchQuery } }),
+      5000,
+      'MilkglassCatalogSync/2.0',
+      'search'
+    );
     if (!res.ok) return [];
     const json = (await res.json()) as {
       data?: {
@@ -487,7 +549,11 @@ export async function searchAniListMetadata(searchQuery: string): Promise<AniLis
       averageScore: m.averageScore || null,
       status: m.status || 'FINISHED',
     }));
-  } catch {
+  } catch (err: unknown) {
+    console.error('[AniList] searchAniListMetadata failed', {
+      queryLength: searchQuery.length,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return [];
   }
 }
@@ -511,12 +577,12 @@ export async function fetchTrendingAniList(): Promise<AniListSearchMetadata[]> {
   `;
 
   try {
-    const res = await fetch(ANILIST_GRAPHQL_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ query: graphqlQuery }),
-      signal: AbortSignal.timeout(5000),
-    });
+    const res = await fetchAniListGraphQL(
+      JSON.stringify({ query: graphqlQuery }),
+      5000,
+      'MilkglassCatalogSync/2.0',
+      'trending'
+    );
     if (!res.ok) return [];
     const json = (await res.json()) as {
       data?: {
@@ -547,7 +613,10 @@ export async function fetchTrendingAniList(): Promise<AniListSearchMetadata[]> {
       averageScore: m.averageScore || null,
       status: m.status || 'RELEASING',
     }));
-  } catch {
+  } catch (err: unknown) {
+    console.error('[AniList] fetchTrendingAniList failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return [];
   }
 }

@@ -1,3 +1,5 @@
+const BATCH_CHUNK_SIZE = 50;
+
 export async function aggregateSourceHealthCron(db: D1Database): Promise<void> {
   const upperBoundSec = Math.floor(Date.now() / 1000);
   const windowStartSec = upperBoundSec - 900;
@@ -70,7 +72,14 @@ export async function aggregateSourceHealthCron(db: D1Database): Promise<void> {
       .bind(upperBoundSec, upperBoundSec - 86400)
   );
 
-  if (statements.length > 0) {
-    await db.batch(statements);
+  for (let i = 0; i < statements.length; i += BATCH_CHUNK_SIZE) {
+    await db.batch(statements.slice(i, i + BATCH_CHUNK_SIZE));
+  }
+  try {
+    await db.batch([
+      db.prepare(`DELETE FROM play_direct WHERE updated_at < ?1`).bind(upperBoundSec - 7200),
+      db.prepare(`DELETE FROM play_hints WHERE updated_at < ?1`).bind(upperBoundSec - 86400),
+    ]);
+  } catch {
   }
 }

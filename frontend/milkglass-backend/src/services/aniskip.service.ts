@@ -34,6 +34,7 @@ export async function fetchAniSkipTimes(
         Accept: 'application/json',
         'User-Agent': 'MilkglassSkipSync/2.0',
       },
+      signal: AbortSignal.timeout(8000),
     });
 
     if (!response.ok) {
@@ -60,7 +61,12 @@ export async function fetchAniSkipTimes(
       }
     }
     return out;
-  } catch {
+  } catch (err: unknown) {
+    console.error('[AniSkip] fetch failed', {
+      malId,
+      episodeNumber,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return empty;
   }
 }

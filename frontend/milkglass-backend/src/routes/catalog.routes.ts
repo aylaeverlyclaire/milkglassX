@@ -1,8 +1,8 @@
 import { Hono } from 'hono';
-import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { edgeCache } from '../middleware/edgeCache';
 import { rateLimit } from '../middleware/rateLimit';
+import { zValidatorParam, zValidatorQuery } from '../middleware/validator';
 import { recheckAfterSec } from '../services/sync-schedule';
 import {
   getSourceBaseUrls,
@@ -10,6 +10,19 @@ import {
   fetchTrendingAniList,
 } from '../services/anilist.service';
 import { AppBindings } from '../index';
+import { readDb } from '../utils/db';
+
+const R2_KEY_HOME = 'catalog/v1/home.json';
+const R2_KEY_STATUS = 'catalog/v1/status.json';
+const R2_KEY_SNAPSHOT = 'catalog/v1/snapshot.json';
+
+const DEFAULT_ENGINE_RULES = {
+  otakudesu: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'ul.chivsrc > li', search_link: 'h2 > a[href]', episode_box: 'div.episodelist', episode_link: 'ul li a[href]', download_block: 'div.download ul', download_row: 'li', quality_text: 'strong', size_text: 'i', hoster_link: 'a[href]' } },
+  samehadaku: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'div.animposx > a[href], article.animpost div.animposx > a[href], article.animepost div.animposx a[href]', search_title: '.data .title h2', series_link: "a[href*='/anime/'], div.nvs.nvsc a[href]", episode_row: 'div.lstepsiode.listeps ul li, .listeps ul li, .lstepsiode ul li, .episode-lainnya ul li', episode_badge: '.epsright, .epl-num, .shrink-0 a, .shrink-0 div', episode_link: "h4 a[href], .lchx a[href], a[href*='-episode-'], a[href]", download_block: 'div.download-eps, div#downloadb', download_header: 'p b, p', download_row: 'ul li', quality_text: 'strong', hoster_link: 'a[href]' } },
+  oploverz: { back_api_url: 'https://backapi.oploverz.ac', search_path: '/?s={q}', selectors: { search_item: 'div.bsx, article.bs', search_title: 'div.tt h4, h4, .tt', series_link: "div.nvs.nvsc a[href], a[aria-label='All Episodes'], a[href*='/series/'], .year a[href*='/anime/']", episode_row: 'div.eplister ul li, ul#episodelist li', episode_badge: 'div.epl-num', download_block: 'div.soraddlx, div.mctnx, div.download-box', download_header: '.sorattlx, h3, h4', download_row: '.soraurlx, li', quality_text: 'strong', hoster_link: 'a[href]' } },
+  kusonime: { search_path: '/?s={q}', selectors: { search_item: 'div.kover a[href], h2.episodeye a[href]', download_block: 'div.smokeddlrh, div.dlbodz', download_header: '.smokettlrh, h3', download_row: 'div.smokeurlrh', quality_text: 'strong', hoster_link: 'a[href]' } },
+};
+
 
 export const catalogRoutes = new Hono<{ Bindings: AppBindings }>();
 
@@ -60,7 +73,18 @@ function escapeSqlLike(input: string): string {
 }
 
 catalogRoutes.get('/home', edgeCache(300, 600, false), async (c) => {
-  const db = c.env.DB;
+  if (c.env.CATALOG_R2) {
+    try {
+      const obj = await c.env.CATALOG_R2.get(R2_KEY_HOME);
+      if (obj) {
+        return new Response(obj.body, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Milkglass-Source': 'R2' },
+        });
+      }
+    } catch {}
+  }
+  const db = readDb(c.env);
   const [ongoingRes, popularRes, completedRes, metaRes] = await db.batch([
     db.prepare(
       `SELECT ${LIST_COLUMNS}
@@ -103,7 +127,34 @@ catalogRoutes.get('/home', edgeCache(300, 600, false), async (c) => {
 });
 
 catalogRoutes.get('/status', edgeCache(60, 120, false), async (c) => {
-  const db = c.env.DB;
+  if (c.env.CATALOG_R2) {
+    try {
+      const obj = await c.env.CATALOG_R2.get(R2_KEY_STATUS);
+      if (obj) {
+        const doc = await obj.json<{ total: number; version: string; synced_at: number | null; full_synced_at: number | null }>();
+        if (doc && typeof doc.total === 'number' && doc.total > 0 && typeof doc.version === 'string') {
+          const nowSec = Math.floor(Date.now() / 1000);
+          const ageSec = doc.synced_at === null ? null : Math.max(0, nowSec - doc.synced_at);
+          const stale = ageSec === null || ageSec > CATALOG_STALE_AFTER_SEC;
+          c.header('X-Milkglass-Source', 'R2');
+          return c.json({
+            status: 'ok',
+            data: {
+              total: doc.total,
+              version: doc.version,
+              synced_at: doc.synced_at,
+              full_synced_at: doc.full_synced_at,
+              age_sec: ageSec,
+              stale,
+              stale_after_sec: CATALOG_STALE_AFTER_SEC,
+              recheck_after_sec: recheckAfterSec(nowSec, doc.synced_at),
+            },
+          });
+        }
+      }
+    } catch {}
+  }
+  const db = readDb(c.env);
   const [metaRes, countRes] = await db.batch([
     db.prepare(META_QUERY),
     db.prepare(`SELECT COUNT(*) AS total FROM animes`),
@@ -137,11 +188,44 @@ catalogRoutes.get('/status', edgeCache(60, 120, false), async (c) => {
 catalogRoutes.get(
   '/snapshot',
   rateLimit(20, 60),
-  edgeCache(7 * 86400, 0, true, { immutable: true }),
-  zValidator('query', z.object({ v: z.string().regex(/^\d+\.\d+$/).max(40).optional() })),
+  edgeCache(7 * 86400, 0, true, { immutable: true, allowedQueryParams: ['v'] }),
+  zValidatorQuery(z.object({ v: z.string().regex(/^\d+\.\d+$/).max(40).optional() })),
   async (c) => {
-    const db = c.env.DB;
+    const db = readDb(c.env);
     const { v } = c.req.valid('query');
+    if (c.env.CATALOG_R2) {
+      try {
+        if (!v) {
+          const head = await c.env.CATALOG_R2.head(R2_KEY_SNAPSHOT);
+          const ver = head?.customMetadata?.version;
+          if (ver) {
+            const target = new URL(c.req.url);
+            target.search = `?v=${encodeURIComponent(ver)}`;
+            c.header('Cache-Control', 'no-store');
+            c.header('X-Milkglass-Source', 'R2');
+            return c.redirect(target.toString(), 307);
+          }
+        } else {
+          const obj = await c.env.CATALOG_R2.get(R2_KEY_SNAPSHOT);
+          const ver = obj?.customMetadata?.version;
+          if (obj && ver) {
+            if (ver === v) {
+              return new Response(obj.body, {
+                status: 200,
+                headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Milkglass-Source': 'R2' },
+              });
+            }
+            await obj.body?.cancel?.();
+            const target = new URL(c.req.url);
+            target.search = `?v=${encodeURIComponent(ver)}`;
+            c.header('Cache-Control', 'no-store');
+            c.header('X-Milkglass-Source', 'R2');
+            return c.redirect(target.toString(), 307);
+          }
+          await obj?.body?.cancel?.();
+        }
+      } catch {}
+    }
     const statements: D1PreparedStatement[] = [
       db.prepare(META_QUERY),
       db.prepare(`SELECT COUNT(*) AS total FROM animes`),
@@ -167,32 +251,36 @@ catalogRoutes.get(
       c.header('X-Milkglass-NoCache', '1');
     }
     const results = (batchRes[2]?.results ?? []) as Array<Record<string, unknown>>;
+    const shaped = shapeRows(results);
     return c.json({
       status: 'ok',
-      data: shapeRows(results),
+      data: shaped,
       meta: {
         version,
         synced_at: marker.synced_at,
         full_synced_at: marker.full_synced_at,
-        count: total,
+        count: shaped.length,
+        total_in_db: total,
       },
     });
   }
 );
 
+const emptyToUndefined = (v: unknown) => (v === '' || v === null ? undefined : v);
+
 const browseQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),
   genre: z.string().trim().max(40).optional(),
-  status: z.coerce.number().int().min(1).max(5).optional(),
-  schedule_day: z.coerce.number().int().min(0).max(7).optional(),
-  page: z.coerce.number().int().min(1).max(100).default(1),
+  status: z.preprocess(emptyToUndefined, z.coerce.number().int().min(1).max(5).optional()),
+  schedule_day: z.preprocess(emptyToUndefined, z.coerce.number().int().min(0).max(7).optional()),
+  page: z.preprocess(emptyToUndefined, z.coerce.number().int().min(1).max(100).default(1)),
 });
 
 catalogRoutes.get(
   '/browse',
   rateLimit(40, 60),
-  edgeCache(300, 600, true),
-  zValidator('query', browseQuerySchema),
+  edgeCache(300, 600, true, { allowedQueryParams: ['q', 'genre', 'status', 'schedule_day', 'page'] }),
+  zValidatorQuery(browseQuerySchema),
   async (c) => {
     const { q, genre, status, schedule_day, page } = c.req.valid('query');
     const limit = 24;
@@ -229,7 +317,7 @@ catalogRoutes.get(
       ORDER BY popularity DESC
       LIMIT ?${params.length - 1} OFFSET ?${params.length}
     `;
-    const { results } = await c.env.DB.prepare(sql).bind(...params).all<Record<string, unknown>>();
+    const { results } = await readDb(c.env).prepare(sql).bind(...params).all<Record<string, unknown>>();
     return c.json({
       status: 'ok',
       data: shapeRows(results),
@@ -245,10 +333,10 @@ const idParamSchema = z.object({
 catalogRoutes.get(
   '/anime/:id',
   edgeCache(300, 600, false),
-  zValidator('param', idParamSchema),
+  zValidatorParam(idParamSchema),
   async (c) => {
     const { id } = c.req.valid('param');
-    const db = c.env.DB;
+    const db = readDb(c.env);
     const [animeRes, episodesRes] = await db.batch([
       db.prepare(`SELECT * FROM animes WHERE id = ?1`).bind(id),
       db
@@ -279,11 +367,11 @@ catalogRoutes.get(
 catalogRoutes.get(
   '/episode/:id',
   edgeCache(60, 120, false),
-  zValidator('param', idParamSchema),
+  zValidatorParam(idParamSchema),
   async (c) => {
     const { id } = c.req.valid('param');
     const nowSec = Math.floor(Date.now() / 1000);
-    const db = c.env.DB;
+    const db = readDb(c.env);
     const [episodeRes, sourcesRes] = await db.batch([
       db
         .prepare(
@@ -344,7 +432,7 @@ catalogRoutes.get(
 );
 
 catalogRoutes.get('/', edgeCache(300), async (c) => {
-  const rows = await c.env.DB.prepare(
+  const rows = await readDb(c.env).prepare(
     'SELECT slug, anilist_id, title, romaji_title, episode, poster_url, banner_url, synopsis, updated_at FROM catalog_episodes ORDER BY updated_at DESC LIMIT 60'
   ).all();
 
@@ -357,7 +445,7 @@ catalogRoutes.get('/', edgeCache(300), async (c) => {
 });
 
 catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
-  const urls = await getSourceBaseUrls(c.env.DB);
+  const urls = await getSourceBaseUrls(readDb(c.env));
   return c.json({
     status: 'ok',
     resolution_mode: 'CLIENT_CASCADE_MKV',
@@ -373,41 +461,70 @@ catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
   });
 });
 
-catalogRoutes.get('/search', edgeCache(300, 600, true), async (c) => {
-  const q = (c.req.query('q') || '').trim();
-  if (q.length < 2) {
-    return c.json({ status: 'ok', data: [], metadata: [], resolution_mode: 'CLIENT_CASCADE_MKV' });
+catalogRoutes.get(
+  '/search',
+  rateLimit(30, 60),
+  edgeCache(300, 600, true, { allowedQueryParams: ['q'] }),
+  async (c) => {
+    const q = (c.req.query('q') || '').trim();
+    if (q.length < 2) {
+      return c.json({ status: 'ok', data: [], metadata: [], resolution_mode: 'CLIENT_CASCADE_MKV' });
+    }
+
+    const escapedQ = escapeSqlLike(q);
+    const pattern = `%${escapedQ}%`;
+    const ftsQuery = q
+      .trim()
+      .split(/\s+/)
+      .map((tok) => tok.replace(/[^a-zA-Z0-9]/g, ''))
+      .filter((tok) => tok.length >= 2)
+      .map((tok) => `"${tok}"*`)
+      .join(' ');
+    const queryD1Search = async () => {
+      if (ftsQuery.length > 0) {
+        try {
+          return await readDb(c.env).prepare(
+            `SELECT ${LIST_COLUMNS}
+             FROM animes
+             WHERE id IN (SELECT rowid FROM animes_fts WHERE animes_fts MATCH ?1)
+             ORDER BY popularity DESC
+             LIMIT 24`
+          )
+            .bind(ftsQuery)
+            .all<Record<string, unknown>>();
+        } catch {
+        }
+      }
+      return readDb(c.env).prepare(
+        `SELECT ${LIST_COLUMNS}
+         FROM animes
+         WHERE title LIKE ?1 ESCAPE '\\' OR title_alt LIKE ?1 ESCAPE '\\'
+         ORDER BY popularity DESC
+         LIMIT 24`
+      )
+        .bind(pattern)
+        .all<Record<string, unknown>>();
+    };
+    const [d1Animes, anilistItems] = await Promise.all([
+      queryD1Search(),
+      searchAniListMetadata(q),
+    ]);
+
+    return c.json({
+      status: 'ok',
+      query: q,
+      resolution_mode: 'CLIENT_CASCADE_MKV',
+      data: shapeRows(d1Animes.results),
+      metadata: anilistItems,
+    });
   }
-
-  const escapedQ = escapeSqlLike(q);
-  const pattern = `%${escapedQ}%`;
-  const [d1Animes, anilistItems] = await Promise.all([
-    c.env.DB.prepare(
-      `SELECT ${LIST_COLUMNS}
-       FROM animes
-       WHERE title LIKE ?1 ESCAPE '\\' OR title_alt LIKE ?1 ESCAPE '\\'
-       ORDER BY popularity DESC
-       LIMIT 24`
-    )
-      .bind(pattern)
-      .all<Record<string, unknown>>(),
-    searchAniListMetadata(q),
-  ]);
-
-  return c.json({
-    status: 'ok',
-    query: q,
-    resolution_mode: 'CLIENT_CASCADE_MKV',
-    data: shapeRows(d1Animes.results),
-    metadata: anilistItems,
-  });
-});
+);
 
 catalogRoutes.use('/play/*', rateLimit(20, 60));
 
 catalogRoutes.get('/play/:slug', async (c) => {
   const slug = c.req.param('slug');
-  const urls = await getSourceBaseUrls(c.env.DB);
+  const urls = await getSourceBaseUrls(readDb(c.env));
   return c.json({
     status: 'ok',
     slug,
@@ -423,3 +540,42 @@ catalogRoutes.get('/play/:slug', async (c) => {
 });
 
 export default catalogRoutes;
+
+catalogRoutes.get('/rules', edgeCache(1800, 3600, false), async (c) => {
+  const db = readDb(c.env);
+  const [urls, metaRow] = await Promise.all([
+    getSourceBaseUrls(db),
+    db.prepare(`SELECT value FROM catalog_meta WHERE key = 'engine_rules_v1'`)
+      .first<{ value: string }>()
+      .catch(() => null),
+  ]);
+
+  let overrideSources: Record<string, { base_url?: string; back_api_url?: string; search_path?: string; selectors?: Record<string, string> }> = {};
+  if (metaRow?.value) {
+    try {
+      const parsed = JSON.parse(metaRow.value);
+      if (parsed && typeof parsed.sources === 'object') overrideSources = parsed.sources;
+    } catch {}
+  }
+
+  const merge = (id: keyof typeof urls, defaults: { search_path: string; back_api_url?: string; selectors: Record<string, string> }) => {
+    const ov = overrideSources[id];
+    return {
+      base_url: ov?.base_url || urls[id],
+      ...(defaults.back_api_url || ov?.back_api_url ? { back_api_url: ov?.back_api_url || defaults.back_api_url } : {}),
+      search_path: ov?.search_path || defaults.search_path,
+      selectors: { ...defaults.selectors, ...(ov?.selectors ?? {}) },
+    };
+  };
+
+  return c.json({
+    schema_version: 1,
+    updated_at: Math.floor(Date.now() / 1000),
+    sources: {
+      otakudesu: merge('otakudesu', DEFAULT_ENGINE_RULES.otakudesu),
+      samehadaku: merge('samehadaku', DEFAULT_ENGINE_RULES.samehadaku),
+      oploverz: merge('oploverz', DEFAULT_ENGINE_RULES.oploverz),
+      kusonime: merge('kusonime', DEFAULT_ENGINE_RULES.kusonime),
+    },
+  });
+});
