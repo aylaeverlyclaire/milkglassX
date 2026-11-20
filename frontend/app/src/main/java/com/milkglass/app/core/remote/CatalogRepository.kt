@@ -203,7 +203,7 @@ class CatalogRepository(
         val recheckMs = (data.recheckAfterSec ?: RECHECK_DEFAULT_SEC).coerceIn(RECHECK_MIN_SEC, RECHECK_MAX_SEC) * 1000L
 
         if (st != null && st.version == version) {
-            saveState(store, st.copy(fetchedAtMs = now, validUntilMs = now + recheckMs, failures = 0))
+            saveStateIo(store, st.copy(fetchedAtMs = now, validUntilMs = now + recheckMs, failures = 0))
             return RefreshOutcome.Unchanged
         }
 
@@ -214,8 +214,8 @@ class CatalogRepository(
         val resp = decodeSnapshot(snapFetch.body) ?: return failed(store, st, now)
         val complete = resp.meta.count in 1..resp.data.size
 
-        store.writeBody(snapFetch.body)
-        saveState(
+        store.writeBodyIo(snapFetch.body)
+        saveStateIo(
             store,
             SnapshotState(
                 version = resp.meta.version ?: version,
@@ -227,11 +227,11 @@ class CatalogRepository(
         return RefreshOutcome.Updated(resp.data.map(RemoteMapper::toEntry), complete)
     }
 
-    private fun failed(store: SnapshotStore, st: SnapshotState?, now: Long): RefreshOutcome {
+    private suspend fun failed(store: SnapshotStore, st: SnapshotState?, now: Long): RefreshOutcome {
         if (st != null) {
             val n = st.failures + 1
             val backoff = minOf(BACKOFF_MAX_MS, BACKOFF_BASE_MS shl (n - 1).coerceAtMost(10))
-            saveState(store, st.copy(validUntilMs = now + backoff, failures = n))
+            saveStateIo(store, st.copy(validUntilMs = now + backoff, failures = n))
         }
         return RefreshOutcome.Failed
     }

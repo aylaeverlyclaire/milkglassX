@@ -71,6 +71,7 @@ class PlayerEngine(
     var isFullscreen by mutableStateOf(false)
     var bufferTimer by mutableDoubleStateOf(0.0)
     var isOffline by mutableStateOf(false)
+    var hasLocalDownload by mutableStateOf(false)
 
     var faded by mutableStateOf(false)
     var left = false
@@ -95,7 +96,7 @@ class PlayerEngine(
     private val autoSkipOn: Boolean get() = ctl.features.autoSkip && ctl.persisted.settings.autoSkipOpeningEnding != 0
 
     private fun isPlayerOffline(): Boolean =
-        !ctl.online && ctl.persisted.downloads["${anime.id}.$episode"] != 100
+        !ctl.online && !hasLocalDownload && ctl.persisted.downloads["${anime.id}.$episode"] != 100
 
     fun save() {
         if (!nativeStreamActive || duration <= 0) return

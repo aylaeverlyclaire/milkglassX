@@ -289,6 +289,7 @@ class PlayerManager(
                     .clearVideoSizeConstraints()
                     .setPreferredTextLanguages("id", "ind", "en", "eng")
                     .setPreferredAudioLanguages("ja", "jpn")
+                    .setSelectUndeterminedTextLanguage(true)
             )
         }
 
@@ -296,7 +297,7 @@ class PlayerManager(
             .setBufferDurationsMs(15_000, 45_000, 250, 2_000)
             .setBackBuffer(10_000, true)
             .setTargetBufferBytes(32 * 1024 * 1024)
-            .setPrioritizeTimeOverSizeThresholds(false)
+            .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
         val renderersFactory = DefaultRenderersFactory(appContext)
@@ -425,7 +426,7 @@ class PlayerManager(
                 throw e
             } catch (e: Throwable) {
                 if (released || activeSessionId != sid) return@launch
-                PlaybackBandwidthGate.onBufferingChanged(false)
+                setVideoBuffering(false)
                 val friendly = ErrorMapper.mapResolverError(e, appContext)
                 _playerState.value = PlayerState.Error(friendly)
                 _snapshot.update {
@@ -532,7 +533,7 @@ class PlayerManager(
         cacheKey: String?
     ) {
         val playerInstance = exoPlayer ?: return
-        val sharedOkHttp = EngineRuntime.get(appContext).clients.mediaAndApiClient
+        val sharedOkHttp = EngineRuntime.get(appContext).clients.streamingClient
         val httpFactory = OkHttpDataSource.Factory(sharedOkHttp)
             .setUserAgent(headers["User-Agent"] ?: DEFAULT_USER_AGENT)
             .setDefaultRequestProperties(headers)
@@ -794,7 +795,7 @@ class PlayerManager(
                 return@withContext true
             }
 
-            val sharedOkHttp = EngineRuntime.get(context.applicationContext).clients.mediaAndApiClient
+            val sharedOkHttp = EngineRuntime.get(context.applicationContext).clients.streamingClient
             val upstreamFactory: DataSource.Factory = if (session.candidates.isNotEmpty()) {
                 FailoverHttpDataSource.Factory(
                     client = sharedOkHttp,

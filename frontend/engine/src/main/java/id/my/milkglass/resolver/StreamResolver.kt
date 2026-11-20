@@ -495,7 +495,10 @@ class StreamResolver(
             if (Thread.currentThread().isInterrupted) throw InterruptedException()
             serverResolverDisabledUntilMs = System.currentTimeMillis() + 20_000L  // timeout: istirahat singkat
             null
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (Thread.currentThread().isInterrupted || e.message.equals("Canceled", ignoreCase = true)) {
+                throw InterruptedException("Cancelled")
+            }
             serverResolverDisabledUntilMs = System.currentTimeMillis() + 20_000L
             null
         } ?: return emptyList()
@@ -535,7 +538,7 @@ class StreamResolver(
             resolved.addAll(verified)
         }
 
-        val needClientExtract = resolved.isEmpty() || preferCompatibleContainer
+        val needClientExtract = resolved.isEmpty() || (preferCompatibleContainer && resolved.none { it.container == MediaContainer.MP4 || it.container == MediaContainer.HLS })
         val clientArr = if (needClientExtract) data.optJSONArray("client_extract_candidates") else null
         if (clientArr != null) {
             // Hint dari Cloudflare diekstrak PARALEL (bukan satu per satu) lewat jalur cascade yang sama.
@@ -639,7 +642,7 @@ class StreamResolver(
         return try {
             val outcome = raceResolve(
                 searchTitle = searchTitle,
-                altTitle = "",
+                altTitle = if (searchTitle == romajiTitle) title else romajiTitle,
                 episodeNum = episodeNum,
                 preferredQuality = preferredQuality,
                 preferCompatibleContainer = false,
@@ -720,7 +723,7 @@ class StreamResolver(
         // prefetch tetap ikut berlomba (dulu: menunggu sampai 12 dtk lalu mengulang dari nol).
         val inflight = inFlightResolutions[sessionCacheKey]
         if (inflight != null) {
-            val joinedEntry = inflight.awaitOrNull(0L)
+            val joinedEntry = inflight.awaitOrNull(JOIN_FAST_MS)
             if (joinedEntry != null) return startFromEntry(joinedEntry, scope)
         }
 
