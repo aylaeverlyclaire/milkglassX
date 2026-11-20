@@ -134,6 +134,11 @@ class AppController(
             Thread(r, "milkglass-availability").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
         }
     }
+    private val saveExec by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "milkglass-save").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
+        }
+    }
 
     private fun rawCatalog(): List<Anime> =
         if (remoteEntries.isEmpty()) seedCatalog else seedCatalog + remoteEntries.values.map { it.anime }
@@ -206,9 +211,14 @@ class AppController(
     suspend fun loadEpisodeMeta(a: Anime) {
         val src = metaSource ?: return
         if (a.id in seedIds || !metaRequested.add(a.id)) return
-        val m = src.load(a.id)
-        if (m == null) metaRequested.remove(a.id)
-        else if (m.isNotEmpty()) episodeMeta = episodeMeta + (a.id to m)
+        try {
+            val m = src.load(a.id)
+            if (m == null) metaRequested.remove(a.id)
+            else if (m.isNotEmpty()) episodeMeta = episodeMeta + (a.id to m)
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            metaRequested.remove(a.id)
+            throw ce
+        }
     }
 
     private var extras by mutableStateOf<Map<Int, com.milkglass.app.core.remote.AniListExtras>>(emptyMap())
@@ -217,9 +227,14 @@ class AppController(
     suspend fun loadExtras(a: Anime) {
         val src = extrasSource ?: return
         if (a.id in seedIds || !extrasRequested.add(a.id)) return
-        val x = src.load(a.id)
-        if (x == null) extrasRequested.remove(a.id)
-        else extras = extras + (a.id to x)
+        try {
+            val x = src.load(a.id)
+            if (x == null) extrasRequested.remove(a.id)
+            else extras = extras + (a.id to x)
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            extrasRequested.remove(a.id)
+            throw ce
+        }
     }
 
     private val skipCache = HashMap<String, com.milkglass.app.core.remote.SkipTimes>()
@@ -303,9 +318,9 @@ class AppController(
         if (query.length < 2) return
         val key = "xdcc:${query.lowercase()}"
         if (key in searchedQueries) return
-        searchedQueries.add(key)
         val universal = repo.searchUniversal(query)
         if (universal.isNotEmpty()) {
+            searchedQueries.add(key)
             mergeRemote(universal)
         }
     }
@@ -751,7 +766,7 @@ class AppController(
         (viewStack.lastOrNull() as? ViewEntry.Player)?.let { it.engine.onLeave(); viewStack.removeAt(viewStack.lastIndex) }
         val sp = resumePosition(a, ep)
         val start = pos ?: if (sp > 0 && !isWatched(a, ep)) smartResume(sp, lastWatchedAt(a), now()) else 0.0
-        val rec = catalog.filter { it.id != a.id }.shuffled().take(10).map { it.id }
+        val rec = similarOf(a).ifEmpty { catalog.asSequence().filter { it.id != a.id }.take(10).toList() }.map { it.id }
         pushView(ViewEntry.Player(PlayerEngine(this, a, ep, start), rec))
     }
 
@@ -965,8 +980,12 @@ class AppController(
     }
 
     fun saveNow() {
+        val st = store ?: return
         val s = persisted
-        if (s != lastSaved && store?.save(s) == true) lastSaved = s
+        if (s == lastSaved) return
+        saveExec.execute {
+            if (st.save(s)) lastSaved = s
+        }
     }
 
     suspend fun saveInBackground() {
