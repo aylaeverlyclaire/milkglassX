@@ -20,11 +20,17 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.datasource.cache.SimpleCache
+import id.my.milkglass.source.MediaContainer
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicReference
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.ScrubbingModeParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
@@ -66,7 +72,16 @@ data class PlaybackRequest(
     val title: String = "",
     val romajiTitle: String = "",
     val startPositionMs: Long = 0L,
-    val preferCompatibleContainer: Boolean = false
+    val preferCompatibleContainer: Boolean = false,
+    val urlRefreshAttempts: Int = 0,
+    val autoPlay: Boolean = true
+)
+
+data class PlaybackProgress(
+    val sessionId: Long = 0L,
+    val positionMs: Long = 0L,
+    val durationMs: Long = 0L,
+    val bufferedPositionMs: Long = 0L
 )
 
 data class PlayerSnapshot(
@@ -98,31 +113,6 @@ sealed class PlayerState {
     object Paused : PlayerState()
     object Ended : PlayerState()
     data class Error(val error: FriendlyPlayerError) : PlayerState()
-}
-
-object MPVLibBridge {
-    private val mpvClass: Class<*>? by lazy {
-        runCatching { Class.forName("is.xyz.mpv.MPVLib") }.getOrNull()
-    }
-
-    val isAvailable: Boolean
-        get() = mpvClass != null
-
-    fun setOptionString(name: String, value: String) {
-        val clazz = mpvClass ?: return
-        runCatching {
-            val method = clazz.getMethod("setOptionString", String::class.java, String::class.java)
-            method.invoke(null, name, value)
-        }
-    }
-
-    fun command(cmd: Array<String>) {
-        val clazz = mpvClass ?: return
-        runCatching {
-            val method = clazz.getMethod("command", Array<String>::class.java)
-            method.invoke(null, cmd as Any)
-        }
-    }
 }
 
 @OptIn(UnstableApi::class)
@@ -161,6 +151,9 @@ class PlayerManager(
     private val _snapshot = MutableStateFlow(PlayerSnapshot())
     val snapshot: StateFlow<PlayerSnapshot> = _snapshot.asStateFlow()
 
+    private val _progress = MutableStateFlow(PlaybackProgress())
+    val progress: StateFlow<PlaybackProgress> = _progress.asStateFlow()
+
     private val _playerState = MutableStateFlow<PlayerState>(PlayerState.Buffering)
     val playerState: StateFlow<PlayerState> = _playerState.asStateFlow()
 
@@ -183,10 +176,12 @@ class PlayerManager(
             when (playbackState) {
                 Player.STATE_IDLE -> Unit
                 Player.STATE_BUFFERING -> {
+                    setVideoBuffering(true)
                     _playerState.value = PlayerState.Buffering
                     _snapshot.update { it.copy(phase = PlaybackPhase.LOADING, error = null) }
                 }
                 Player.STATE_READY -> {
+                    setVideoBuffering(false)
                     activeStreamSession?.let { sess ->
                         if (sess.resolvedSourceId != "offline") {
                             EndpointHealthScorer.recordSuccess(sess.resolvedHoster)
@@ -207,6 +202,7 @@ class PlayerManager(
                     }
                 }
                 Player.STATE_ENDED -> {
+                    setVideoBuffering(false)
                     _playerState.value = PlayerState.Ended
                     _snapshot.update {
                         it.copy(
@@ -257,17 +253,26 @@ class PlayerManager(
             }
             val friendly = ErrorMapper.mapExoPlayerError(error, appContext)
             val req = lastRequest
-            if (req != null && !req.preferCompatibleContainer &&
-                (friendly.reason == FailureReason.CODEC ||
-                    friendly.reason == FailureReason.NETWORK ||
-                    friendly.reason == FailureReason.HTTP_403 ||
-                    friendly.reason == FailureReason.EXPIRED)
-            ) {
+            val wasPlaying = exoPlayer?.playWhenReady ?: true
+            val isMidStreamNotFound = friendly.reason == FailureReason.NOT_FOUND && (_snapshot.value.positionMs > 0L)
+            val isTransportError = friendly.reason == FailureReason.NETWORK ||
+                friendly.reason == FailureReason.TIMEOUT ||
+                friendly.reason == FailureReason.HTTP_403 ||
+                friendly.reason == FailureReason.EXPIRED ||
+                isMidStreamNotFound
+            if (req != null && friendly.reason == FailureReason.CODEC && !req.preferCompatibleContainer) {
                 resolver.invalidateCache(req.slug)
                 val resumeMs = getCurrentPosition().takeIf { it > 0L } ?: _snapshot.value.positionMs
-                load(req.copy(preferCompatibleContainer = true, startPositionMs = resumeMs))
+                load(req.copy(preferCompatibleContainer = true, startPositionMs = resumeMs, autoPlay = wasPlaying))
                 return
             }
+            if (req != null && isTransportError && req.urlRefreshAttempts < 2) {
+                resolver.invalidateCache(req.slug)
+                val resumeMs = getCurrentPosition().takeIf { it > 0L } ?: _snapshot.value.positionMs
+                load(req.copy(urlRefreshAttempts = req.urlRefreshAttempts + 1, startPositionMs = resumeMs, autoPlay = wasPlaying))
+                return
+            }
+            setVideoBuffering(false)
             _playerState.value = PlayerState.Error(friendly)
             _snapshot.update { it.copy(phase = PlaybackPhase.ERROR, error = friendly) }
         }
@@ -288,13 +293,14 @@ class PlayerManager(
         }
 
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(15_000, 60_000, 750, 1_500)
-            .setBackBuffer(15_000, true)
-            .setPrioritizeTimeOverSizeThresholds(true)
+            .setBufferDurationsMs(15_000, 45_000, 250, 2_000)
+            .setBackBuffer(10_000, true)
+            .setTargetBufferBytes(32 * 1024 * 1024)
+            .setPrioritizeTimeOverSizeThresholds(false)
             .build()
 
         val renderersFactory = DefaultRenderersFactory(appContext)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setEnableDecoderFallback(true)
 
         val audioAttributes = AudioAttributes.Builder()
@@ -302,14 +308,24 @@ class PlayerManager(
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
+        val scrubbingParams = ScrubbingModeParameters.Builder()
+            .setDisabledTrackTypes(setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_TEXT))
+            .setFractionalSeekTolerance(0.005, 0.005)
+            .setShouldIncreaseCodecOperatingRate(true)
+            .setAllowSkippingKeyFrameReset(true)
+            .build()
+
         exoPlayer = ExoPlayer.Builder(appContext, renderersFactory)
+            .setScrubbingModeParameters(scrubbingParams)
             .setTrackSelector(trackSelector!!)
             .setLoadControl(loadControl)
             .setBandwidthMeter(bandwidthMeter)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
             .also { player ->
+                player.setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC)
                 player.addListener(playerListener)
                 attachedTextureView?.let { player.setVideoTextureView(it) }
             }
@@ -323,6 +339,12 @@ class PlayerManager(
         exoPlayer?.setVideoTextureView(view)
     }
 
+    fun detachTextureView(view: TextureView) {
+        if (attachedTextureView !== view) return
+        attachedTextureView = null
+        exoPlayer?.setVideoTextureView(null)
+    }
+
     fun load(request: PlaybackRequest) {
         if (released) return
         if (exoPlayer == null) initialize()
@@ -331,6 +353,8 @@ class PlayerManager(
         activeSessionId = sid
         lastRequest = request
 
+        cancelPrebuffer()
+        setVideoBuffering(true)
         loadJob?.cancel()
         exoPlayer?.stop()
         exoPlayer?.clearMediaItems()
@@ -379,28 +403,29 @@ class PlayerManager(
                     )
                 }
 
-                if (MPVLibBridge.isAvailable) {
-                    configureMpvForSequentialPipe(session.localHttpUrl)
-                    _playerState.value = PlayerState.Playing(true)
-                    _snapshot.update {
-                        if (it.sessionId != sid) it else it.copy(
-                            phase = PlaybackPhase.PLAYING,
-                            error = null
-                        )
+                if (session.isHls) {
+                    val maxH = when {
+                        request.preferredResolution.contains("1080") -> 1080
+                        request.preferredResolution.contains("720") -> 720
+                        request.preferredResolution.contains("480") -> 480
+                        else -> 0
                     }
-                    return@launch
+                    setMaxVideoResolution(maxH)
+                } else {
+                    setMaxVideoResolution(0)
                 }
                 prepareMedia(
                     mediaUrl = session.localHttpUrl,
                     headers = session.headers,
                     isHls = session.isHls,
                     startPositionMs = request.startPositionMs,
-                    cacheKey = if (session.isHls) null else "${request.slug}_${session.activeResolution}_${if (request.preferCompatibleContainer) "c" else "s"}"
+                    cacheKey = if (session.isHls) null else buildStreamCacheKey(request.slug, session.activeResolution, request.preferCompatibleContainer)
                 )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
                 if (released || activeSessionId != sid) return@launch
+                PlaybackBandwidthGate.onBufferingChanged(false)
                 val friendly = ErrorMapper.mapResolverError(e, appContext)
                 _playerState.value = PlayerState.Error(friendly)
                 _snapshot.update {
@@ -428,7 +453,7 @@ class PlayerManager(
     fun retry() {
         val current = lastRequest ?: return
         val resumeMs = getCurrentPosition().takeIf { it > 0L } ?: _snapshot.value.positionMs
-        load(current.copy(startPositionMs = resumeMs))
+        load(current.copy(startPositionMs = resumeMs, preferCompatibleContainer = false, urlRefreshAttempts = 0))
     }
 
     fun playStreamEpisode(
@@ -462,6 +487,7 @@ class PlayerManager(
 
         val sid = sessionCounter.incrementAndGet()
         activeSessionId = sid
+        lastRequest = null
         loadJob?.cancel()
         exoPlayer?.stop()
         exoPlayer?.clearMediaItems()
@@ -513,26 +539,51 @@ class PlayerManager(
 
         val upstreamFactory = DefaultDataSource.Factory(appContext, httpFactory)
         val isLocalFile = mediaUrl.startsWith("file://", ignoreCase = true)
-        val isLocalProxy = mediaUrl.startsWith("http://127.0.0.1:", ignoreCase = true)
-        val finalFactory: DataSource.Factory = if (!isLocalFile && !isHls && !isLocalProxy) {
+        val sessionCandidates = activeStreamSession?.candidates.orEmpty()
+        val currentReq = lastRequest
+        val effectiveUpstream: DataSource.Factory = if (!isLocalFile && !isHls && sessionCandidates.isNotEmpty()) {
+            FailoverHttpDataSource.Factory(
+                client = sharedOkHttp,
+                candidates = sessionCandidates,
+                defaultUserAgent = headers["User-Agent"] ?: DEFAULT_USER_AGENT,
+                onCandidateFailure = { cand, code ->
+                    if (code in listOf(403, 404, 410, 429) || code >= 500) {
+                        val req = currentReq
+                        if (req != null) {
+                            val title = req.romajiTitle.ifBlank { req.title }
+                            val ep = resolver.extractEpisodeNumber(req.slug)
+                            resolver.reportDeadDirectUrl(title, ep, cand.directUrl, code)
+                        }
+                    }
+                }
+            )
+        } else {
+            upstreamFactory
+        }
+        val finalFactory: DataSource.Factory = if (!isLocalFile && !isHls) {
             val streamCache = getStreamCache(appContext)
             if (streamCache != null) {
                 CacheDataSource.Factory()
                     .setCache(streamCache)
-                    .setUpstreamDataSourceFactory(upstreamFactory)
+                    .setUpstreamDataSourceFactory(effectiveUpstream)
                     .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
             } else {
-                upstreamFactory
+                effectiveUpstream
             }
         } else {
-            upstreamFactory
+            effectiveUpstream
         }
 
-        val mediaItemBuilder = MediaItem.Builder().setUri(Uri.parse(mediaUrl))
-        if (isHls || mediaUrl.lowercase().contains(".m3u8")) {
+        val targetPlayUrl = if (!isLocalFile && !isHls && sessionCandidates.isNotEmpty()) {
+            sessionCandidates.first().directUrl
+        } else {
+            mediaUrl
+        }
+        val mediaItemBuilder = MediaItem.Builder().setUri(Uri.parse(targetPlayUrl))
+        if (isHls || targetPlayUrl.lowercase().contains(".m3u8")) {
             mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
         }
-        if (!cacheKey.isNullOrBlank() && !isLocalFile && !isHls && !isLocalProxy) {
+        if (!cacheKey.isNullOrBlank() && !isLocalFile && !isHls) {
             mediaItemBuilder.setCustomCacheKey(cacheKey)
         }
 
@@ -540,12 +591,12 @@ class PlayerManager(
             .setDataSourceFactory(finalFactory)
             .createMediaSource(mediaItemBuilder.build())
 
-        playerInstance.setMediaSource(mediaSource)
-        if (startPositionMs > 0L) {
+        playerInstance.setMediaSource(mediaSource, startPositionMs.coerceAtLeast(0L))
+        if (false && startPositionMs > 0L) {
             playerInstance.seekTo(startPositionMs)
         }
         playerInstance.prepare()
-        playerInstance.playWhenReady = true
+        playerInstance.playWhenReady = lastRequest?.autoPlay ?: true
     }
 
     private fun startPositionTicker() {
@@ -561,29 +612,19 @@ class PlayerManager(
                     val pos = p.currentPosition.coerceAtLeast(0L)
                     val dur = p.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: snap.durationMs
                     val buf = p.bufferedPosition.coerceAtLeast(0L)
-                    if (snap.positionMs != pos || snap.durationMs != dur || snap.bufferedPositionMs != buf) {
-                        _snapshot.update { cur ->
-                            if (cur.sessionId != activeSessionId || !cur.isReady) cur
-                            else if (cur.positionMs == pos && cur.durationMs == dur && cur.bufferedPositionMs == buf) cur
-                            else cur.copy(positionMs = pos, durationMs = dur, bufferedPositionMs = buf)
-                        }
+                    val cur = _progress.value
+                    val sid = activeSessionId
+                    if (cur.sessionId != sid || cur.positionMs != pos || cur.durationMs != dur || cur.bufferedPositionMs != buf) {
+                        _progress.value = PlaybackProgress(
+                            sessionId = sid,
+                            positionMs = pos,
+                            durationMs = dur,
+                            bufferedPositionMs = buf
+                        )
                     }
                 }
             }
         }
-    }
-
-    private fun configureMpvForSequentialPipe(localStreamUrl: String) {
-        MPVLibBridge.setOptionString("hwdec", "auto")
-        MPVLibBridge.setOptionString("demuxer-lavf-o", "reconnect=1,reconnect_streamed=1")
-        MPVLibBridge.setOptionString("force-seekable", "yes")
-        MPVLibBridge.setOptionString("demuxer-max-bytes", "150MiB")
-        MPVLibBridge.setOptionString("demuxer-max-back-bytes", "75MiB")
-        MPVLibBridge.setOptionString("sub-ass-override", "force")
-        MPVLibBridge.setOptionString("alang", "jpn,ja")
-        MPVLibBridge.setOptionString("slang", "id,ind,en,eng")
-        MPVLibBridge.setOptionString("sid", "auto")
-        MPVLibBridge.command(arrayOf("loadfile", localStreamUrl, "replace"))
     }
 
     fun setMaxVideoResolution(maxHeight: Int) {
@@ -592,6 +633,13 @@ class PlayerManager(
         if (maxHeight <= 0) params.clearVideoSizeConstraints()
         else params.setMaxVideoSize(Int.MAX_VALUE, maxHeight)
         selector.setParameters(params)
+    }
+
+    fun setScrubbing(active: Boolean) {
+        val p = exoPlayer ?: return
+        if (p.isScrubbingModeEnabled != active) {
+            p.isScrubbingModeEnabled = active
+        }
     }
 
     fun pause() {
@@ -637,20 +685,11 @@ class PlayerManager(
 
     fun getDuration(): Long = exoPlayer?.duration?.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
 
-    private fun stopStreamSession(syncClose: Boolean = false) {
+    private fun stopStreamSession(@Suppress("UNUSED_PARAMETER") syncClose: Boolean = false) {
         val current = activeStreamSession
         activeStreamSession = null
         if (current != null) {
-            if (syncClose) {
-                runCatching { current.closeSession.invoke() }
-            } else {
-                Thread({
-                    runCatching { current.closeSession.invoke() }
-                }, "milkglass-proxy-close").apply {
-                    isDaemon = true
-                    start()
-                }
-            }
+            runCatching { current.closeSession.invoke() }
         }
     }
 
@@ -658,6 +697,8 @@ class PlayerManager(
         if (released) return
         released = true
         activeSessionId = -1L
+        cancelPrebuffer()
+        setVideoBuffering(false)
         loadJob?.cancel()
         loadJob = null
         tickerJob?.cancel()
@@ -699,6 +740,133 @@ class PlayerManager(
 
         @Volatile
         private var sharedDbProvider: DatabaseProvider? = null
+
+        private const val PREBUFFER_HEAD_BYTES = 2L * 1024L * 1024L
+        private const val PREBUFFER_MKV_TAIL_BYTES = 256L * 1024L
+        private const val PREBUFFER_MP4_TAIL_BYTES = 512L * 1024L
+
+        private val _isVideoBuffering = MutableStateFlow(false)
+        val isVideoBuffering: StateFlow<Boolean> = _isVideoBuffering.asStateFlow()
+
+        private val activePrebufferWriter = AtomicReference<CacheWriter?>(null)
+
+        internal fun setVideoBuffering(buffering: Boolean) {
+            _isVideoBuffering.value = buffering
+        PlaybackBandwidthGate.onBufferingChanged(buffering)
+        }
+
+        fun buildStreamCacheKey(
+            slug: String,
+            activeResolution: String,
+            preferCompatibleContainer: Boolean = false
+        ): String {
+            val mode = if (preferCompatibleContainer) "c" else "s"
+            return "${slug.trim().lowercase()}_${activeResolution.trim().lowercase()}_$mode"
+        }
+
+        fun cancelPrebuffer() {
+            activePrebufferWriter.getAndSet(null)?.let { writer ->
+                runCatching { writer.cancel() }
+            }
+        }
+
+        /**
+         * Pre-buffer 2 tahap ke SimpleCache memakai CacheWriter:
+         * Tahap 1: 2 MiB awal (header + frame awal) untuk warm start <300ms.
+         * Tahap 2: 256 KiB ekor (MKV Cues) atau 512 KiB ekor (MP4 non-faststart moov) bila Content-Length diketahui.
+         */
+        suspend fun prebufferEpisode(
+            context: Context,
+            session: LocalStreamSession,
+            slug: String,
+            preferCompatibleContainer: Boolean = false,
+            headBytes: Long = PREBUFFER_HEAD_BYTES
+        ): Boolean = withContext(Dispatchers.IO) {
+            if (session.isHls || session.localHttpUrl.startsWith("file://", ignoreCase = true)) {
+                return@withContext false
+            }
+            val streamCache = getStreamCache(context.applicationContext) ?: return@withContext false
+            val cacheKey = buildStreamCacheKey(slug, session.activeResolution, preferCompatibleContainer)
+            val alreadyCached = runCatching {
+                streamCache.getCachedBytes(cacheKey, 0L, headBytes)
+            }.getOrDefault(0L)
+            if (alreadyCached >= headBytes) {
+                return@withContext true
+            }
+
+            val sharedOkHttp = EngineRuntime.get(context.applicationContext).clients.mediaAndApiClient
+            val upstreamFactory: DataSource.Factory = if (session.candidates.isNotEmpty()) {
+                FailoverHttpDataSource.Factory(
+                    client = sharedOkHttp,
+                    candidates = session.candidates,
+                    defaultUserAgent = session.headers["User-Agent"] ?: DEFAULT_USER_AGENT
+                )
+            } else {
+                OkHttpDataSource.Factory(sharedOkHttp)
+                    .setUserAgent(session.headers["User-Agent"] ?: DEFAULT_USER_AGENT)
+                    .setDefaultRequestProperties(session.headers)
+            }
+
+            val cacheDs = CacheDataSource.Factory()
+                .setCache(streamCache)
+                .setUpstreamDataSourceFactory(upstreamFactory)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+                .createDataSource()
+
+            val targetUri = Uri.parse(session.candidates.firstOrNull()?.directUrl ?: session.localHttpUrl)
+            val headSpec = DataSpec.Builder()
+                .setUri(targetUri)
+                .setPosition(0L)
+                .setLength(headBytes)
+                .setKey(cacheKey)
+                .build()
+
+            var knownTotalLength = C.LENGTH_UNSET.toLong()
+            val headWriter = CacheWriter(cacheDs, headSpec, ByteArray(64 * 1024)) { reqLen, _, _ ->
+                if (reqLen > 0L) knownTotalLength = reqLen
+            }
+            cancelPrebuffer()
+            activePrebufferWriter.set(headWriter)
+            val headOk = try {
+                headWriter.cache()
+                true
+            } catch (_: Throwable) {
+                false
+            } finally {
+                activePrebufferWriter.compareAndSet(headWriter, null)
+            }
+            if (!headOk) return@withContext false
+
+            val totalLen = knownTotalLength.takeIf { it > 0L } ?: runCatching {
+                androidx.media3.datasource.cache.ContentMetadata.getContentLength(streamCache.getContentMetadata(cacheKey))
+            }.getOrDefault(C.LENGTH_UNSET.toLong())
+
+            val isMp4 = session.candidates.firstOrNull()?.container == MediaContainer.MP4
+            val tailBytes = if (isMp4) PREBUFFER_MP4_TAIL_BYTES else PREBUFFER_MKV_TAIL_BYTES
+            if (totalLen > headBytes + tailBytes) {
+                val tailStart = totalLen - tailBytes
+                val tailCached = runCatching {
+                    streamCache.getCachedBytes(cacheKey, tailStart, tailBytes)
+                }.getOrDefault(0L)
+                if (tailCached < tailBytes) {
+                    val tailSpec = DataSpec.Builder()
+                        .setUri(targetUri)
+                        .setPosition(tailStart)
+                        .setLength(tailBytes)
+                        .setKey(cacheKey)
+                        .build()
+                    val tailWriter = CacheWriter(cacheDs, tailSpec, ByteArray(64 * 1024), null)
+                    activePrebufferWriter.set(tailWriter)
+                    try {
+                        tailWriter.cache()
+                    } catch (_: Throwable) {
+                    } finally {
+                        activePrebufferWriter.compareAndSet(tailWriter, null)
+                    }
+                }
+            }
+            true
+        }
 
         fun getStreamCache(context: Context): Cache? {
             sharedStreamCache?.let { return it }

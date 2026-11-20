@@ -25,19 +25,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
-import java.io.BufferedInputStream
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStream
-import java.net.InetAddress
-import java.net.ServerSocket
-import java.net.Socket
 import java.net.URLEncoder
 import org.json.JSONArray
 import org.json.JSONObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -55,6 +47,7 @@ data class LocalStreamSession(
     val resolvedHoster: String = "Pixeldrain",
     val isHls: Boolean = false,
     val headers: Map<String, String> = emptyMap(),
+    val candidates: List<ResolvedMkvMedia> = emptyList(),
     val closeSession: () -> Unit
 )
 
@@ -119,11 +112,52 @@ class StreamResolver(
         Thread(r, "milkglass-hint").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
     }
     private val hintReportedAt = ConcurrentHashMap<String, Long>()
-    private val failoverMediaClient by lazy {
-        clients.mediaAndApiClient.newBuilder()
-            .connectTimeout(3, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
-            .build()
+    /**
+     * Laporkan URL direct yang mati (403/404/410) secara asinkron agar Edge/D1 segera mengeviksi.
+     */
+    fun reportDeadDirectUrl(title: String, ep: Int, directUrl: String, httpCode: Int) {
+        if (!hasAuthSession() || !directUrl.startsWith("https://")) return
+        if (title.trim().length < 2 || ep <= 0) return
+        val statusStr = when (httpCode) {
+            403 -> "403"
+            404 -> "404"
+            410 -> "410"
+            408, 429, 504 -> "timeout"
+            else -> if (httpCode >= 500) "expired" else return
+        }
+        val now = System.currentTimeMillis()
+        if (now < serverResolverDisabledUntilMs) return
+        hintExecutor.execute {
+            runCatching {
+                val body = JSONObject()
+                    .put("title", title.trim().take(160))
+                    .put("ep", ep)
+                    .put("kind", "direct")
+                    .put("url", directUrl.take(2048))
+                    .put("http_status", statusStr)
+                    .toString()
+                val req = Request.Builder()
+                    .url("${backendBaseUrl.trimEnd('/')}/v1/play/report")
+                    .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                serverHintClient.newCall(req).execute().close()
+            }
+        }
+    }
+
+    /**
+     * Mengembalikan daftar kandidat ter-cache (segar) untuk kebutuhan pre-buffering CacheWriter.
+     */
+    fun getCachedCandidates(
+        slug: String,
+        preferredRes: String = "1080p",
+        preferCompatibleContainer: Boolean = false
+    ): List<ResolvedMkvMedia>? {
+        val normRes = if (preferredRes == "Auto") "1080p" else preferredRes
+        val key = "${slug.lowercase()}|${normRes.lowercase()}|$preferCompatibleContainer"
+        val cached = resolvedCache[key] ?: return null
+        if (System.currentTimeMillis() - cached.cachedAtMs > RESOLVED_CACHE_TTL_MS) return null
+        return cached.candidates.takeIf { it.isNotEmpty() }
     }
 
     /**
@@ -227,13 +261,13 @@ class StreamResolver(
     // kegagalan sumber). Prefetch yang sedang berjalan untuk episode yang sama ikut jadi peserta ketiga.
     // ---------------------------------------------------------------------------------------------
     private sealed interface RaceOutcome {
-        class Candidates(val list: List<ResolvedMkvMedia>) : RaceOutcome
+        class Candidates(val list: List<ResolvedMkvMedia>, val availableQualities: List<MkvQuality> = emptyList()) : RaceOutcome
         class Failed(val reason: FailureReason, val message: String) : RaceOutcome
     }
 
     private sealed interface RaceMsg {
         class FromServer(val list: List<ResolvedMkvMedia>) : RaceMsg
-        class FromJoin(val list: List<ResolvedMkvMedia>) : RaceMsg
+        class FromJoin(val entry: CachedResolvedCandidates?) : RaceMsg
         class FromCascade(val result: CascadeResult?) : RaceMsg
     }
 
@@ -273,9 +307,14 @@ class StreamResolver(
             runCatching { PublicIpGuard.verifyPublicHost(clients.dns, h); true }.getOrDefault(false)
         }.distinctBy { it.directUrl }
 
-    private fun cacheEntryFor(list: List<ResolvedMkvMedia>): CachedResolvedCandidates {
+    private fun cacheEntryFor(
+        list: List<ResolvedMkvMedia>,
+        knownQualities: List<MkvQuality> = emptyList()
+    ): CachedResolvedCandidates {
         val chosen = list.first()
-        val avail = list.map { it.quality.label }.distinct().ifEmpty { listOf(chosen.quality.label) }
+        val avail = (knownQualities.map { it.label } + list.map { it.quality.label })
+            .distinct()
+            .ifEmpty { listOf(chosen.quality.label) }
         return CachedResolvedCandidates(
             cachedAtMs = System.currentTimeMillis(),
             candidates = list,
@@ -329,12 +368,12 @@ class StreamResolver(
                 pending++
                 futures.add(
                     raceExecutor.submit(Runnable {
-                        var list: List<ResolvedMkvMedia> = emptyList()
+                        var entry: CachedResolvedCandidates? = null
                         try {
-                            list = joined.awaitOrNull(JOIN_INFLIGHT_MAX_MS)?.candidates.orEmpty()
+                            entry = joined.awaitOrNull(JOIN_INFLIGHT_MAX_MS)
                         } catch (_: InterruptedException) {
                         }
-                        queue.offer(RaceMsg.FromJoin(list))
+                        queue.offer(RaceMsg.FromJoin(entry))
                     })
                 )
             }
@@ -379,9 +418,11 @@ class StreamResolver(
                     }
                     is RaceMsg.FromJoin -> {
                         pending--
-                        if (msg.list.isNotEmpty()) {
-                            val ok = publicOnly(msg.list)
-                            if (ok.isNotEmpty()) return RaceOutcome.Candidates(ok)
+                        val e = msg.entry
+                        if (e != null && e.candidates.isNotEmpty()) {
+                            val ok = publicOnly(e.candidates)
+                            val knownQ = e.availableResolutions.mapNotNull { MkvQuality.fromText(it) }
+                            if (ok.isNotEmpty()) return RaceOutcome.Candidates(ok, knownQ)
                         }
                     }
                     is RaceMsg.FromCascade -> {
@@ -392,7 +433,7 @@ class StreamResolver(
                             if (ok.isNotEmpty()) {
                                 // Simpan otomatis di Cloudflare supaya pengguna lain tak perlu scraping + ekstraksi.
                                 reportDirect(searchTitle, episodeNum, ok)
-                                return RaceOutcome.Candidates(ok)
+                                return RaceOutcome.Candidates(ok, r.availableQualities)
                             }
                             hosterRejected = true
                         } else if (r is CascadeResult.Failure) {
@@ -552,6 +593,25 @@ class StreamResolver(
         return emptyList()
     }
 
+    fun getCachedSession(
+        slug: String,
+        preferredRes: String = "1080p",
+        preferCompatibleContainer: Boolean = false
+    ): LocalStreamSession? {
+        val preferredQuality = MkvQuality.fromText(preferredRes) ?: MkvQuality.P1080
+        val sessionCacheKey = "${slug.lowercase()}#${preferredQuality.label}#${if (preferCompatibleContainer) "compat" else "std"}"
+        val nowMs = System.currentTimeMillis()
+        val entry = resolvedCache[sessionCacheKey]?.takeIf { nowMs - it.cachedAtMs <= RESOLVED_CACHE_TTL_MS } ?: return null
+        return startSessionForCandidates(
+            candidates = entry.candidates,
+            availableResolutions = entry.availableResolutions,
+            activeResolution = entry.activeResolution,
+            resolvedSourceId = entry.resolvedSourceId,
+            resolvedHoster = entry.resolvedHoster,
+            scope = CoroutineScope(Dispatchers.IO)
+        )
+    }
+
     fun prefetchStream(
         slug: String,
         preferredRes: String = "1080p",
@@ -589,7 +649,7 @@ class StreamResolver(
                 mine.complete(null)
                 return false
             }
-            val entry = cacheEntryFor(outcome.list)
+            val entry = cacheEntryFor(outcome.list, outcome.availableQualities)
             if (resolvedCache.size > 32) resolvedCache.clear()
             resolvedCache[sessionCacheKey] = entry
             mine.complete(entry)
@@ -658,41 +718,29 @@ class StreamResolver(
 
         // Prefetch yang sedang jalan: tunggu sebentar saja. Bila belum selesai, resolve sendiri dimulai SEKARANG dan
         // prefetch tetap ikut berlomba (dulu: menunggu sampai 12 dtk lalu mengulang dari nol).
-        val mine = CompletableFuture<CachedResolvedCandidates?>()
-        val inflight = inFlightResolutions.putIfAbsent(sessionCacheKey, mine)
+        val inflight = inFlightResolutions[sessionCacheKey]
         if (inflight != null) {
-            val joinedEntry = inflight.awaitOrNull(JOIN_FAST_MS)
+            val joinedEntry = inflight.awaitOrNull(0L)
             if (joinedEntry != null) return startFromEntry(joinedEntry, scope)
         }
 
         val altTitle = if (searchTitle == romajiTitle) title else romajiTitle
-        return try {
-            val outcome = raceResolve(
-                searchTitle = searchTitle,
-                altTitle = altTitle,
-                episodeNum = episodeNum,
-                preferredQuality = preferredQuality,
-                preferCompatibleContainer = preferCompatibleContainer,
-                joined = inflight
-            )
-            when (outcome) {
-                is RaceOutcome.Failed -> {
-                    if (inflight == null) mine.complete(null)
-                    throw StreamResolutionException(outcome.reason, outcome.message)
-                }
-                is RaceOutcome.Candidates -> {
-                    val entry = cacheEntryFor(outcome.list)
-                    if (resolvedCache.size > 32) resolvedCache.clear()
-                    resolvedCache[sessionCacheKey] = entry
-                    if (inflight == null) mine.complete(entry)
-                    startFromEntry(entry, scope)
-                }
+        val outcome = raceResolve(
+            searchTitle = searchTitle,
+            altTitle = altTitle,
+            episodeNum = episodeNum,
+            preferredQuality = preferredQuality,
+            preferCompatibleContainer = preferCompatibleContainer,
+            joined = inflight
+        )
+        return when (outcome) {
+            is RaceOutcome.Failed -> throw StreamResolutionException(outcome.reason, outcome.message)
+            is RaceOutcome.Candidates -> {
+                val entry = cacheEntryFor(outcome.list, outcome.availableQualities)
+                if (resolvedCache.size > 32) resolvedCache.clear()
+                resolvedCache[sessionCacheKey] = entry
+                startFromEntry(entry, scope)
             }
-        } catch (t: Throwable) {
-            if (inflight == null && !mine.isDone) mine.complete(null)
-            throw t
-        } finally {
-            if (inflight == null) inFlightResolutions.remove(sessionCacheKey, mine)
         }
     }
 
@@ -702,230 +750,30 @@ class StreamResolver(
         activeResolution: String,
         resolvedSourceId: String,
         resolvedHoster: String,
-        scope: CoroutineScope
+        @Suppress("UNUSED_PARAMETER") scope: CoroutineScope
     ): LocalStreamSession {
         val primary = candidates.first()
-        if (primary.isHls || primary.container == MediaContainer.HLS) {
-            val hdrs = buildMap {
-                put("User-Agent", clients.webViewUserAgent)
-                if (!primary.referer.isNullOrBlank()) put("Referer", primary.referer)
-            }
-            return LocalStreamSession(
-                localHttpUrl = primary.directUrl,
-                expectedSizeBytes = 0L,
-                availableResolutions = availableResolutions,
-                activeResolution = activeResolution,
-                resolvedSourceId = resolvedSourceId,
-                resolvedHoster = resolvedHoster,
-                isHls = true,
-                headers = hdrs,
-                closeSession = {}
-            )
+        val isHls = primary.isHls || primary.container == MediaContainer.HLS
+        val hdrs = buildMap {
+            put("User-Agent", clients.webViewUserAgent)
+            if (!primary.referer.isNullOrBlank()) put("Referer", primary.referer)
+            putAll(primary.extraHeaders)
         }
-        return startHttpRangeProxySession(
-            candidates = candidates,
-            availableResolutions = availableResolutions,
-            activeResolution = activeResolution,
-            resolvedSourceId = resolvedSourceId,
-            resolvedHoster = resolvedHoster,
-            scope = scope
-        )
-    }
-
-    private fun startHttpRangeProxySession(
-        candidates: List<ResolvedMkvMedia>,
-        availableResolutions: List<String>,
-        activeResolution: String,
-        resolvedSourceId: String,
-        resolvedHoster: String,
-        scope: CoroutineScope
-    ): LocalStreamSession {
-        val server = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
-        val sessionToken = UUID.randomUUID().toString().replace("-", "")
-        val expectedPath = "/$sessionToken/stream"
-        val localUrl = "http://127.0.0.1:${server.localPort}$expectedPath"
-        val stickyIdx = AtomicInteger(0)
-        val activeSockets = ConcurrentHashMap.newKeySet<Socket>()
-
-        val acceptJob = scope.launch(Dispatchers.IO) {
-            try {
-                while (isActive && !server.isClosed) {
-                    val clientSocket = runCatching { server.accept() }.getOrNull() ?: break
-                    activeSockets.add(clientSocket)
-                    launch(Dispatchers.IO) {
-                        try {
-                            runCatching {
-                                handleLocalProxyRequest(clientSocket, expectedPath, candidates, stickyIdx)
-                            }
-                        } finally {
-                            activeSockets.remove(clientSocket)
-                        }
-                    }
-                }
-            } finally {
-                runCatching { server.close() }
-            }
-        }
-
         return LocalStreamSession(
-            localHttpUrl = localUrl,
+            localHttpUrl = primary.directUrl,
             expectedSizeBytes = 0L,
             availableResolutions = availableResolutions,
             activeResolution = activeResolution,
             resolvedSourceId = resolvedSourceId,
             resolvedHoster = resolvedHoster,
-            closeSession = {
-                acceptJob.cancel()
-                runCatching { server.close() }
-                activeSockets.forEach { s -> runCatching { s.close() } }
-                activeSockets.clear()
-            }
+            isHls = isHls,
+            headers = hdrs,
+            candidates = candidates,
+            closeSession = {}
         )
     }
 
-    private fun handleLocalProxyRequest(
-        clientSocket: Socket,
-        expectedPath: String,
-        candidates: List<ResolvedMkvMedia>,
-        stickyIdx: AtomicInteger = AtomicInteger(0)
-    ) {
-        clientSocket.use { socket ->
-            runCatching {
-                socket.tcpNoDelay = true
-                socket.sendBufferSize = 131_072
-                socket.soTimeout = 30_000
-            }
-            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-            val out: OutputStream = socket.getOutputStream()
-
-            while (!socket.isClosed) {
-                val requestLine = reader.readLine() ?: return
-                if (requestLine.isBlank()) continue
-                val parts = requestLine.split(" ")
-                val method = parts.getOrNull(0)?.uppercase() ?: "GET"
-                val path = parts.getOrNull(1)?.substringBefore("?") ?: ""
-
-                var rangeHeader: String? = null
-                var clientWantsClose = false
-                while (true) {
-                    val line = reader.readLine() ?: return
-                    if (line.isBlank()) break
-                    if (line.startsWith("Range:", ignoreCase = true)) {
-                        rangeHeader = line.substringAfter(":").trim()
-                    } else if (line.startsWith("Connection:", ignoreCase = true) &&
-                        line.contains("close", ignoreCase = true)
-                    ) {
-                        clientWantsClose = true
-                    }
-                }
-
-                if (path != expectedPath) {
-                    out.write("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
-                    out.flush()
-                    return
-                }
-
-                var handled = false
-                var keepAlive = false
-
-                val startIdx = stickyIdx.get().coerceIn(0, (candidates.size - 1).coerceAtLeast(0))
-                val rangeStart = rangeHeader?.substringAfter("bytes=", "")?.substringBefore("-")?.trim()?.toLongOrNull() ?: 0L
-                val isMidStreamSeek = rangeStart > 0L
-                val orderedIndices = if (isMidStreamSeek) {
-                    listOf(startIdx) + (0 until candidates.size).filter { it != startIdx }
-                } else {
-                    (startIdx until candidates.size) + (0 until startIdx)
-                }
-                for ((attemptPos, idx) in orderedIndices.withIndex()) {
-                    val candidate = candidates[idx]
-                    val isLast = attemptPos == orderedIndices.lastIndex
-                    val reqBuilder = Request.Builder()
-                        .url(candidate.directUrl)
-                        .header("User-Agent", clients.webViewUserAgent)
-                    if (!candidate.referer.isNullOrBlank()) {
-                        reqBuilder.header("Referer", candidate.referer)
-                    }
-                    if (!rangeHeader.isNullOrBlank()) {
-                        reqBuilder.header("Range", rangeHeader)
-                    }
-                    if (method == "HEAD") reqBuilder.head()
-
-                    var headersSent = false
-                    // Kandidat yang masih punya cadangan di belakangnya gagal-cepat (host mati tak lagi menahan 8-20 dtk).
-                    val callClient = if (isLast) clients.mediaAndApiClient else failoverMediaClient
-                    val outcome = runCatching {
-                        callClient.newCall(reqBuilder.build()).execute().use { resp ->
-                            if (isMidStreamSeek && resp.code == 200) {
-                                return@use Pair(false, false)
-                            }
-                            val shouldFailover = !isLast && (resp.code == 403 || resp.code == 404 || resp.code == 410 || resp.code == 429 || resp.code >= 500)
-                            if (shouldFailover) {
-                                EndpointHealthScorer.recordFailure(candidate.hoster)
-                                return@use Pair(false, false)
-                            }
-                            if (resp.isSuccessful || resp.code == 206) {
-                                stickyIdx.set(idx)
-                                EndpointHealthScorer.recordSuccess(candidate.hoster)
-                            }
-
-                            val contentLength = resp.header("Content-Length")
-                            val canKeepAlive = !clientWantsClose && method == "HEAD"
-                            val statusText = when (resp.code) {
-                                206 -> "Partial Content"
-                                200 -> "OK"
-                                else -> resp.message.ifBlank { "Error" }
-                            }
-                            val fallbackCt = if (candidate.container == MediaContainer.MP4) "video/mp4" else "application/octet-stream"
-                            val sb = StringBuilder()
-                            sb.append("HTTP/1.1 ${resp.code} $statusText\r\n")
-                            sb.append("Content-Type: ${resp.header("Content-Type") ?: fallbackCt}\r\n")
-                            sb.append("Accept-Ranges: ${if (candidate.supportsRange) "bytes" else "none"}\r\n")
-                            contentLength?.let { sb.append("Content-Length: $it\r\n") }
-                            resp.header("Content-Range")?.let { sb.append("Content-Range: $it\r\n") }
-                            sb.append("Connection: ${if (canKeepAlive) "keep-alive" else "close"}\r\n\r\n")
-                            out.write(sb.toString().toByteArray())
-                            out.flush()
-                            headersSent = true
-
-                            if (method != "HEAD") {
-                                resp.body?.byteStream()?.let { stream ->
-                                    BufferedInputStream(stream, 131072).use { bis ->
-                                        val buf = ByteArray(131072)
-                                        while (true) {
-                                            val read = bis.read(buf)
-                                            if (read == -1) break
-                                            out.write(buf, 0, read)
-                                        }
-                                    }
-                                }
-                            }
-                            out.flush()
-                            Pair(true, canKeepAlive)
-                        }
-                    }.getOrElse {
-                        if (headersSent) Pair(true, false) else Pair(false, false)
-                    }
-
-                    if (outcome.first) {
-                        handled = true
-                        keepAlive = outcome.second
-                        break
-                    }
-                }
-
-                if (!handled) {
-                    runCatching {
-                        out.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
-                        out.flush()
-                    }
-                    return
-                }
-                if (!keepAlive) return
-            }
-        }
-    }
-
-    private fun extractEpisodeNumber(slug: String): Int {
+    fun extractEpisodeNumber(slug: String): Int {
         return Regex("-ep-(\\d+)$", RegexOption.IGNORE_CASE)
             .find(slug)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
     }
