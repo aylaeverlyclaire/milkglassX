@@ -44,7 +44,7 @@ test('parseEpisodeHostersFromHtml extracts multi-hoster multi-quality links and 
         </li>
         <li>
           <strong>MKV 1080p</strong>
-          <a href="https://acefile.co/f/999">Acefile</a>
+          <a href="https://buzzheavier.com/f/999">Buzzheavier</a>
           <a href="https://krakenfiles.com/view/kkk">KFiles</a>
         </li>
       </ul>
@@ -54,7 +54,7 @@ test('parseEpisodeHostersFromHtml extracts multi-hoster multi-quality links and 
   assert.equal(hosters.length, 4);
   assert.deepEqual(
     hosters.map((h) => `${h.quality}:${h.container}:${h.hoster}`),
-    ['1080p:mkv:Acefile', '1080p:mkv:KFiles', '720p:mp4:Pdrain', '720p:mp4:Gofile']
+    ['1080p:mkv:Buzzheavier', '1080p:mkv:KFiles', '720p:mp4:Pdrain', '720p:mp4:Gofile']
   );
 });
 

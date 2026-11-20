@@ -134,7 +134,9 @@ interface MkvSourceProvider {
 data class ParsedTitle(
     val canonicalBase: String,
     val season: Int?,
-    val tokens: Set<String>
+    val tokens: Set<String>,
+    val part: Int? = null,
+    val formatKind: String = "TV"
 )
 
 internal object TitleMatcher {
@@ -142,14 +144,21 @@ internal object TitleMatcher {
     private val brackets = Regex("[\\[\\](){}]")
     private val stopWords = setOf(
         "sub", "indo", "subtitle", "indonesia", "batch", "bd", "episode", "eps",
-        "the", "tv", "special"
+        "the", "tv"
     )
     private val seasonPatterns = listOf(
         Regex("""\bseason\s*(\d+)\b""", RegexOption.IGNORE_CASE),
         Regex("""\bs(\d+)\b""", RegexOption.IGNORE_CASE),
-        Regex("""\b(\d+)(?:st|nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bpart\s*(\d+)\b""", RegexOption.IGNORE_CASE)
+        Regex("""\b(\d+)(?:st|nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE)
     )
+    private val partPatterns = listOf(
+        Regex("""\b(?:part|cour)\s*(\d+)\b""", RegexOption.IGNORE_CASE)
+    )
+    private val movieRegex = Regex("""\b(?:movie|gekijouban|film)\b""", RegexOption.IGNORE_CASE)
+    private val ovaRegex = Regex("""\b(?:ova|oad)\b""", RegexOption.IGNORE_CASE)
+    private val onaRegex = Regex("""\bona\b""", RegexOption.IGNORE_CASE)
+    private val sideStoryRegex = Regex("""\b(?:side\s*story|gaiden|spin[\s-]*off)\b""", RegexOption.IGNORE_CASE)
+    private val specialRegex = Regex("""\b(?:special|recap|sp)\b""", RegexOption.IGNORE_CASE)
     private val romanSeasonRegex = Regex("""\b(II|III|IV|V)\b""")
     private val whitespaceRegex = Regex("\\s+")
     private val ordinalSeasonRegex = Regex("""\b(\d+)(?:nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE)
@@ -190,8 +199,25 @@ internal object TitleMatcher {
                 else -> null
             }
         }
+        var part: Int? = null
+        for (p in partPatterns) {
+            val m = p.find(noBrackets)
+            if (m != null) {
+                part = m.groupValues[1].toIntOrNull()
+                if (part != null) break
+            }
+        }
+        val formatKind = when {
+            movieRegex.containsMatchIn(noBrackets) -> "MOVIE"
+            ovaRegex.containsMatchIn(noBrackets) -> "OVA"
+            sideStoryRegex.containsMatchIn(noBrackets) -> "SIDE_STORY"
+            specialRegex.containsMatchIn(noBrackets) -> "SPECIAL"
+            onaRegex.containsMatchIn(noBrackets) -> "ONA"
+            else -> "TV"
+        }
         var stripped = noBrackets
         for (p in seasonPatterns) stripped = p.replace(stripped, " ")
+        for (p in partPatterns) stripped = p.replace(stripped, " ")
         stripped = romanSeasonRegex.replace(stripped, " ")
         val canonicalBase = nonWord.replace(stripped.lowercase(Locale.ROOT), " ")
             .replace(whitespaceRegex, " ")
@@ -199,7 +225,9 @@ internal object TitleMatcher {
         return ParsedTitle(
             canonicalBase = canonicalBase,
             season = season,
-            tokens = tokenize(noBrackets)
+            tokens = tokenize(noBrackets),
+            part = part,
+            formatKind = formatKind
         )
     }
 
@@ -233,10 +261,18 @@ internal object TitleMatcher {
         if (pq.canonicalBase.length >= 3 && pc.canonicalBase.contains(pq.canonicalBase)) {
             sc += 0.25
         }
+        if (pq.formatKind != pc.formatKind) {
+            // Jangan tukar TV series dengan Movie / OVA / Special / Side Story
+            sc -= 0.95
+        }
         when {
             pq.season != null && pc.season == pq.season -> sc += 0.25
             pq.season != null && pq.season > 1 && pc.season != pq.season -> sc -= 0.90
-            pq.season == null && pc.season != null && pc.season > 1 -> sc -= 0.25
+            pq.season == null && pc.season != null && pc.season > 1 -> sc -= 0.35
+        }
+        when {
+            pq.part != null && pc.part == pq.part -> sc += 0.15
+            pq.part != null && pc.part != null && pq.part != pc.part -> sc -= 0.55
         }
         return sc.coerceAtLeast(0.0)
     }
@@ -1107,6 +1143,7 @@ class MkvCascadeResolver(
                 .thenBy { it.priority.rank }
         )
     }
+
     fun cachedQualitiesFor(animeTitle: String, episodeNumber: Int): List<MkvQuality> {
         val cacheKey = "${animeTitle.lowercase(Locale.ROOT).trim()}#$episodeNumber"
         val nowMs = System.currentTimeMillis()
@@ -1115,7 +1152,7 @@ class MkvCascadeResolver(
             ?: return emptyList()
         return list.filterNot { it.isBatchArchive }.map { it.quality }.distinct().sortedByDescending { it.height }
     }
-    
+
     fun warmEpisodeCandidates(animeTitle: String, episodeNumber: Int): Boolean {
         val cacheKey = "${animeTitle.lowercase(Locale.ROOT).trim()}#$episodeNumber"
         val nowMs = System.currentTimeMillis()

@@ -35,7 +35,7 @@ const IP_AGNOSTIC_HOSTER_DOMAINS = [
   'mediafire.com', 'krakenfiles.com', 'kfiles.io', 'wibufile.com', 'uqni.net',
 ];
 const IP_LOCKED_HOSTER_DOMAINS = [
-  'gofile.io', 'acefile.co', 'desustream.info', 'desustream.com', 'ondesu.com', 'mp4upload.com',
+  'gofile.io', 'desustream.info', 'desustream.com', 'ondesu.com', 'mp4upload.com',
 ];
 const ALL_HOSTER_DOMAINS = [...IP_AGNOSTIC_HOSTER_DOMAINS, ...IP_LOCKED_HOSTER_DOMAINS];
 
@@ -153,19 +153,30 @@ playRoutes.post('/hint', rateLimit(20, 60), requireVerifiedUserMiddleware(userWr
   }
 });
 
-async function lookupEpisodeHosters(db: D1ReadClient, title: string, ep: number): Promise<StoredHint[] | null> {
+async function lookupEpisodeHosters(db: D1ReadClient, title: string, ep: number, animeId?: number): Promise<StoredHint[] | null> {
   const tKey = normalizeTitleKey(title);
-  if (!tKey) return null;
+  if (!tKey && !animeId) return null;
   try {
-    const { results } = await db
-      .prepare(
-        `SELECT url, quality, hoster, provider, container, referer
-         FROM episode_hosters
-         WHERE episode_number = ?2 AND is_live = 1 AND (title_key = ?1 OR title_alt_key = ?1)
-         ORDER BY last_verified_at DESC
-         LIMIT 16`
-      )
-      .bind(tKey, ep)
+    const query = animeId
+      ? db
+          .prepare(
+            `SELECT url, quality, hoster, provider, container, referer
+             FROM episode_hosters
+             WHERE episode_number = ?2 AND is_live = 1 AND (anime_id = ?1 OR title_key = ?3 OR title_alt_key = ?3)
+             ORDER BY (CASE WHEN anime_id = ?1 THEN 0 ELSE 1 END) ASC, last_verified_at DESC
+             LIMIT 16`
+          )
+          .bind(animeId, ep, tKey)
+      : db
+          .prepare(
+            `SELECT url, quality, hoster, provider, container, referer
+             FROM episode_hosters
+             WHERE episode_number = ?2 AND is_live = 1 AND (title_key = ?1 OR title_alt_key = ?1)
+             ORDER BY last_verified_at DESC
+             LIMIT 16`
+          )
+          .bind(tKey, ep);
+    const { results } = await query
       .all<{
         url: string;
         quality: string;
@@ -326,7 +337,8 @@ async function lookupDirect(db: D1ReadClient, title: string, ep: number): Promis
 }
 
 const resolveQuerySchema = z.object({
-  title: z.string().trim().min(2).max(160),
+  anime_id: z.coerce.number().int().positive().optional(),
+  title: z.string().trim().min(1).max(160),
   ep: z.coerce.number().int().min(1).max(2000),
   q: z.enum(['1080p', '720p', '480p', '360p']).default('1080p'),
 });
@@ -387,15 +399,15 @@ playRoutes.get(
     }
   },
   zValidator('query', resolveQuerySchema),
-  edgeCache(900, 120, true, { allowedQueryParams: ['title', 'ep'], privateClientCache: true, normalizeTitleParam: true }),
+  edgeCache(900, 120, true, { allowedQueryParams: ['anime_id', 'title', 'ep'], privateClientCache: true, normalizeTitleParam: true }),
   async (c) => {
-    const { title, ep, q } = c.req.valid('query');
+    const { anime_id, title, ep, q } = c.req.valid('query');
 
     // 1) Jalur cepat dari D1 (tanpa scrape, tanpa Cloudflare-challenge): URL direct terverifikasi + multi-hoster katalog + hint.
     const rdb = readDb(c.env);
     const [direct, indexedHosters, hinted, globalStats] = await Promise.all([
       lookupDirect(rdb, title, ep),
-      lookupEpisodeHosters(rdb, title, ep),
+      lookupEpisodeHosters(rdb, title, ep, anime_id),
       lookupHint(rdb, title, ep),
       loadAsnStats(rdb, 0),
     ]);

@@ -18,7 +18,10 @@ CREATE TABLE IF NOT EXISTS animes (
   episodes_total INTEGER NOT NULL DEFAULT 0,
   next_airing_at INTEGER NOT NULL DEFAULT 0,
   next_airing_ep INTEGER NOT NULL DEFAULT 0,
-  has_live_source INTEGER NOT NULL DEFAULT 0
+  has_live_source INTEGER NOT NULL DEFAULT 0,
+  title_native TEXT,
+  synonyms_json TEXT,
+  norm_compact TEXT
 );
 
 CREATE TABLE IF NOT EXISTS episodes (
@@ -185,3 +188,5 @@ CREATE INDEX IF NOT EXISTS idx_episode_hosters_alt ON episode_hosters(title_alt_
 CREATE INDEX IF NOT EXISTS idx_episode_hosters_anime ON episode_hosters(anime_id, is_live, episode_number);
 CREATE INDEX IF NOT EXISTS idx_animes_live_pop ON animes(has_live_source, popularity DESC);
 CREATE INDEX IF NOT EXISTS idx_animes_live_status_pop ON animes(has_live_source, status, popularity DESC);
+
+CREATE INDEX IF NOT EXISTS idx_animes_norm_compact ON animes(norm_compact);

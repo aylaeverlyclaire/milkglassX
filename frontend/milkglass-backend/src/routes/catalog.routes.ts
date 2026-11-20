@@ -509,13 +509,113 @@ catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
   });
 });
 
+
+const CJK_CHAR_RE = /[\u3040-\u30FF\u4E00-\u9FFF]/;
+
+function normalizeSearchSpaced(raw: string): string {
+  return raw
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function damerauLevenshtein(a: string, b: string, maxDist: number): number {
+  const m = a.length;
+  const n = b.length;
+  if (Math.abs(m - n) > maxDist) return maxDist + 1;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    let rowMin = maxDist + 1;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let val = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        val = Math.min(val, dp[i - 2][j - 2] + 1);
+      }
+      dp[i][j] = val;
+      if (val < rowMin) rowMin = val;
+    }
+    if (rowMin > maxDist) return maxDist + 1;
+  }
+  return dp[m][n];
+}
+
+function maxTypoForToken(tok: string): number {
+  if (/^\d+$/.test(tok) || tok.length <= 3) return 0;
+  if (tok.length <= 6) return 1;
+  return 2;
+}
+
+function scoreMultilingualRow(qSpaced: string, qCompact: string, row: Record<string, unknown>): number {
+  const fields: string[] = [
+    String(row.title || ''),
+    String(row.title_alt || ''),
+    String(row.title_native || ''),
+  ];
+  if (typeof row.synonyms_json === 'string' && row.synonyms_json.startsWith('[')) {
+    try {
+      const arr = JSON.parse(row.synonyms_json);
+      if (Array.isArray(arr)) {
+        for (const s of arr) if (typeof s === 'string') fields.push(s);
+      }
+    } catch {}
+  }
+
+  let best = 0;
+  const qTokens = qSpaced.split(' ').filter(Boolean);
+  for (const rawField of fields) {
+    if (!rawField) continue;
+    const fSpaced = normalizeSearchSpaced(rawField);
+    const fCompact = fSpaced.replace(/\s+/g, '');
+    if (!fCompact) continue;
+
+    if (fCompact === qCompact) return 100;
+    if (fCompact.startsWith(qCompact) || fSpaced.startsWith(qSpaced)) {
+      best = Math.max(best, 85);
+      continue;
+    }
+    if (fCompact.includes(qCompact) || fSpaced.includes(qSpaced)) {
+      best = Math.max(best, 72);
+      continue;
+    }
+
+    const fTokens = fSpaced.split(' ').filter(Boolean);
+    if (qTokens.length > 0 && fTokens.length > 0) {
+      let matched = 0;
+      for (const qt of qTokens) {
+        const allow = maxTypoForToken(qt);
+        const hit = fTokens.some((ft) => {
+          if (ft === qt || (qt.length >= 3 && ft.startsWith(qt))) return true;
+          if (allow === 0) return false;
+          return damerauLevenshtein(qt, ft, allow) <= allow;
+        });
+        if (hit) matched++;
+      }
+      if (matched === qTokens.length) {
+        best = Math.max(best, 58);
+      } else if (matched > 0 && matched / qTokens.length >= 0.6) {
+        best = Math.max(best, 35);
+      }
+    }
+  }
+  return best;
+}
+
 catalogRoutes.get(
   '/search',
   edgeCache(300, 600, true, { allowedQueryParams: ['q'] }),
   rateLimit(30, 60),
   async (c) => {
-    const q = (c.req.query('q') || '').trim().slice(0, 100);
-    if (q.length < 2) {
+    const q = (c.req.query('q') || '').trim().slice(0, 80);
+    const qSpaced = normalizeSearchSpaced(q);
+    const qCompact = qSpaced.replace(/\s+/g, '');
+    const minLen = CJK_CHAR_RE.test(qCompact) ? 1 : 2;
+    if (qCompact.length < minLen) {
       return c.json({ status: 'ok', query: q, data: [], metadata: [], resolution_mode: 'CLIENT_CASCADE_MKV' });
     }
 
@@ -549,8 +649,27 @@ catalogRoutes.get(
         .all<Record<string, unknown>>();
     };
     const d1Animes = await queryD1Search();
-    const d1Rows = d1Animes.results ?? [];
-    // Conditional AniList enrichment: skip slow external GraphQL round-trip when D1 already has >= 3 matches.
+    let d1Rows = d1Animes.results ?? [];
+    if (d1Rows.length < 8) {
+      const { results: livePool } = await readDb(c.env)
+        .prepare(
+          `SELECT ${LIST_COLUMNS}, title_native, synonyms_json
+           FROM animes
+           WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))
+           ORDER BY popularity DESC
+           LIMIT 600`
+        )
+        .all<Record<string, unknown>>();
+      const seenIds = new Set(d1Rows.map((r) => r.id));
+      const scored = (livePool ?? [])
+        .filter((r) => !seenIds.has(r.id))
+        .map((r) => ({ row: r, score: scoreMultilingualRow(qSpaced, qCompact, r) }))
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score || Number(b.row.popularity || 0) - Number(a.row.popularity || 0))
+        .slice(0, 24 - d1Rows.length)
+        .map((x) => x.row);
+      d1Rows = [...d1Rows, ...scored];
+    }
     const anilistItems: unknown[] = [];
 
     return c.json({

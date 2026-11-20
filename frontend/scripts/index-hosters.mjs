@@ -8,16 +8,16 @@ const BLACKLISTED_HOSTER_PATTERNS = [
   'safelink', 'ouo.io', 'ouo.press', 'shrinkme', 'exe.io', 'bc.vc',
   'adf.ly', 'bit.ly', 'tinyurl.com', 't.me', 'telegram', 'discord',
   'facebook.com', 'twitter.com', 'instagram.com', 'youtube.com', 'youtu.be',
-  'saweria', 'trakteer', 'paypal', 'javascript:', 'mailto:', '#',
+  'saweria', 'trakteer', 'paypal', 'javascript:', 'mailto:', '#', 'mirrored.to', 'acefile.co',
 ];
 
 const KNOWN_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
-  'gofile.io', 'acefile.co', 'krakenfiles.com', 'kfiles.io',
+  'gofile.io', 'krakenfiles.com', 'kfiles.io',
   'filedon.co', 'odfiles.com', 'buzzheavier.com', 'qiwi.gg',
   'mediafire.com', 'wibufile.com', 'uqni.net', 'mp4upload.com',
   'desudrive.com', 'desustream.info', 'desustream.com', 'ondesu.com',
-  'mega.nz', 'mirror.xyz', 'mirrored.to', 'racaty.io', 'fileditchfiles.me',
+  'mega.nz', 'racaty.io', 'fileditchfiles.me',
   'blogger.com', 'drive.google.com', 'vidhide', 'filelions', 'dood', 'mixdrop',
 ];
 

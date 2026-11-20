@@ -29,16 +29,15 @@ data class ExtractedDirectMedia(
 
 object HosterFilter {
     private val blacklistedTokens = listOf(
-        "mega.nz", "mega.co.nz", "megaup", "otakufiles", "zippyshare"
+        "mega.nz", "mega.co.nz", "megaup", "otakufiles", "zippyshare",
+        "mirrored.to", "acefile.co"
     )
 
     private val preferredOrder = listOf(
-        "pixeldrain", "pdrain", "filedon", "odfiles", "gdrive", "drive.google",
-        "buzzheavier", "qiwi", "mediafire", "gofile", "kuramadrive", "gdflix",
-        "hubdrive", "archive.org", "1fichier", "linkbox", "lbx.to", "yourupload",
-        "send.now", "send.cm", "odstream", "ondesu", "desustream", "blogger",
-        "ok.ru", "dailymotion", "streamruby", "vidhide", "filemoon", "mixdrop",
-        "streamtape", "rumble", "dood", "racaty", "krakenfiles", "kfiles"
+        "pixeldrain", "pdrain", "gofile", "buzzheavier", "filedon", "odfiles",
+        "gdrive", "drive.google", "qiwi", "mediafire", "kuramadrive",
+        "odstream", "ondesu", "desustream", "blogger", "streamruby",
+        "vidhide", "filemoon", "mixdrop", "streamtape", "dood", "krakenfiles", "kfiles"
     )
 
     fun isBlacklisted(hosterLabel: String, url: String): Boolean {
@@ -63,13 +62,9 @@ object HosterFilter {
             low.contains("r2.dev") ||
             low.contains("storage.googleapis.com") ||
             low.contains("googlevideo.com") ||
-            low.contains("odnoklassniki.ru") ||
-            low.contains("dai.ly") ||
             low.contains("rubyvidhub.com") ||
             low.contains("streamhide.") ||
             low.contains("sunrong.my.id") ||
-            HosterUrlHelpers.isOneFichierUrl(low) ||
-            HosterUrlHelpers.isSendNowUrl(low) ||
             low.contains(".mkv") ||
             low.contains(".mp4") ||
             low.contains(".m3u8")
@@ -420,24 +415,13 @@ class MkvHosterExtractorRegistry(
             low.contains("mediafire.com") -> extractMediaFire(resolvedUrl)
             low.contains("buzzheavier.com") -> extractBuzzheavier(resolvedUrl)
             low.contains("qiwi.gg") -> extractQiwi(resolvedUrl)
-            HosterUrlHelpers.isSendNowUrl(low) -> extractSendNow(resolvedUrl)
-            low.contains("racaty") -> extractRacaty(resolvedUrl)
             low.contains("drive.google.com") || low.contains("drive.usercontent.google.com") ||
                 low.contains("docs.google.com") -> extractGoogleDrive(resolvedUrl)
-            HosterUrlHelpers.isOneFichierUrl(low) -> extractOneFichier(resolvedUrl)
-            low.contains("archive.org") -> extractArchiveOrg(resolvedUrl)
-            low.contains("yourupload.com") -> extractYourUpload(resolvedUrl)
-            low.contains("lbx.to") || low.contains("linkbox.to") -> extractLinkbox(resolvedUrl)
             low.contains("kuramadrive.com") -> extractKuramadrive(resolvedUrl)
-            low.contains("gdflix.") -> extractGdFlix(resolvedUrl, depth)
-            low.contains("hubdrive.") -> extractHubDrive(resolvedUrl, depth)
             low.contains("dood.") || low.contains("doodstream.") || low.contains("ds2play.") -> extractDood(resolvedUrl)
             low.contains("odstream.xyz") || low.contains("desustream.") -> extractOdstreamOrDesustream(resolvedUrl, referer)
             low.contains("ondesu.cc") || low.contains("ondesuh.cc") -> extractOndesu(resolvedUrl, referer, depth)
             low.contains("blogger.com") -> extractBlogger(resolvedUrl, referer)
-            low.contains("ok.ru") || low.contains("odnoklassniki.ru") -> extractOkRu(resolvedUrl, referer)
-            low.contains("dailymotion.com") || low.contains("dai.ly") -> extractDailymotion(resolvedUrl, referer)
-            low.contains("rumble.com") -> extractRumble(resolvedUrl, referer)
             low.contains("rubyvidhub.com") || low.contains("streamruby.") -> extractStreamRuby(resolvedUrl, referer)
             low.contains("odvidhide.com") || low.contains("vidhide") || low.contains("streamhide.") ||
                 low.contains("filemoon.") || low.contains("sunrong.my.id") -> extractVidhideOrFilemoon(resolvedUrl, referer)
@@ -739,72 +723,6 @@ class MkvHosterExtractorRegistry(
         )
     }
 
-    private fun extractSendNow(url: String): ExtractedDirectMedia? {
-        val html = fetchText(url, "https://send.now/") ?: return null
-        val doc = Jsoup.parse(html, url)
-        val videoSrc = doc.selectFirst("#vjsplayer source[src], video source[src]")
-            ?.attr("src")?.trim()?.takeIf { it.startsWith("http") }
-        if (videoSrc != null) {
-            return ExtractedDirectMedia(
-                hoster = "SendNow",
-                directUrl = videoSrc,
-                referer = url,
-                supportsRange = true
-            )
-        }
-
-        // XFileSharing fallback (send.now / tusfiles / userscloud)
-        val form = doc.select("form").firstOrNull { f ->
-            f.selectFirst("input[name=op]") != null || f.selectFirst("input[name=id]") != null
-        } ?: return null
-        val action = form.absUrl("action").ifBlank { url }
-        val fb = FormBody.Builder()
-        var hasMethodFree = false
-        form.select("input[name]").forEach { inp ->
-            val name = inp.attr("name").trim()
-            if (name.isNotEmpty()) {
-                val value = if (name == "method_free" && inp.attr("value").isBlank()) "Free Download" else inp.attr("value")
-                fb.add(name, value)
-                if (name == "method_free") hasMethodFree = true
-            }
-        }
-        if (!hasMethodFree) fb.add("method_free", "Free Download")
-
-        val postReq = Request.Builder()
-            .url(action)
-            .header("Referer", url)
-            .post(fb.build())
-            .build()
-        val postHtml = runCatching {
-            clients.mediaAndApiClient.newCall(postReq).execute().use { resp ->
-                if (!resp.isSuccessful) return@use null
-                resp.body?.string()
-            }
-        }.getOrNull() ?: return null
-
-        val postDoc = Jsoup.parse(postHtml, action)
-        val direct = postDoc.selectFirst("#direct_link a[href], span#direct_link a[href], a.btn-download[href], a[href*=download][href^=http]")
-            ?.absUrl("href")?.trim()?.takeIf { it.startsWith("http") } ?: return null
-        return ExtractedDirectMedia(
-            hoster = "SendNow",
-            directUrl = direct,
-            referer = url,
-            supportsRange = true
-        )
-    }
-
-    private fun extractRacaty(url: String): ExtractedDirectMedia? {
-        val html = fetchText(url, "https://racaty.io/") ?: return null
-        val src = Jsoup.parse(html, url).selectFirst("a#uniqueExpirylink[href]")
-            ?.attr("href")?.trim()?.takeIf { it.startsWith("http") } ?: return null
-        return ExtractedDirectMedia(
-            hoster = "Racaty",
-            directUrl = src,
-            referer = url,
-            supportsRange = true
-        )
-    }
-
     private fun extractGoogleDrive(url: String): ExtractedDirectMedia? {
         val (id, resourceKey) = HosterUrlHelpers.parseGoogleDriveFileId(url) ?: return null
         val rkParam = resourceKey?.let { "&resourcekey=${URLEncoder.encode(it, "UTF-8")}" }.orEmpty()
@@ -902,156 +820,6 @@ class MkvHosterExtractorRegistry(
         return if (query.isNotEmpty()) "$action?$query" else action
     }
 
-    private fun extractOneFichier(url: String): ExtractedDirectMedia? {
-        val normalized = HosterUrlHelpers.normalizeOneFichierUrl(url) ?: return null
-        val pageUrl = "$normalized&lg=en"
-        val getReq = Request.Builder()
-            .url(pageUrl)
-            .header("Cookie", "LG=en")
-            .header("Accept-Language", "en-us,en;q=0.5")
-            .build()
-
-        clients.mediaAndApiClient.newCall(getReq).execute().use { resp ->
-            if (!resp.isSuccessful) return null
-            val ct = resp.header("Content-Type").orEmpty().lowercase()
-            val finalUrl = resp.request.url.toString()
-            if (!ct.contains("text/html")) {
-                return ExtractedDirectMedia(
-                    hoster = "1fichier",
-                    directUrl = finalUrl,
-                    referer = normalized,
-                    supportsRange = true
-                )
-            }
-            val html = resp.body?.string().orEmpty()
-            if (html.contains("File not found", ignoreCase = true) ||
-                html.contains("must wait", ignoreCase = true) ||
-                html.contains("all free guest slots are currently in use", ignoreCase = true)
-            ) {
-                return null
-            }
-            val doc = Jsoup.parse(html, finalUrl)
-            val form = doc.selectFirst("form") ?: return null
-            val action = form.absUrl("action").ifBlank { finalUrl }
-            val formBuilder = FormBody.Builder()
-            var hasDid = false
-            form.select("input[name]").forEach { inp ->
-                val name = inp.attr("name").trim()
-                if (name.isNotEmpty() && !name.equals("save", ignoreCase = true)) {
-                    val value = if (name == "did") "1" else inp.attr("value")
-                    formBuilder.add(name, value)
-                    if (name == "did") hasDid = true
-                }
-            }
-            if (!hasDid) formBuilder.add("did", "1")
-
-            val postReq = Request.Builder()
-                .url(action)
-                .header("Referer", pageUrl)
-                .header("Cookie", "LG=en")
-                .header("Accept-Language", "en-us,en;q=0.5")
-                .post(formBuilder.build())
-                .build()
-
-            clients.mediaAndApiClient.newCall(postReq).execute().use { postResp ->
-                if (!postResp.isSuccessful) return null
-                val postHtml = postResp.body?.string().orEmpty()
-                val postDoc = Jsoup.parse(postHtml, postResp.request.url.toString())
-                val dlLink = postDoc.select("a[href]").firstOrNull { a ->
-                    val text = a.text().trim()
-                    val href = a.absUrl("href")
-                    (text.contains("Click here to download", ignoreCase = true) ||
-                        text.contains("Start your download", ignoreCase = true) ||
-                        Regex("""https?://[a-zA-Z0-9_-]+\.(?:1fichier|desfichiers)\.com/[a-zA-Z0-9]+""").containsMatchIn(href))
-                }?.absUrl("href")?.takeIf { it.startsWith("http") } ?: return null
-
-                return ExtractedDirectMedia(
-                    hoster = "1fichier",
-                    directUrl = dlLink,
-                    referer = normalized,
-                    supportsRange = true
-                )
-            }
-        }
-    }
-
-    private fun extractArchiveOrg(url: String): ExtractedDirectMedia? {
-        val low = url.lowercase()
-        if (low.contains("/download/") || low.endsWith(".mkv") || low.endsWith(".mp4")) {
-            return ExtractedDirectMedia(
-                hoster = "ArchiveOrg",
-                directUrl = url,
-                referer = "https://archive.org/",
-                supportsRange = true
-            )
-        }
-        val html = fetchText(url, "https://archive.org/") ?: return null
-        val doc = Jsoup.parse(html, url)
-        val direct = doc.selectFirst("a[href$=.mkv], a[href$=.mp4], video source[src], meta[property=og:video]")
-            ?.let { el -> if (el.tagName() == "meta") el.attr("content") else el.absUrl("href").ifBlank { el.absUrl("src") } }
-            ?.trim()
-            ?.takeIf { it.startsWith("http") } ?: return null
-        return ExtractedDirectMedia(
-            hoster = "ArchiveOrg",
-            directUrl = direct,
-            referer = url,
-            supportsRange = true
-        )
-    }
-
-    private fun extractYourUpload(url: String): ExtractedDirectMedia? {
-        val embedUrl = HosterUrlHelpers.parseYourUploadEmbedUrl(url) ?: return null
-        val html = fetchText(embedUrl, "https://www.yourupload.com/") ?: return null
-        val rawFile = Regex("""file\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
-            .find(html)?.groupValues?.getOrNull(1)?.trim() ?: return null
-        if (rawFile.endsWith("novideo.mp4", ignoreCase = true) ||
-            rawFile.endsWith("watermark.png", ignoreCase = true)
-        ) {
-            return null
-        }
-        val resolved = runCatching { URI(embedUrl).resolve(rawFile).toString() }.getOrNull()
-            ?.takeIf { it.startsWith("http") } ?: return null
-        return ExtractedDirectMedia(
-            hoster = "YourUpload",
-            directUrl = resolved,
-            referer = embedUrl,
-            supportsRange = true
-        )
-    }
-
-    private fun extractLinkbox(url: String): ExtractedDirectMedia? {
-        val token = HosterUrlHelpers.parseLinkboxToken(url) ?: return null
-        val shareApi = "https://www.linkbox.to/api/file/share_out_list/?sortField=utime&sortAsc=0&pageNo=1&pageSize=50&shareToken=$token"
-        val shareJson = fetchText(shareApi, url) ?: return null
-        val itemId = runCatching {
-            JSONObject(shareJson).optJSONObject("data")?.optString("itemId")
-        }.getOrNull()?.takeIf { it.isNotBlank() } ?: return null
-
-        val detailApi = "https://www.linkbox.to/api/file/detail?itemId=$itemId"
-        val detailJson = fetchText(detailApi, url) ?: return null
-        val resList = runCatching {
-            JSONObject(detailJson).optJSONObject("data")?.optJSONObject("itemInfo")?.optJSONArray("resolutionList")
-        }.getOrNull() ?: return null
-
-        var bestUrl: String? = null
-        for (i in 0 until resList.length()) {
-            val item = resList.optJSONObject(i) ?: continue
-            val candidate = item.optString("url").takeIf { it.startsWith("http") } ?: continue
-            if (candidate.contains(".mkv", ignoreCase = true)) {
-                bestUrl = candidate
-                break
-            }
-            if (bestUrl == null) bestUrl = candidate
-        }
-        val finalUrl = bestUrl ?: return null
-        return ExtractedDirectMedia(
-            hoster = "Linkbox",
-            directUrl = finalUrl,
-            referer = "https://www.linkbox.to/",
-            supportsRange = true
-        )
-    }
-
     private fun extractKuramadrive(url: String): ExtractedDirectMedia? {
         val req = Request.Builder().url(url).build()
         clients.mediaAndApiClient.newCall(req).execute().use { resp ->
@@ -1089,81 +857,6 @@ class MkvHosterExtractorRegistry(
                 )
             }
         }
-    }
-
-    private fun extractGdFlix(url: String, depth: Int): ExtractedDirectMedia? {
-        val parsed = url.toHttpUrlOrNull() ?: return null
-        val host = parsed.host
-        val html = fetchText(url, "https://$host/") ?: return null
-        val fileId = parsed.pathSegments.getOrNull(1)?.takeIf { it.isNotBlank() }
-            ?: parsed.pathSegments.lastOrNull()?.takeIf { it.isNotBlank() }
-            ?: return null
-        val key = Regex("""formData\.append\(\s*["']key["']\s*,\s*["']([^"']+)["']""")
-            .find(html)?.groupValues?.getOrNull(1) ?: return null
-
-        val postReq = Request.Builder()
-            .url("https://$host/file/$fileId")
-            .header("x-token", host)
-            .header("Referer", url)
-            .post(
-                FormBody.Builder()
-                    .add("action", "direct")
-                    .add("key", key)
-                    .add("action_token", "")
-                    .build()
-            )
-            .build()
-
-        val nextPageUrl = runCatching {
-            clients.mediaAndApiClient.newCall(postReq).execute().use { resp ->
-                val json = JSONObject(resp.body?.string().orEmpty())
-                if (json.optBoolean("error", true)) return@use null
-                json.optString("url").takeIf { it.startsWith("http") }
-            }
-        }.getOrNull() ?: return null
-
-        val nextHtml = fetchText(nextPageUrl, url) ?: return null
-        val gdLink = Jsoup.parse(nextHtml, nextPageUrl).selectFirst("#gdlink[href]")?.absUrl("href")
-            ?.takeIf { it.startsWith("http") } ?: return null
-        return extractInternal(gdLink, nextPageUrl, depth + 1)
-    }
-
-    private fun extractHubDrive(url: String, depth: Int): ExtractedDirectMedia? {
-        val parsed = url.toHttpUrlOrNull() ?: return null
-        val host = parsed.host
-        val fileId = parsed.pathSegments.lastOrNull()?.takeIf { it.isNotBlank() } ?: return null
-        fetchText(url, "https://$host/")
-
-        val ajaxReq = Request.Builder()
-            .url("https://$host/ajax.php?ajax=direct-download")
-            .header("Accept", "application/json")
-            .header("X-Requested-With", "XMLHttpRequest")
-            .header("Referer", url)
-            .post(FormBody.Builder().add("id", fileId).build())
-            .build()
-
-        val filePath = runCatching {
-            clients.mediaAndApiClient.newCall(ajaxReq).execute().use { resp ->
-                val json = JSONObject(resp.body?.string().orEmpty())
-                if (json.optString("code") != "200") return@use null
-                json.optString("file").takeIf { it.isNotBlank() }
-            }
-        }.getOrNull() ?: return null
-
-        val targetUrl = runCatching { URI("https://$host/").resolve(filePath).toString() }.getOrNull()
-            ?.takeIf { it.startsWith("http") } ?: return null
-        val targetHtml = fetchText(targetUrl, url) ?: return null
-        val btnHref = Jsoup.parse(targetHtml, targetUrl)
-            .selectFirst(".card-body .btn-primary[href]")?.absUrl("href")
-            ?.takeIf { it.startsWith("http") } ?: return null
-
-        return extractInternal(btnHref, targetUrl, depth + 1)
-            ?: ExtractedDirectMedia(
-                hoster = "HubDrive",
-                directUrl = btnHref,
-                referer = targetUrl,
-                supportsRange = true
-            )
     }
 
     private fun extractDood(url: String): ExtractedDirectMedia? {
@@ -1260,119 +953,6 @@ class MkvHosterExtractorRegistry(
             referer = directRef,
             supportsRange = !playUrl.contains(".m3u8", ignoreCase = true),
             isHls = playUrl.contains(".m3u8", ignoreCase = true)
-        )
-    }
-
-    private fun extractOkRu(url: String, referer: String?): ExtractedDirectMedia? {
-        val id = Regex("""/(?:videoembed|video)/(\d+)""").find(url)?.groupValues?.getOrNull(1)
-        val embedUrl = if (id != null) "https://ok.ru/videoembed/$id" else url
-        val html = fetchText(embedUrl, referer ?: "https://ok.ru/") ?: return null
-        val cleaned = html
-            .replace("&quot;", "\"")
-            .replace("&amp;", "&")
-            .replace("\\u0026", "&")
-            .replace("\\/", "/")
-        val hls = Regex(""""hlsManifestUrl"\s*:\s*"([^"]+)"""").find(cleaned)?.groupValues?.getOrNull(1)
-            ?.takeIf { it.startsWith("http") }
-        if (hls != null) {
-            return ExtractedDirectMedia(
-                hoster = "OK.ru",
-                directUrl = hls,
-                referer = embedUrl,
-                supportsRange = false,
-                isHls = true
-            )
-        }
-        val webm = Regex(""""metadataWebmUrl"\s*:\s*"([^"]+)"""").find(cleaned)?.groupValues?.getOrNull(1)
-            ?.takeIf { it.startsWith("http") }
-        if (webm != null) {
-            return ExtractedDirectMedia(
-                hoster = "OK.ru",
-                directUrl = webm,
-                referer = embedUrl,
-                supportsRange = true
-            )
-        }
-        val videosJson = Regex(""""videos"\s*:\s*(\[[^\]]*])""").find(cleaned)?.groupValues?.getOrNull(1) ?: return null
-        val arr = runCatching { org.json.JSONArray(videosJson) }.getOrNull() ?: return null
-        val pref = listOf("full", "hd", "sd", "low", "lowest", "mobile")
-        var bestUrl: String? = null
-        var bestRank = Int.MAX_VALUE
-        for (i in 0 until arr.length()) {
-            val obj = arr.optJSONObject(i) ?: continue
-            val u = obj.optString("url").takeIf { it.startsWith("http") } ?: continue
-            val name = obj.optString("name").lowercase()
-            val r = pref.indexOf(name).let { if (it >= 0) it else pref.size }
-            if (r < bestRank) {
-                bestRank = r
-                bestUrl = u
-            }
-        }
-        val finalUrl = bestUrl ?: return null
-        return ExtractedDirectMedia(
-            hoster = "OK.ru",
-            directUrl = finalUrl,
-            referer = embedUrl,
-            supportsRange = true
-        )
-    }
-
-    private fun extractDailymotion(url: String, referer: String?): ExtractedDirectMedia? {
-        val id = Regex("""(?:dailymotion\.com/(?:embed/)?video/|dai\.ly/|geo\.dailymotion\.com/player[^"]*\?video=)([A-Za-z0-9]+)""", RegexOption.IGNORE_CASE)
-            .find(url)?.groupValues?.getOrNull(1) ?: return null
-        val metaUrls = listOf(
-            "https://www.dailymotion.com/player/metadata/video/$id",
-            "https://geo.dailymotion.com/video/$id.json?legacy=true"
-        )
-        for (metaUrl in metaUrls) {
-            val jsonText = fetchText(metaUrl, referer ?: "https://www.dailymotion.com/") ?: continue
-            val root = runCatching { JSONObject(jsonText) }.getOrNull() ?: continue
-            val qualities = root.optJSONObject("qualities") ?: continue
-            val autoArr = qualities.optJSONArray("auto")
-            val streamUrl = (0 until (autoArr?.length() ?: 0))
-                .firstNotNullOfOrNull { idx ->
-                    autoArr?.optJSONObject(idx)?.optString("url")?.takeIf { it.startsWith("http") }
-                }
-                ?: listOf("1080", "720", "480", "380").firstNotNullOfOrNull { q ->
-                    val arr = qualities.optJSONArray(q)
-                    (0 until (arr?.length() ?: 0)).firstNotNullOfOrNull { idx ->
-                        arr?.optJSONObject(idx)?.optString("url")?.takeIf { it.startsWith("http") }
-                    }
-                }
-            if (streamUrl != null) {
-                return ExtractedDirectMedia(
-                    hoster = "Dailymotion",
-                    directUrl = streamUrl,
-                    referer = "https://www.dailymotion.com/",
-                    supportsRange = !streamUrl.contains(".m3u8", ignoreCase = true),
-                    isHls = streamUrl.contains(".m3u8", ignoreCase = true)
-                )
-            }
-        }
-        return null
-    }
-
-    private fun extractRumble(url: String, referer: String?): ExtractedDirectMedia? {
-        val html = fetchText(url, referer ?: "https://rumble.com/") ?: return null
-        val cleaned = html.replace("\\/", "/")
-        val m3u8 = Regex("""["'](https?://[^"']*rumble\.com[^"']*\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE)
-            .find(cleaned)?.groupValues?.getOrNull(1)
-        if (m3u8 != null) {
-            return ExtractedDirectMedia(
-                hoster = "Rumble",
-                directUrl = m3u8,
-                referer = "https://rumble.com/",
-                supportsRange = false,
-                isHls = true
-            )
-        }
-        val mp4 = Regex("""["'](https?://[^"']*rumble\.com[^"']*\.mp4[^"']*)["']""", RegexOption.IGNORE_CASE)
-            .find(cleaned)?.groupValues?.getOrNull(1) ?: return null
-        return ExtractedDirectMedia(
-            hoster = "Rumble",
-            directUrl = mp4,
-            referer = "https://rumble.com/",
-            supportsRange = true
         )
     }
 

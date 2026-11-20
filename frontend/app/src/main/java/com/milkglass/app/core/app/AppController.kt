@@ -563,30 +563,78 @@ class AppController(
         trending
     }
 
-    fun searchCatalog(): List<Anime> {
+    private fun damerauDistance(a: String, b: String, maxDist: Int): Int {
+        val m = a.length
+        val n = b.length
+        if (kotlin.math.abs(m - n) > maxDist) return maxDist + 1
+        val dp = Array(m + 1) { IntArray(n + 1) }
+        for (i in 0..m) dp[i][0] = i
+        for (j in 0..n) dp[0][j] = j
+        for (i in 1..m) {
+            var rowMin = maxDist + 1
+            for (j in 1..n) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                var v = minOf(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
+                if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1]) {
+                    v = minOf(v, dp[i - 2][j - 2] + 1)
+                }
+                dp[i][j] = v
+                if (v < rowMin) rowMin = v
+            }
+            if (rowMin > maxDist) return maxDist + 1
+        }
+        return dp[m][n]
+    }
 
+    private fun searchMatchScore(qSpaced: String, qCompact: String, doc: SearchDoc): Int {
+        if (qCompact.isEmpty()) return 1
+        val titleCompact = doc.title.replace(" ", "")
+        val hayCompact = doc.haystack.replace(" ", "")
+        if (titleCompact == qCompact) return 100
+        if (doc.title.startsWith(qSpaced) || titleCompact.startsWith(qCompact)) return 85
+        if (doc.title.contains(qSpaced) || titleCompact.contains(qCompact)) return 75
+        if (doc.haystack.contains(qSpaced) || hayCompact.contains(qCompact)) return 65
+        val qTokens = qSpaced.split(" ").filter { it.isNotEmpty() }
+        val hTokens = doc.haystack.split(" ").filter { it.isNotEmpty() }
+        if (qTokens.isEmpty() || hTokens.isEmpty()) return 0
+        var matched = 0
+        for (qt in qTokens) {
+            val allow = when {
+                qt.all { it.isDigit() } || qt.length <= 3 -> 0
+                qt.length <= 6 -> 1
+                else -> 2
+            }
+            val hit = hTokens.any { ht ->
+                ht == qt || (qt.length >= 3 && ht.startsWith(qt)) ||
+                    (allow > 0 && damerauDistance(qt, ht, allow) <= allow)
+            }
+            if (hit) matched++
+        }
+        return if (matched == qTokens.size) 50 else 0
+    }
+
+    fun searchCatalog(): List<Anime> {
         val cat = catalog
-        val q = normalizeText(submittedQuery.trim())
+        val rawQ = submittedQuery.trim().take(80)
+        val q = normalizeText(rawQ)
+        val qCompact = q.replace(" ", "")
         val genre = searchGenre
         val vibe = searchVibe
         searchMemoKey?.let { k ->
             if (k.catalog === cat && k.q == q && k.genre == genre && k.vibe == vibe) return searchMemo
         }
         val idx = searchIndex
-        val r = cat.filter { a ->
-            val d = idx[a.id]
-            (genre == "all" || a.genres.contains(genre)) &&
-                (vibe == "all" || d?.vibes?.contains(vibe) == true) &&
-                (q.isEmpty() || d?.haystack?.contains(q) == true)
+        val scored = cat.mapNotNull { a ->
+            val d = idx[a.id] ?: return@mapNotNull null
+            if (genre != "all" && !a.genres.contains(genre)) return@mapNotNull null
+            if (vibe != "all" && !d.vibes.contains(vibe)) return@mapNotNull null
+            val sc = searchMatchScore(q, qCompact, d)
+            if (qCompact.isNotEmpty() && sc <= 0) return@mapNotNull null
+            a to sc
         }
-        val out = r.sortedWith { a, b ->
-            if (q.isNotEmpty()) {
-                val tx = if (idx[a.id]?.title?.contains(q) == true) 0 else 1
-                val ty = if (idx[b.id]?.title?.contains(q) == true) 0 else 1
-                if (tx != ty) return@sortedWith tx - ty
-            }
-            b.rating.compareTo(a.rating)
-        }
+        val out = scored.sortedWith { (a, sa), (b, sb) ->
+            if (sa != sb) sb.compareTo(sa) else b.rating.compareTo(a.rating)
+        }.map { it.first }
         searchMemo = out
         searchMemoKey = SearchKey(cat, q, genre, vibe)
         return out
