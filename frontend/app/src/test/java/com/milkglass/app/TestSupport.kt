@@ -9,7 +9,7 @@ object TestSupport {
     private val dataDir = File("src/main/assets/data")
 
     private val testDataDir = File("src/test/resources/data")
-    fun read(path: String): String = File(dataDir, path).takeIf { it.isFile }?.readText(Charsets.UTF_8) ?: File(testDataDir, path).readText(Charsets.UTF_8)
+    fun read(path: String): String = File(testDataDir, path).takeIf { it.isFile }?.readText(Charsets.UTF_8) ?: File(dataDir, path).readText(Charsets.UTF_8)
     fun resource(path: String): String =
         checkNotNull(TestSupport::class.java.classLoader.getResourceAsStream(path)) { "resource $path" }
             .bufferedReader().use { it.readText() }
