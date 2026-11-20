@@ -370,8 +370,7 @@ object SourceCircuitBreaker {
     }
 
     fun recordFailure(source: SourcePriority, nowMs: Long = System.currentTimeMillis()) {
-        val count = (failCounts[source] ?: 0) + 1
-        failCounts[source] = count
+        val count = failCounts.compute(source) { _, prev -> (prev ?: 0) + 1 } ?: 1
         if (count >= FAIL_THRESHOLD) {
             openUntilMs[source] = nowMs + COOLDOWN_MS
         }
@@ -1486,10 +1485,10 @@ class MkvCascadeResolver(
     companion object {
         private const val RAW_CACHE_TTL_MS = 20L * 60L * 1000L
         private const val DISK_RAW_TTL_MS = 6L * 60L * 60L * 1000L
-        private const val HEDGE_DELAY_MS = 1_200L
+        private const val HEDGE_DELAY_MS = 650L
 
         private val extractSeq = AtomicInteger(1)
-        private val sharedExtractionPool: ExecutorService = Executors.newFixedThreadPool(4) { r ->
+        private val sharedExtractionPool: ExecutorService = Executors.newFixedThreadPool(6) { r ->
             Thread({
                 runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
                 r.run()
