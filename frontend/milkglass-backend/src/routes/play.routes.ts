@@ -236,14 +236,34 @@ playRoutes.post('/direct', rateLimit(20, 60), requireVerifiedUserMiddleware(user
   const key = hintKey(title, ep);
   const now = Math.floor(Date.now() / 1000);
   try {
-    const existing = await c.env.DB.prepare('SELECT updated_at FROM play_direct WHERE key = ?1').bind(key).first<{ updated_at: number }>();
-    if (existing && now - existing.updated_at < DIRECT_REFRESH_AFTER_SEC) {
-      return c.json({ status: 'ok', stored: false, fresh: true });
+    const existing = await c.env.DB.prepare('SELECT payload, updated_at FROM play_direct WHERE key = ?1').bind(key).first<{ payload: string; updated_at: number }>();
+    let merged: StoredDirect[] = clean;
+    if (existing && now - existing.updated_at < DIRECT_MAX_AGE_SEC) {
+      let prev: StoredDirect[] = [];
+      try {
+        const parsed = JSON.parse(existing.payload) as StoredDirect[];
+        if (Array.isArray(parsed)) prev = parsed;
+      } catch {}
+      const prevQualities = new Set(prev.map((d) => d.quality));
+      const hasNewQuality = clean.some((d) => !prevQualities.has(d.quality));
+      if (!hasNewQuality && now - existing.updated_at < DIRECT_REFRESH_AFTER_SEC) {
+        return c.json({ status: 'ok', stored: false, fresh: true });
+      }
+      const perQuality = new Map<string, StoredDirect[]>();
+      for (const item of [...clean, ...prev]) {
+        if (!item || !isAcceptableDirect({ hoster: item.hoster || '', direct_url: item.direct_url })) continue;
+        const bucket = perQuality.get(item.quality) ?? [];
+        if (bucket.length < 2 && !bucket.some((x) => x.direct_url === item.direct_url)) {
+          bucket.push(item);
+          perQuality.set(item.quality, bucket);
+        }
+      }
+      merged = Array.from(perQuality.values()).flat().slice(0, 8);
     }
     await c.env.DB.prepare(
       `INSERT INTO play_direct (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
        ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1`
-    ).bind(key, JSON.stringify(clean), now).run();
+    ).bind(key, JSON.stringify(merged), now).run();
     c.executionCtx?.waitUntil?.(purgePlayResolveCache(c.req.url, title, ep));
     return c.json({ status: 'ok', stored: true });
   } catch {
