@@ -142,22 +142,22 @@ internal object TitleMatcher {
     private val brackets = Regex("[\\[\\](){}]")
     private val stopWords = setOf(
         "sub", "indo", "subtitle", "indonesia", "batch", "bd", "episode", "eps",
-        "the", "tv", "ova", "ona", "movie", "special"
+        "the", "tv", "special"
     )
     private val seasonPatterns = listOf(
         Regex("""\bseason\s*(\d+)\b""", RegexOption.IGNORE_CASE),
         Regex("""\bs(\d+)\b""", RegexOption.IGNORE_CASE),
-        Regex("""\b(\d+)(?:nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE),
+        Regex("""\b(\d+)(?:st|nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE),
         Regex("""\bpart\s*(\d+)\b""", RegexOption.IGNORE_CASE)
     )
     private val romanSeasonRegex = Regex("""\b(II|III|IV|V)\b""")
     private val whitespaceRegex = Regex("\\s+")
     private val ordinalSeasonRegex = Regex("""\b(\d+)(?:nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE)
     private val shortSeasonRegex = Regex("""\bs(\d+)\b""", RegexOption.IGNORE_CASE)
-    private val roman3Regex = Regex("""\bIII\b""")
-    private val roman2Regex = Regex("""\bII\b""")
-    private val roman4Regex = Regex("""\bIV\b""")
-    private val roman5Regex = Regex("""\bV\b""")
+    private val roman3Regex = Regex("""\bIII\b""", RegexOption.IGNORE_CASE)
+    private val roman2Regex = Regex("""\bII\b""", RegexOption.IGNORE_CASE)
+    private val roman4Regex = Regex("""\bIV\b""", RegexOption.IGNORE_CASE)
+    private val roman5Regex = Regex("""\bV\b""", RegexOption.IGNORE_CASE)
 
     private val parseCache = java.util.concurrent.ConcurrentHashMap<String, ParsedTitle>()
 
@@ -235,7 +235,7 @@ internal object TitleMatcher {
         }
         when {
             pq.season != null && pc.season == pq.season -> sc += 0.25
-            pq.season != null && pq.season > 1 && pc.season != pq.season -> sc -= 0.35
+            pq.season != null && pq.season > 1 && pc.season != pq.season -> sc -= 0.90
             pq.season == null && pc.season != null && pc.season > 1 -> sc -= 0.25
         }
         return sc.coerceAtLeast(0.0)

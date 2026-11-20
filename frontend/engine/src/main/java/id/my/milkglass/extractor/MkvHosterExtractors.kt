@@ -233,7 +233,7 @@ class LinkUnshortener(
             val client = if (low.contains("otakudesu") || low.contains("samehadaku") ||
                 low.contains("oploverz") || low.contains("kusonime")
             ) {
-                clients.sourceClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
+                sourceNoRedirectClient
             } else {
                 clients.noRedirectClient
             }
@@ -279,7 +279,7 @@ class LinkUnshortener(
             val raw = url.queryParameter(key)?.trim()?.takeIf { it.length >= 12 } ?: continue
             if (raw.startsWith("http://") || raw.startsWith("https://")) return raw
             val decoded = runCatching {
-                String(Base64.getDecoder().decode(raw.replace('-', '+').replace('_', '/')), Charsets.UTF_8).trim()
+                String(Base64.getDecoder().decode(raw.replace(' ', '+').replace('-', '+').replace('_', '/')), Charsets.UTF_8).trim()
             }.getOrNull()
             if (decoded != null && (decoded.startsWith("http://") || decoded.startsWith("https://"))) {
                 return decoded
@@ -510,30 +510,7 @@ class MkvHosterExtractorRegistry(
                 isHls = directUrl.contains(".m3u8", ignoreCase = true)
             )
         }
-        val origHtml = fetchText(url, "https://filedon.co/") ?: return null
-        val csrf = Jsoup.parse(origHtml, url).selectFirst("meta[name=csrf-token]")?.attr("content")?.trim()
-        if (!csrf.isNullOrBlank()) {
-            val postReq = Request.Builder()
-                .url("https://filedon.co/get-url")
-                .header("Referer", url)
-                .post(FormBody.Builder().add("_token", csrf).add("slug", slug).build())
-                .build()
-            val apiUrl = runCatching {
-                clients.mediaAndApiClient.newCall(postReq).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use null
-                    JSONObject(resp.body?.string().orEmpty()).optJSONObject("data")?.optString("url")
-                }
-            }.getOrNull()?.takeIf { it.startsWith("http") }
-            if (apiUrl != null) {
-                return ExtractedDirectMedia(
-                    hoster = "ODFiles",
-                    directUrl = apiUrl,
-                    referer = "https://filedon.co/",
-                    supportsRange = !apiUrl.contains(".m3u8", ignoreCase = true),
-                    isHls = apiUrl.contains(".m3u8", ignoreCase = true)
-                )
-            }
-        }
+        // /get-url returns HTTP 405 on live filedon.co; avoid 3.9s wasted fallback.
         return null
     }
 
@@ -663,7 +640,7 @@ class MkvHosterExtractorRegistry(
         if (html.contains("error.php?errno=", ignoreCase = true)) return null
         val doc = Jsoup.parse(html, url)
         val dlBtn = doc.selectFirst("#downloadButton, a[aria-label^=Download file]")
-        val scrambled = dlBtn?.attr("data-scrambled-url")?.trim()
+        val scrambled = dlBtn?.attr("data-scrambled-url")?.trim()?.takeIf { it.isNotEmpty() }
             ?: Regex("""data-scrambled-url\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
                 .find(html)?.groupValues?.getOrNull(1)
         val unscrambled = scrambled?.let { raw ->
