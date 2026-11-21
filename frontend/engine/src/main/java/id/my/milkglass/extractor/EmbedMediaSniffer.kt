@@ -49,6 +49,10 @@ object EmbedMediaSniffer {
         ".woff", ".woff2", ".ttf", ".otf", ".eot", ".css"
     )
 
+    private val nonPlayablePathExtensions = listOf(
+        ".php", ".html", ".htm", ".js", ".mjs", ".json", ".aspx", ".jsp", ".xml", ".txt"
+    )
+
     private val nonMediaHints = listOf(
         "blank.mp4", "dummy.mp4", "intro.mp4", "ad.mp4", "ads.mp4", "preroll",
         "favicon", "pixel.gif", "beacon", "analytics", "telemetry"
@@ -73,10 +77,11 @@ object EmbedMediaSniffer {
         if (adAndTrackerTokens.any { low.contains(it) }) return false
         if (nonMediaHints.any { low.contains(it) }) return false
         val pathOnly = low.substringBefore('?').substringBefore('#')
-        if (pathOnly.endsWith(".m3u8") || pathOnly.endsWith(".mp4") || pathOnly.endsWith(".mkv")) {
-            return true
+        // Tolak halaman HTML/PHP/JS meski query string-nya menyebut .mp4 atau type=video
+        if (nonPlayablePathExtensions.any { pathOnly.endsWith(it) }) {
+            return false
         }
-        if (low.contains(".m3u8?") || low.contains(".mp4?") || low.contains(".mkv?")) {
+        if (pathOnly.endsWith(".m3u8") || pathOnly.endsWith(".mp4") || pathOnly.endsWith(".mkv")) {
             return true
         }
         if (low.contains("googlevideo.com/videoplayback") ||
@@ -88,16 +93,13 @@ object EmbedMediaSniffer {
         ) {
             return true
         }
-        if (low.contains("mime=video") || low.contains("type=video")) {
-            return true
-        }
         return false
     }
 
     internal fun isHlsUrl(url: String): Boolean {
         val low = url.lowercase(Locale.ROOT)
         val pathOnly = low.substringBefore('?').substringBefore('#')
-        return pathOnly.endsWith(".m3u8") || low.contains(".m3u8?") || low.contains("format=hls")
+        return pathOnly.endsWith(".m3u8") || low.contains("format=hls")
     }
 
     internal fun extractOrigin(url: String?): String? {

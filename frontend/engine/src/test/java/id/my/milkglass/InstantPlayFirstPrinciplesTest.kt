@@ -53,6 +53,8 @@ class InstantPlayFirstPrinciplesTest {
         assertTrue(EmbedMediaSniffer.isPlayableMediaUrl("https://blogger.googleusercontent.com/video-play?id=xyz"))
         assertTrue(EmbedMediaSniffer.isPlayableMediaUrl("https://video-downloads.googleusercontent.com/abc123"))
         assertTrue(EmbedMediaSniffer.isPlayableMediaUrl("https://pixeldrain.com/api/file/abc123"))
+        assertFalse(EmbedMediaSniffer.isPlayableMediaUrl("https://embed.example.com/player.php?file=ep1.mp4&type=video"))
+        assertFalse(EmbedMediaSniffer.isPlayableMediaUrl("https://embed.example.com/watch.html?mime=video"))
         assertFalse(EmbedMediaSniffer.isPlayableMediaUrl("https://qq288pmk.com/promo/video.mp4"))
         assertFalse(EmbedMediaSniffer.isPlayableMediaUrl("https://cdn.example.com/ads/preroll.mp4"))
         assertFalse(EmbedMediaSniffer.isPlayableMediaUrl("https://cdn.example.com/poster.jpg"))
