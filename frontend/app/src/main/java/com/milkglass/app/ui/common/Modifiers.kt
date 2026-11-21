@@ -60,10 +60,11 @@ private const val CLICK_GUARD_MS = 180L
 private fun rememberClickGuard(onClick: () -> Unit, guard: Boolean = true): () -> Unit {
     val last = remember { LongArray(1) }
     val latest = androidx.compose.runtime.rememberUpdatedState(onClick)
+    val latestGuard = androidx.compose.runtime.rememberUpdatedState(guard)
     return remember {
         {
             val now = SystemClock.uptimeMillis()
-            if (!guard || now - last[0] >= CLICK_GUARD_MS) { last[0] = now; latest.value() }
+            if (!latestGuard.value || now - last[0] >= CLICK_GUARD_MS) { last[0] = now; latest.value() }
         }
     }
 }

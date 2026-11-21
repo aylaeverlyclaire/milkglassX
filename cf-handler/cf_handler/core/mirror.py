@@ -9,9 +9,9 @@ from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 
 from cf_handler.core.handler import CFhandler
-from cf_handler.utils.config import BrowserConfig
 from cf_handler.utils.misc import cache_key
 from cf_handler.utils.constants import (
+    BrowserConfig,
     MAX_SESSIONS,
     MIRROR_MAX_RETRIES,
     MIRROR_RETRY_BACKOFF_SECONDS,
