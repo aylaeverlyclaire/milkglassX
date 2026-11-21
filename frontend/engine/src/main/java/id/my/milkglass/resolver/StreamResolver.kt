@@ -165,8 +165,8 @@ class StreamResolver(
         preferredRes: String = "1080p",
         preferCompatibleContainer: Boolean = false
     ): List<ResolvedMkvMedia>? {
-        val normRes = if (preferredRes == "Auto") "1080p" else preferredRes
-        val key = "${slug.lowercase()}|${normRes.lowercase()}|$preferCompatibleContainer"
+        val preferredQuality = MkvQuality.fromText(preferredRes) ?: MkvQuality.P1080
+        val key = "${slug.lowercase()}#${preferredQuality.label}#${if (preferCompatibleContainer) "compat" else "std"}"
         val cached = resolvedCache[key] ?: return null
         if (System.currentTimeMillis() - cached.cachedAtMs > RESOLVED_CACHE_TTL_MS) return null
         return cached.candidates.takeIf { it.isNotEmpty() }
@@ -629,7 +629,7 @@ class StreamResolver(
         if (raw.isEmpty()) return emptyList()
         val mp4Raw = raw.filter { !it.isBatchArchive && (it.container == MediaContainer.MP4 || it.rawUrl.contains(".mp4", ignoreCase = true)) }
         if (mp4Raw.isEmpty()) return emptyList()
-        return cascadeResolver.resolveFromRaw(mp4Raw, quality, preferCompatibleContainer = true)
+        return cascadeResolver.resolveFromRaw(mp4Raw, quality, preferCompatibleContainer = true, preferStreamingEmbeds = false)
     }
 
     fun cachedCandidatesFor(slug: String, quality: MkvQuality): List<ResolvedMkvMedia> {
