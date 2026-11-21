@@ -11,7 +11,10 @@ export interface AnimasuSearchItem {
   source: 'animasu';
 }
 
-export const DEFAULT_ANIMASU_BASE_URL = 'https://animasu.love';
+import { buildCfHandlerHeaders, getCfHandlerBaseUrl } from '../utils/cfHandler';
+import { DEFAULT_SOURCE_URLS } from '../utils/sources';
+
+export const DEFAULT_ANIMASU_BASE_URL = DEFAULT_SOURCE_URLS.animasu;
 
 function decodeHtmlEntities(raw: string): string {
   return raw
@@ -181,13 +184,11 @@ export async function searchAnimasu(
     // Fall through to cf-handler fallback if configured
   }
 
-  const handlerBase = (cfHandlerUrl || '').trim().replace(/\/+$/, '');
-  if (handlerBase.startsWith('http://') || handlerBase.startsWith('https://')) {
+  const cfEnv = { CF_HANDLER_URL: cfHandlerUrl, CF_HANDLER_TOKEN: cfHandlerToken };
+  const handlerBase = getCfHandlerBaseUrl(cfEnv);
+  if (handlerBase) {
     try {
-      const headers: Record<string, string> = { Accept: 'application/json' };
-      if (cfHandlerToken && cfHandlerToken.trim().length > 0) {
-        headers['x-auth-token'] = cfHandlerToken.trim();
-      }
+      const headers = buildCfHandlerHeaders(cfEnv);
       const params = new URLSearchParams({ q: cleanQ, base_url: root });
       const fallback = await fetch(`${handlerBase}/search/animasu?${params.toString()}`, {
         method: 'GET',

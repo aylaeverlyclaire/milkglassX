@@ -1,4 +1,4 @@
-import { getCfHandlerBaseUrl, isCfHandlerConfigured } from '../utils/cfHandler';
+import { buildCfHandlerHeaders, getCfHandlerBaseUrl, isCfHandlerConfigured } from '../utils/cfHandler';
 import { Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { z } from 'zod';
@@ -108,6 +108,7 @@ const ALLOWED_HOST_SUFFIXES = [
   'samehadaku.how',
   'samehadaku.email',
   'samehadaku.mba',
+  'nontonanimeid.stream',
   'oploverz.ch',
   'oploverz.ac',
   'oploverz.org',
@@ -151,13 +152,6 @@ async function isAllowedCfHost(db: D1Database, host: string): Promise<boolean> {
   return false;
 }
 
-function buildHandlerHeaders(env: AppBindings, accept: string): Record<string, string> {
-  const headers: Record<string, string> = { Accept: accept };
-  if (env.CF_HANDLER_TOKEN && env.CF_HANDLER_TOKEN.trim().length > 0) {
-    headers['x-auth-token'] = env.CF_HANDLER_TOKEN.trim();
-  }
-  return headers;
-}
 
 cfRoutes.get('/status', (c) => {
   return c.json({
@@ -212,7 +206,7 @@ cfRoutes.get(
     }
 
     const targetOrigin = parsed.origin + '/';
-    const headers = buildHandlerHeaders(c.env, 'application/json');
+    const headers = buildCfHandlerHeaders(c.env);
 
     try {
       const upstream = await fetch(
@@ -305,7 +299,7 @@ cfRoutes.get(
       );
     }
 
-    const headers = buildHandlerHeaders(c.env, 'text/html,application/xhtml+xml,*/*');
+    const headers = buildCfHandlerHeaders(c.env, { Accept: 'text/html,application/xhtml+xml,*/*' });
 
     try {
       const upstream = await fetch(
