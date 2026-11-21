@@ -108,11 +108,13 @@ class StreamingEndToEndTest {
     }
 
     @Test
-    fun sourcePriorityOrderMatchesFourSourceCascade() {
-        assertEquals(1, SourcePriority.OTAKUDESU.rank)
+    fun sourcePriorityOrderMatchesSixSourceCascade() {
+        assertEquals(1, SourcePriority.ANIMASU.rank)
         assertEquals(2, SourcePriority.SAMEHADAKU.rank)
-        assertEquals(3, SourcePriority.OPLOVERZ.rank)
-        assertEquals(4, SourcePriority.KUSONIME.rank)
+        assertEquals(3, SourcePriority.NONTONANIMEID.rank)
+        assertEquals(4, SourcePriority.OPLOVERZ.rank)
+        assertEquals(5, SourcePriority.OTAKUDESU.rank)
+        assertEquals(6, SourcePriority.KUSONIME.rank)
     }
 
     @Test

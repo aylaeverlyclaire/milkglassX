@@ -38,7 +38,7 @@ const LIST_COLUMNS = `id, mal_id, title, title_alt, score, type, status, schedul
 
 const META_QUERY = `SELECT key, value FROM catalog_meta WHERE key IN ('last_import_at', 'last_full_import_at')`;
 
-function shapeAnimeRow(row: Record<string, unknown>) {
+function shapeAnimeRow(row: Record<string, unknown>): Record<string, unknown> & { genres: string[] } {
   const { genres_json, ...rest } = row;
   let genres: string[] = [];
   try {
@@ -522,7 +522,7 @@ const CJK_CHAR_RE = /[\u3040-\u30FF\u4E00-\u9FFF]/;
 function normalizeSearchSpaced(raw: string): string {
   return raw
     .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u0300-\u306f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+/g, ' ')
     .trim()
