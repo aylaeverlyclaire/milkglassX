@@ -194,7 +194,7 @@ internal object TitleMatcher {
     }
 
     private fun parseUncached(input: String): ParsedTitle {
-        val noBrackets = brackets.replace(input, " ")
+        val noBrackets = brackets.replace(input.replace('\u00D7', 'x'), " ")
         var season: Int? = null
         for (p in seasonPatterns) {
             val m = p.find(noBrackets)
@@ -246,7 +246,7 @@ internal object TitleMatcher {
     }
 
     fun tokenize(input: String): Set<String> {
-        val normalized = brackets.replace(input, " ")
+        val normalized = brackets.replace(input.replace('\u00D7', 'x'), " ")
             .replace(ordinalSeasonRegex, "season $1")
             .replace(shortSeasonRegex, "season $1")
             .replace(roman3Regex, "season 3")
