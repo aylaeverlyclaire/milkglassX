@@ -135,4 +135,44 @@ class InstantPlayFirstPrinciplesTest {
         val decoded = RawCandidateStore.decodeList(JSONArray(RawCandidateStore.encodeList(original).toString()))
         assertEquals(original, decoded)
     }
+
+    @Test
+    fun telemetryReportClassifiesFastSlowAndFailed() {
+        assertEquals("ok", id.my.milkglass.resolver.PlaybackTelemetryReport.classifyStatus(failed = false, ttffMs = 850L))
+        assertEquals("ok", id.my.milkglass.resolver.PlaybackTelemetryReport.classifyStatus(failed = false, ttffMs = 1_000L))
+        assertEquals("slow", id.my.milkglass.resolver.PlaybackTelemetryReport.classifyStatus(failed = false, ttffMs = 1_001L))
+        assertEquals("failed", id.my.milkglass.resolver.PlaybackTelemetryReport.classifyStatus(failed = true, ttffMs = 300L))
+
+        val payload = id.my.milkglass.resolver.PlaybackTelemetryReport(
+            title = "Gachiakuta",
+            ep = 1,
+            animeId = 178025,
+            status = "slow",
+            resolveMs = 620L,
+            ttffMs = 1_450L,
+            cacheHit = true,
+            source = "otakudesu",
+            hoster = "pixeldrain",
+            quality = "1080p",
+            appVersion = "1.0.0"
+        ).toJson()
+        assertEquals("Gachiakuta", payload.getString("title"))
+        assertEquals(1, payload.getInt("ep"))
+        assertEquals(178025, payload.getInt("anime_id"))
+        assertEquals("slow", payload.getString("status"))
+        assertEquals(620L, payload.getLong("resolve_ms"))
+        assertEquals(1_450L, payload.getLong("ttff_ms"))
+        assertTrue(payload.getBoolean("cache_hit"))
+    }
+
+    @Test
+    fun serverHosterScoresSeedEndpointHealthScorer() {
+        id.my.milkglass.download.EndpointHealthScorer.reset()
+        id.my.milkglass.download.EndpointHealthScorer.applyServerHosterScores(
+            mapOf("pixeldrain" to 0.95, "nekocloud" to 0.05)
+        )
+        assertTrue(id.my.milkglass.download.EndpointHealthScorer.score("pixeldrain") > 0)
+        assertTrue(id.my.milkglass.download.EndpointHealthScorer.score("nekocloud") < 0)
+        id.my.milkglass.download.EndpointHealthScorer.reset()
+    }
 }

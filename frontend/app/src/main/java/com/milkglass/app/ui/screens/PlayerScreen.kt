@@ -212,10 +212,16 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
     LaunchedEffect(e.nativeStreamActive, e.anime.id, e.episode, ctl.persisted.settings.quality, nearEnd) {
         if (e.nativeStreamActive && ctl.online) {
             ctl.nextPlayableEpisode(e.anime, e.episode)?.let { nextEp ->
+                val metered = com.milkglass.app.core.poster.isMeteredNetwork(context.applicationContext)
                 EngineRuntime.get(context.applicationContext).prefetchEpisode(
                     e.anime.title, e.anime.romaji, nextEp, ctl.persisted.settings.quality,
                     maxAgeMs = if (nearEnd) 5L * 60L * 1000L else Long.MAX_VALUE,
-                    prebuffer = nearEnd && !com.milkglass.app.core.poster.isMeteredNetwork(context.applicationContext),
+                    prebuffer = nearEnd,
+                    prebufferHeadBytes = if (metered) {
+                        PlayerManager.PREBUFFER_METERED_HEAD_BYTES
+                    } else {
+                        PlayerManager.PREBUFFER_HEAD_BYTES
+                    },
                 )
             }
         }

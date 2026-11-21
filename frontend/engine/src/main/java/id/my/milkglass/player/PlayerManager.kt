@@ -3,6 +3,7 @@ package id.my.milkglass.player
 import android.content.Context
 import android.net.Uri
 import android.os.StatFs
+import android.os.SystemClock
 import java.util.concurrent.CopyOnWriteArraySet
 import android.view.TextureView
 import androidx.annotation.OptIn
@@ -42,6 +43,7 @@ import id.my.milkglass.download.EndpointHealthScorer
 import id.my.milkglass.resolver.FailureReason
 import id.my.milkglass.resolver.LocalStreamSession
 import id.my.milkglass.resolver.ResolvedStream
+import id.my.milkglass.resolver.PlaybackTelemetryReport
 import id.my.milkglass.resolver.StreamResolver
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -152,6 +154,9 @@ class PlayerManager(
 
     private val sessionCounter = AtomicLong(0L)
     @Volatile private var activeSessionId: Long = 0L
+    @Volatile private var loadStartedElapsedMs: Long = 0L
+    @Volatile private var resolveCompletedElapsedMs: Long = 0L
+    @Volatile private var telemetryReportedSessionId: Long = -1L
     @Volatile private var released = false
     private var isScrubbing = false
 
@@ -242,6 +247,12 @@ class PlayerManager(
             }
         }
 
+        override fun onRenderedFirstFrame() {
+            val sid = activeSessionId
+            if (sid == 0L || _snapshot.value.sessionId != sid) return
+            emitPlaybackTelemetry(sid = sid, failed = false)
+        }
+
         override fun onCues(cueGroup: CueGroup) {
             val cleaned = cueGroup.cues
                 .flatMap { cue -> sanitizeSubtitleText(cue.text?.toString().orEmpty()) }
@@ -280,6 +291,12 @@ class PlayerManager(
                 return
             }
             setVideoBuffering(false)
+            emitPlaybackTelemetry(
+                sid = sid,
+                failed = true,
+                errorCode = error.errorCodeName,
+                errorMessage = friendly.userMessage
+            )
             _playerState.value = PlayerState.Error(friendly)
             _snapshot.update { it.copy(phase = PlaybackPhase.ERROR, error = friendly) }
         }
@@ -301,7 +318,7 @@ class PlayerManager(
         }
 
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(15_000, 45_000, 250, 2_000)
+            .setBufferDurationsMs(15_000, 45_000, 200, 1_000)
             .setBackBuffer(10_000, true)
             .setTargetBufferBytes(32 * 1024 * 1024)
             .setPrioritizeTimeOverSizeThresholds(true)
@@ -351,6 +368,8 @@ class PlayerManager(
 
         val sid = sessionCounter.incrementAndGet()
         activeSessionId = sid
+        loadStartedElapsedMs = SystemClock.elapsedRealtime()
+        resolveCompletedElapsedMs = 0L
         lastRequest = request
 
         cancelPrebuffer()
@@ -408,6 +427,7 @@ class PlayerManager(
                     return@launch
                 }
 
+                resolveCompletedElapsedMs = SystemClock.elapsedRealtime()
                 activeStreamSession = session
                 val availRes = (listOf("Auto") + session.availableResolutions).distinct()
                 _availableResolutions.value = availRes
@@ -470,6 +490,13 @@ class PlayerManager(
                 if (released || activeSessionId != sid) return@launch
                 setVideoBuffering(false)
                 val friendly = ErrorMapper.mapResolverError(e, appContext)
+                emitPlaybackTelemetry(
+                    sid = sid,
+                    failed = true,
+                    errorCode = friendly.reason.name,
+                    errorMessage = friendly.userMessage,
+                    providerDiagnostics = e.message.orEmpty()
+                )
                 _playerState.value = PlayerState.Error(friendly)
                 _snapshot.update {
                     if (it.sessionId != sid) it else it.copy(
@@ -827,6 +854,47 @@ class PlayerManager(
         }
     }
 
+    private fun emitPlaybackTelemetry(
+        sid: Long,
+        failed: Boolean,
+        errorCode: String = "",
+        errorMessage: String = "",
+        providerDiagnostics: String = ""
+    ) {
+        if (sid <= 0L || telemetryReportedSessionId == sid) return
+        val req = lastRequest ?: return
+        telemetryReportedSessionId = sid
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val startElapsed = loadStartedElapsedMs
+        val ttffMs = if (startElapsed > 0L) (nowElapsed - startElapsed).coerceAtLeast(0L) else 0L
+        val resolveEnd = resolveCompletedElapsedMs.takeIf { it > 0L } ?: nowElapsed
+        val resolveMs = if (startElapsed > 0L) (resolveEnd - startElapsed).coerceAtLeast(0L) else 0L
+        val sess = activeStreamSession
+        val ep = resolver.extractEpisodeNumber(req.slug).coerceAtLeast(1)
+        val title = req.romajiTitle.ifBlank { req.title }.ifBlank { req.slug }
+        val versionName = runCatching {
+            appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName.orEmpty()
+        }.getOrDefault("")
+        resolver.reportPlaybackTelemetry(
+            PlaybackTelemetryReport(
+                title = title,
+                ep = ep,
+                animeId = req.anilistId,
+                status = PlaybackTelemetryReport.classifyStatus(failed, ttffMs),
+                resolveMs = resolveMs,
+                ttffMs = ttffMs,
+                cacheHit = sess?.cacheHit == true,
+                source = sess?.resolvedSourceId.orEmpty(),
+                hoster = sess?.resolvedHoster.orEmpty(),
+                quality = sess?.activeResolution ?: req.preferredResolution,
+                errorCode = errorCode,
+                errorMessage = errorMessage,
+                providerDiagnostics = providerDiagnostics,
+                appVersion = versionName
+            )
+        )
+    }
+
     private fun stopStreamSession(@Suppress("UNUSED_PARAMETER") syncClose: Boolean = false) {
         val current = activeStreamSession
         activeStreamSession = null
@@ -888,7 +956,8 @@ class PlayerManager(
         @Volatile
         private var sharedDbProvider: DatabaseProvider? = null
 
-        private const val PREBUFFER_HEAD_BYTES = 2L * 1024L * 1024L
+        const val PREBUFFER_HEAD_BYTES = 2L * 1024L * 1024L
+        const val PREBUFFER_METERED_HEAD_BYTES = 512L * 1024L
         private const val PREBUFFER_MKV_TAIL_BYTES = 256L * 1024L
         private const val PREBUFFER_MP4_TAIL_BYTES = 512L * 1024L
 

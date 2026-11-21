@@ -68,9 +68,13 @@ jobs:
         env:
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          GITHUB_TELEMETRY_TOKEN: ${{ secrets.GITHUB_TELEMETRY_TOKEN }}
         run: |
           printf %s "$JWT_SECRET"   | npx wrangler secret put JWT_SECRET
           printf %s "$ADMIN_SECRET" | npx wrangler secret put ADMIN_SECRET
+          if [ -n "$GITHUB_TELEMETRY_TOKEN" ]; then
+            printf %s "$GITHUB_TELEMETRY_TOKEN" | npx wrangler secret put GITHUB_TELEMETRY_TOKEN
+          fi
 
       - name: Sinkron katalog (dari Actions, bukan dari Worker)
         working-directory: frontend

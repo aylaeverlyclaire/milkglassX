@@ -758,3 +758,223 @@ playRoutes.post(
     }
   }
 );
+
+// Wave 3: Episode-level Playback Failure & TTFF Telemetry + Automated GitHub Issue Alerting (Option B)
+const userPlaybackReportBuckets = new Map<string, RateBucket>();
+const GITHUB_ISSUE_DEDUP_SEC = 6 * 3600;
+const SLOW_ALERT_THRESHOLD_MS = 1500;
+const DEFAULT_TELEMETRY_REPO = 'aylaeverlyclaire/milkglassX';
+
+const playbackReportSchema = z.object({
+  title: z.string().trim().min(1).max(160),
+  ep: z.number().int().min(1).max(2000),
+  anime_id: z.number().int().positive().optional(),
+  status: z.enum(['ok', 'slow', 'failed']),
+  resolve_ms: z.number().int().min(0).max(120_000).default(0),
+  ttff_ms: z.number().int().min(0).max(120_000).default(0),
+  cache_hit: z.boolean().default(false),
+  source: z.string().trim().max(40).default(''),
+  hoster: z.string().trim().max(60).default(''),
+  quality: z.string().trim().max(16).default(''),
+  error_code: z.string().trim().max(64).default(''),
+  error_message: z.string().trim().max(400).default(''),
+  provider_diagnostics: z.string().trim().max(1200).default(''),
+  app_version: z.string().trim().max(32).default(''),
+});
+
+async function dispatchGitHubTelemetryIssue(
+  env: AppBindings,
+  report: z.infer<typeof playbackReportSchema>,
+  asn: number,
+  reportId: number
+): Promise<string> {
+  const token = env.GITHUB_TELEMETRY_TOKEN?.trim();
+  if (!token) return '';
+  const repo = (env.GITHUB_TELEMETRY_REPO?.trim() || DEFAULT_TELEMETRY_REPO).replace(/^\/+|\/+$/g, '');
+  const tag = report.status === 'failed' ? 'FAILED' : `SLOW (${report.ttff_ms}ms)`;
+  const issueTitle = `[MilkglassTelemetry] ${tag}: ${report.title} Ep ${report.ep}`.slice(0, 220);
+  const issueBody = [
+    `### Automated Milkglass Playback Telemetry`,
+    `- **Status**: \`${report.status}\``,
+    `- **Anime**: ${report.title}${report.anime_id ? ` (AniList #${report.anime_id})` : ''}`,
+    `- **Episode**: ${report.ep}`,
+    `- **Resolve Duration**: ${report.resolve_ms} ms`,
+    `- **Time To First Frame (TTFF)**: ${report.ttff_ms} ms`,
+    `- **Cache Hit**: ${report.cache_hit ? 'yes' : 'no'}`,
+    `- **Source / Hoster / Quality**: ${report.source || '-'} / ${report.hoster || '-'} / ${report.quality || '-'}`,
+    `- **Error Code**: \`${report.error_code || 'NONE'}\``,
+    `- **Error Message**: ${report.error_message || '-'}`,
+    `- **App Version / ASN**: ${report.app_version || '-'} / AS${asn}`,
+    '',
+    '#### Provider Diagnostics',
+    '```text',
+    report.provider_diagnostics || '(none)',
+    '```',
+  ].join('\n');
+
+  try {
+    const resp = await fetch(`https://api.github.com/repos/${repo}/issues`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'milkglass-backend-telemetry/1.0',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      body: JSON.stringify({
+        title: issueTitle,
+        body: issueBody,
+      }),
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (!resp.ok) return '';
+    const data = (await resp.json()) as { html_url?: string };
+    const url = typeof data?.html_url === 'string' ? data.html_url : '';
+    if (url && reportId > 0) {
+      await env.DB.prepare('UPDATE playback_reports SET github_issue_url = ?1 WHERE id = ?2')
+        .bind(url, reportId)
+        .run()
+        .catch(() => {});
+    }
+    return url;
+  } catch {
+    return '';
+  }
+}
+
+playRoutes.post(
+  '/playback-report',
+  rateLimit(25, 60),
+  requireVerifiedUserMiddleware(userPlaybackReportBuckets, 25),
+  zValidator('json', playbackReportSchema),
+  async (c) => {
+    const report = c.req.valid('json');
+    const asn = getClientAsn(c);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const tKey = normalizeTitleKey(report.title);
+
+    // 1) Update hoster_asn_stats in the same request when hoster is known
+    const normHoster = report.hoster ? normalizeHosterKey(report.hoster) : 'unknown';
+    if (normHoster !== 'unknown') {
+      const ok = report.status !== 'failed';
+      const clampedTtff = Math.min(
+        TELEMETRY_MAX_TTFF_MS,
+        Math.max(TELEMETRY_MIN_TTFF_MS, Math.round(report.ttff_ms || (ok ? 2500 : TELEMETRY_MAX_TTFF_MS)))
+      );
+      const upsertSql = `INSERT INTO hoster_asn_stats (asn, hoster, ema_ttff_ms, ok_count, err_count, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+           ON CONFLICT(asn, hoster) DO UPDATE SET
+             ema_ttff_ms = CASE
+               WHEN excluded.ok_count = 1 THEN (hoster_asn_stats.ema_ttff_ms * 0.8) + (excluded.ema_ttff_ms * 0.2)
+               ELSE hoster_asn_stats.ema_ttff_ms
+             END,
+             ok_count = MIN(hoster_asn_stats.ok_count + excluded.ok_count, 1000000),
+             err_count = MIN(hoster_asn_stats.err_count + excluded.err_count, 1000000),
+             updated_at = excluded.updated_at`;
+      try {
+        const stmts = [
+          c.env.DB.prepare(upsertSql).bind(asn, normHoster, clampedTtff, ok ? 1 : 0, ok ? 0 : 1, nowSec),
+        ];
+        if (asn !== 0) {
+          stmts.push(
+            c.env.DB.prepare(upsertSql).bind(0, normHoster, clampedTtff, ok ? 1 : 0, ok ? 0 : 1, nowSec)
+          );
+        }
+        await c.env.DB.batch(stmts);
+        asnStatsCache.delete(asn);
+        asnStatsCache.delete(0);
+      } catch {}
+    }
+
+    // 2) Persist structured episode playback report to D1
+    let reportId = 0;
+    try {
+      const res = await c.env.DB.prepare(
+        `INSERT INTO playback_reports (
+           title, title_key, ep, anime_id, status, resolve_ms, ttff_ms, cache_hit,
+           source, hoster, quality, error_code, error_message, provider_diagnostics,
+           app_version, asn, github_issue_url, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, '', ?17)`
+      )
+        .bind(
+          report.title,
+          tKey,
+          report.ep,
+          report.anime_id ?? null,
+          report.status,
+          report.resolve_ms,
+          report.ttff_ms,
+          report.cache_hit ? 1 : 0,
+          report.source,
+          report.hoster,
+          report.quality,
+          report.error_code,
+          report.error_message,
+          report.provider_diagnostics,
+          report.app_version,
+          asn,
+          nowSec
+        )
+        .run();
+      reportId = Number(res.meta?.last_row_id ?? 0);
+    } catch {
+      return c.json({ status: 'ok', stored: false, degraded: true });
+    }
+
+    // 3) Option B: Auto-open GitHub Issue on failure or slow playback (>1.5s) with 6h per-episode dedup
+    const shouldAlert = report.status === 'failed' || report.ttff_ms > SLOW_ALERT_THRESHOLD_MS;
+    let issueScheduled = false;
+    if (shouldAlert && c.env.GITHUB_TELEMETRY_TOKEN?.trim()) {
+      try {
+        const recentIssue = await c.env.DB.prepare(
+          `SELECT id FROM playback_reports
+           WHERE title_key = ?1 AND ep = ?2 AND status = ?3
+             AND github_issue_url != '' AND created_at >= ?4
+           LIMIT 1`
+        )
+          .bind(tKey, report.ep, report.status, nowSec - GITHUB_ISSUE_DEDUP_SEC)
+          .first<{ id: number }>();
+        if (!recentIssue) {
+          issueScheduled = true;
+          c.executionCtx?.waitUntil?.(dispatchGitHubTelemetryIssue(c.env, report, asn, reportId));
+        }
+      } catch {}
+    }
+
+    return c.json({ status: 'ok', stored: true, report_id: reportId, issue_scheduled: issueScheduled });
+  }
+);
+
+playRoutes.get('/playback-report', rateLimit(30, 60), async (c) => {
+  const adminSecret = c.req.header('X-Admin-Secret') || '';
+  if (!c.env.ADMIN_SECRET || adminSecret !== c.env.ADMIN_SECRET) {
+    return c.json({ status: 'error', message: 'Akses ditolak.' }, 401);
+  }
+  const statusFilter = c.req.query('status');
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') || '30') || 30));
+  const rdb = readDb(c.env);
+  try {
+    const stmt = statusFilter && ['ok', 'slow', 'failed'].includes(statusFilter)
+      ? rdb
+          .prepare(
+            `SELECT id, title, ep, anime_id, status, resolve_ms, ttff_ms, cache_hit,
+                    source, hoster, quality, error_code, error_message, provider_diagnostics,
+                    app_version, asn, github_issue_url, created_at
+             FROM playback_reports WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2`
+          )
+          .bind(statusFilter, limit)
+      : rdb
+          .prepare(
+            `SELECT id, title, ep, anime_id, status, resolve_ms, ttff_ms, cache_hit,
+                    source, hoster, quality, error_code, error_message, provider_diagnostics,
+                    app_version, asn, github_issue_url, created_at
+             FROM playback_reports ORDER BY created_at DESC LIMIT ?1`
+          )
+          .bind(limit);
+    const { results } = await stmt.all();
+    return c.json({ status: 'ok', data: results ?? [] });
+  } catch {
+    return c.json({ status: 'error', message: 'Gagal membaca laporan telemetri.' }, 500);
+  }
+});

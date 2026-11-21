@@ -44,6 +44,7 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import id.my.milkglass.EngineRuntime
+import id.my.milkglass.player.PlayerManager
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.flow.first
 import com.milkglass.app.ui.common.ArtBackdrop
@@ -117,9 +118,15 @@ fun DetailScreen(ctl: AppController, id: Int) {
         if (targetEp != null && ctl.online && ctl.episodeAccess(a, targetEp) == Access.Ok) {
             val rt = EngineRuntime.get(detailCtx)
             rt.seedSourceUrls(a.title, a.romaji, a.sourceUrls)
+            val metered = com.milkglass.app.core.poster.isMeteredNetwork(detailCtx)
             rt.prefetchEpisode(
                 a.title, a.romaji, targetEp, ctl.persisted.settings.quality,
-                prebuffer = !com.milkglass.app.core.poster.isMeteredNetwork(detailCtx),
+                prebuffer = true,
+                prebufferHeadBytes = if (metered) {
+                    PlayerManager.PREBUFFER_METERED_HEAD_BYTES
+                } else {
+                    PlayerManager.PREBUFFER_HEAD_BYTES
+                },
             )
         }
     }
