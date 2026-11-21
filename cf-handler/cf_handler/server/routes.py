@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Request, Response, Query, Depends
 
 from cf_handler.core.handler import CFhandler
-from cf_handler.core.resolver import resolve_split_plane
+from cf_handler.core.resolver import parse_source_order, resolve_split_plane
 from cf_handler.core.animasu import search_animasu, DEFAULT_ANIMASU_BASE_URL
 from cf_handler.core.mirror import RequestMirror
 from cf_handler.server.models import (
@@ -399,24 +399,34 @@ def setup_routes(app: FastAPI):
         title: str = Query(..., min_length=2, max_length=160),
         ep: int = Query(..., ge=1, le=2000),
         quality: str = Query("1080p"),
-        animasu: str = Query(DEFAULT_ANIMASU_BASE_URL),
-        otakudesu: str = Query("https://otakudesu.blog"),
         samehadaku: str = Query("https://v2.samehadaku.how"),
         oploverz: str = Query("https://oploverz.ch"),
+        nontonanimeid: str = Query("https://nontonanimeid.stream"),
+        otakudesu: str = Query("https://otakudesu.blog"),
+        animasu: str = Query(DEFAULT_ANIMASU_BASE_URL),
+        order: Optional[str] = Query(None),
         handler: CFhandler = Depends(get_handler),
     ):
-        source_urls = {
-            "animasu": animasu,
-            "otakudesu": otakudesu,
+        raw_sources = {
             "samehadaku": samehadaku,
             "oploverz": oploverz,
+            "nontonanimeid": nontonanimeid,
+            "otakudesu": otakudesu,
+            "animasu": animasu,
         }
+        source_urls: dict[str, str] = {}
+        for sid, raw_url in raw_sources.items():
+            if raw_url and is_safe_url(raw_url):
+                source_urls[sid] = raw_url
+        if not source_urls:
+            raise HTTPException(status_code=400, detail="No valid or safe source URLs provided")
         return await resolve_split_plane(
             title=title,
             ep=ep,
             preferred_quality=quality,
             source_urls=source_urls,
             cf_handler=handler,
+            source_order=parse_source_order(order),
         )
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])

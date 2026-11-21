@@ -51,3 +51,9 @@ CHROME_HEADERS = {
     'Upgrade-Insecure-Requests': '1',
     'Cache-Control': 'max-age=0',
 }
+
+
+class BrowserConfig:
+    @staticmethod
+    def get_chrome_headers() -> dict[str, str]:
+        return CHROME_HEADERS

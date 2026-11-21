@@ -1,0 +1,14 @@
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Node & build artifacts
+node_modules/
+.wrangler/
+.dev.vars
+
+# OS & editor junk
+.DS_Store
+Thumbs.db

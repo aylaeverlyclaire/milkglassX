@@ -18,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.milkglass.app.core.app.AppController
@@ -26,6 +27,7 @@ import com.milkglass.app.core.design.MilkIcon
 import com.milkglass.app.core.design.MilkIcons
 import com.milkglass.app.core.design.parseCssColor
 import com.milkglass.app.ui.common.BadgeKind
+import com.milkglass.app.ui.common.EmptyState
 import com.milkglass.app.ui.common.MilkBadge
 import com.milkglass.app.ui.common.MilkButton
 import com.milkglass.app.ui.common.MilkCard
@@ -76,5 +78,15 @@ fun ProfilePage(ctl: AppController, scroll: ScrollState) {
             SettingsRow(tr.t("settings.deleteAccount"), null, null, { ctl.confirmDeleteAccount() }, titleColor = c.error, trailing = null)
         }
         MilkText(tr.t("settings.footer"), ty.caption, c.onSurfaceVariant, Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+    }
+}
+
+@Composable
+fun SocialPage(ctl: AppController, scroll: ScrollState) {
+    val vh = LocalConfiguration.current.screenHeightDp.dp
+    PageColumn(scroll) {
+        EmptyState(topPadding = vh * .30f) {
+            MilkText(ctl.tr.t("common.unavailable"), Milk.type.subtitle, Milk.colors.onSurface, textAlign = TextAlign.Center)
+        }
     }
 }
