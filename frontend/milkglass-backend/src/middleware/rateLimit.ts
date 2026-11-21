@@ -1,3 +1,4 @@
+import { sha256Hex } from '../utils/crypto';
 import { Context, Next } from 'hono';
 
 export interface RateBucket {
@@ -102,9 +103,5 @@ export function rateLimit(maxRequests: number, windowSeconds: number, maxBuckets
 export async function hashClientIp(rawIp: string): Promise<string> {
   const normalizedIp = normalizeClientIp(rawIp);
   const daySalt = Math.floor(Date.now() / 86400000).toString();
-  const data = new TextEncoder().encode(`${normalizedIp}:${daySalt}`);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(digest).slice(0, 8))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+  return sha256Hex(`${normalizedIp}:${daySalt}`, 8);
 }

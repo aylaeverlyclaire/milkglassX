@@ -92,12 +92,11 @@ fun DetailScreen(ctl: AppController, id: Int) {
     val ty = Milk.type
     val tr = ctl.tr
     val time = ctl.time
-    ctl.nowMs
     val a = ctl.animeOf(id) ?: run { LaunchedEffect(Unit) { ctl.goBack() }; return }
     val resume = ctl.continueInfo(a)
     val released = time.releasedEpisodeCount(a)
     val mx = minOf(a.totalEpisodes, released + if (time.isOngoing(a)) 1 else 0)
-    val eps = (1..mx).toList().let { if (ctl.episodesDescending) it.reversed() else it }
+    val eps = remember(mx, ctl.episodesDescending) { (1..mx).toList().let { if (ctl.episodesDescending) it.reversed() else it } }
     val n = time.nextReleaseAt(a)
     val inList = ctl.isInWatchlist(a)
 
@@ -253,7 +252,9 @@ fun DetailScreen(ctl: AppController, id: Int) {
                 }
                 "comments" -> Unit
                 else -> Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    ctl.similarOf(a).chunked(2).forEach { row ->
+                    val similarRows = remember(a.id, ctl.catalog) { ctl.similarOf(a).chunked(2) }
+                    similarRows.forEach { row ->
+                        key(row.first().id) {
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             row.forEach { b ->
                                 key(b.id) {
@@ -265,6 +266,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
                                 }
                             }
                             if (row.size == 1) Spacer(Modifier.weight(1f))
+                        }
                         }
                     }
                 }
@@ -426,14 +428,16 @@ private fun EpisodeRow(ctl: AppController, a: Anime, ep: Int) {
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            val from = parseCssColor(a.colorFrom) ?: Color.Black
-            val to = parseCssColor(a.colorTo) ?: Color.Black
-
+            val thumbBg = remember(a.colorFrom, a.colorTo, ep) {
+                val from = parseCssColor(a.colorFrom) ?: Color.Black
+                val to = parseCssColor(a.colorTo) ?: Color.Black
+                cssLinearGradient((120 + ep * 17).toFloat(), listOf(from, to))
+            }
             val thumb = ctl.episodeThumbOf(a, ep)
             Box(
                 Modifier.size(72.dp, 40.dp).clip(RoundedCornerShape(8.dp))
                     .let { if (st == Access.Lock) it.lockedThumbLook() else it }
-                    .background(cssLinearGradient((120 + ep * 17).toFloat(), listOf(from, to))),
+                    .background(thumbBg),
                 contentAlignment = Alignment.Center,
             ) {
                 if (thumb != null) {

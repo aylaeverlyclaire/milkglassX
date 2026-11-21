@@ -1,3 +1,4 @@
+import { buildCfHandlerHeaders, getCfHandlerBaseUrl } from '../utils/cfHandler';
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
@@ -479,8 +480,8 @@ playRoutes.get(
       });
     }
 
-    const handlerBase = (c.env.CF_HANDLER_URL || '').trim().replace(/\/+$/, '');
-    if (!handlerBase.startsWith('http://') && !handlerBase.startsWith('https://')) {
+    const handlerBase = getCfHandlerBaseUrl(c.env);
+    if (!handlerBase) {
       // Miss biasa (resolver server memang tidak dipasang): 200 kosong, bukan 503, supaya klien tidak
       // menganggap server mati dan tetap bertanya lagi untuk episode lain. Tidak di-cache.
       c.header('X-Milkglass-ShortCache', '20');
@@ -498,10 +499,7 @@ playRoutes.get(
     if (sourceMap.samehadaku) params.set('samehadaku', sourceMap.samehadaku);
     if (sourceMap.oploverz) params.set('oploverz', sourceMap.oploverz);
 
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    if (c.env.CF_HANDLER_TOKEN && c.env.CF_HANDLER_TOKEN.trim().length > 0) {
-      headers['x-auth-token'] = c.env.CF_HANDLER_TOKEN.trim();
-    }
+    const headers = buildCfHandlerHeaders(c.env);
 
     try {
       const upstream = await fetch(`${handlerBase}/resolve?${params.toString()}`, {
