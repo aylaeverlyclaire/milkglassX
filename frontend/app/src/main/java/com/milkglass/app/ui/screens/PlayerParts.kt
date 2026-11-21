@@ -1,5 +1,12 @@
 package com.milkglass.app.ui.screens
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
+import com.milkglass.app.core.design.MilkIcon
+import com.milkglass.app.core.design.MilkIcons
+import com.milkglass.app.ui.common.MilkText
+
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
