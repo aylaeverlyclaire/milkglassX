@@ -105,6 +105,33 @@ export function titleTokens(raw) {
   return parseTitleMeta(raw).tokens;
 }
 
+export function extractMatchableTitles(anime) {
+  const seen = new Set();
+  const out = [];
+  const push = (val) => {
+    if (typeof val !== 'string') return;
+    const clean = val.trim();
+    if (clean.length < 3 || !/[a-z0-9]/i.test(clean)) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(clean);
+  };
+  push(anime?.title);
+  push(anime?.title_alt);
+  if (typeof anime?.synonyms_json === 'string' && anime.synonyms_json.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(anime.synonyms_json);
+      if (Array.isArray(parsed)) {
+        for (const s of parsed) push(s);
+      }
+    } catch {}
+  } else if (Array.isArray(anime?.synonyms)) {
+    for (const s of anime.synonyms) push(s);
+  }
+  return out;
+}
+
 export function scoreTitleMatch(catalogTitle, candidateTitle) {
   const mA = parseTitleMeta(catalogTitle);
   const mB = parseTitleMeta(candidateTitle);
@@ -565,29 +592,19 @@ async function main() {
     fetchOploverzIndex(oploBase),
   ]);
 
-  if (sameRes.status === 'fulfilled' && sameRes.value.length > 0) {
-    console.log(`[samehadaku] indexed ${sameRes.value.length} anime`);
-    providerIndices.push({ provider: 'samehadaku', base: sameBase, list: sameRes.value });
-  } else {
-    console.warn(`[samehadaku] unavailable: ${sameRes.status === 'rejected' ? sameRes.reason?.message : 'empty'}`);
-  }
-  if (nontonRes.status === 'fulfilled' && nontonRes.value.length > 0) {
-    console.log(`[nontonanimeid] indexed ${nontonRes.value.length} anime`);
-    providerIndices.push({ provider: 'nontonanimeid', base: nontonBase, list: nontonRes.value });
-  } else {
-    console.warn(`[nontonanimeid] unavailable: ${nontonRes.status === 'rejected' ? nontonRes.reason?.message : 'empty'}`);
-  }
-  if (otakuRes.status === 'fulfilled' && otakuRes.value.length > 0) {
-    console.log(`[otakudesu] indexed ${otakuRes.value.length} anime`);
-    providerIndices.push({ provider: 'otakudesu', base: otakuBase, list: otakuRes.value });
-  } else {
-    console.warn(`[otakudesu] unavailable: ${otakuRes.status === 'rejected' ? otakuRes.reason?.message : 'empty'}`);
-  }
-  if (oploRes.status === 'fulfilled' && oploRes.value.length > 0) {
-    console.log(`[oploverz] indexed ${oploRes.value.length} anime`);
-    providerIndices.push({ provider: 'oploverz', base: oploBase, list: oploRes.value });
-  } else {
-    console.warn(`[oploverz] unavailable: ${oploRes.status === 'rejected' ? oploRes.reason?.message : 'empty'}`);
+  const orderedProviderResults = [
+    ['samehadaku', sameBase, sameRes],
+    ['oploverz', oploBase, oploRes],
+    ['nontonanimeid', nontonBase, nontonRes],
+    ['otakudesu', otakuBase, otakuRes],
+  ];
+  for (const [provider, base, res] of orderedProviderResults) {
+    if (res.status === 'fulfilled' && res.value.length > 0) {
+      console.log(`[${provider}] indexed ${res.value.length} anime`);
+      providerIndices.push({ provider, base, list: res.value });
+    } else {
+      console.warn(`[${provider}] unavailable: ${res.status === 'rejected' ? res.reason?.message : 'empty'}`);
+    }
   }
 
   if (providerIndices.length === 0) {
@@ -596,7 +613,7 @@ async function main() {
 
   const matched = [];
   for (const anime of catalog) {
-    const titles = [anime.title, anime.title_alt].filter(Boolean);
+    const titles = extractMatchableTitles(anime);
     const hits = [];
     for (const pIdx of providerIndices) {
       let best = null;
