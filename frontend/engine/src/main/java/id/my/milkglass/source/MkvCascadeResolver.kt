@@ -477,6 +477,15 @@ class MkvCascadeResolver(
         val error: String? = null
     )
 
+    private data class ProviderResolvedOutcome(
+        val source: SourcePriority,
+        val selected: ResolvedMkvMedia? = null,
+        val alternatives: List<ResolvedMkvMedia> = emptyList(),
+        val availableQualities: List<MkvQuality> = emptyList(),
+        val cfHost: String? = null,
+        val error: String? = null
+    )
+
     private val rawCache = ConcurrentHashMap<String, CachedEpisodeCandidates>()
 
     private fun <T> pollKeepingInterrupt(queue: java.util.concurrent.BlockingQueue<T>, timeoutNs: Long): T? =
@@ -596,6 +605,76 @@ class MkvCascadeResolver(
         return raceExtractByQualityOrder(usable, qualityOrder, maxResults = 3, preferStreamingEmbeds = preferStreamingEmbeds)
     }
 
+    /**
+     * End-to-end First-Playable-Wins: fetch + ekstraksi dijalankan penuh di dalam worker masing-masing provider,
+     * sehingga provider dengan daftar hoster mati tidak pernah memblokir provider yang punya embed hidup.
+     */
+    private fun fetchAndResolveProvider(
+        provider: MkvSourceProvider,
+        animeTitle: String,
+        episodeNumber: Int,
+        cacheKey: String,
+        qualityOrder: List<MkvQuality>,
+        allowBatchFallback: Boolean,
+        preferCompatibleContainer: Boolean,
+        preferStreamingEmbeds: Boolean,
+        abandoned: AtomicBoolean? = null
+    ): ProviderResolvedOutcome {
+        val fetched = fetchFromProvider(provider, animeTitle, episodeNumber, abandoned)
+        if (fetched.error != null) {
+            return ProviderResolvedOutcome(provider.priority, cfHost = fetched.cfHost, error = fetched.error)
+        }
+        if (fetched.candidates.isEmpty()) {
+            return ProviderResolvedOutcome(provider.priority, cfHost = fetched.cfHost, error = "judul/episode tidak ditemukan")
+        }
+        SourceCircuitBreaker.recordSuccess(provider.priority)
+        val usable = rankCandidates(fetched.candidates, qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds)
+        if (usable.isEmpty()) {
+            return ProviderResolvedOutcome(provider.priority, cfHost = fetched.cfHost, error = "hanya arsip batch")
+        }
+        val availQualities = usable.map { it.quality }.distinct().sortedByDescending { it.height }
+        val resolvedList = raceExtractByQualityOrder(usable, qualityOrder, maxResults = 3, preferStreamingEmbeds = preferStreamingEmbeds)
+        if (resolvedList.isNotEmpty()) {
+            putRawCache(cacheKey, fetched.candidates, System.currentTimeMillis())
+            val balancedHints = MkvQuality.ALL_DESC.flatMap { q -> usable.filter { it.quality == q }.take(2) }.take(8)
+            runCatching { onEpisodeResolved?.invoke(cacheKey, balancedHints.ifEmpty { usable.take(6) }) }
+            return ProviderResolvedOutcome(
+                source = provider.priority,
+                selected = resolvedList.first(),
+                alternatives = resolvedList.drop(1),
+                availableQualities = availQualities,
+                cfHost = fetched.cfHost
+            )
+        }
+        return ProviderResolvedOutcome(
+            source = provider.priority,
+            cfHost = fetched.cfHost,
+            error = "${usable.size} link hoster gagal diekstrak/mati"
+        )
+    }
+
+    private fun consumeResolvedOutcome(
+        done: ProviderResolvedOutcome,
+        attempted: List<SourcePriority>,
+        errors: MutableMap<SourcePriority, String>,
+        cfHosts: MutableSet<String>
+    ): CascadeResult.Success? {
+        if (done.cfHost != null) cfHosts.add(done.cfHost)
+        val sel = done.selected
+        if (sel != null) {
+            return CascadeResult.Success(
+                selected = sel,
+                alternatives = done.alternatives,
+                diagnostics = CascadeDiagnostics(attempted, errors, cfHosts),
+                availableQualities = done.availableQualities
+            )
+        }
+        if (done.error != null) {
+            errors[done.source] = done.error
+        }
+        return null
+    }
+
     fun resolve(
         animeTitle: String,
         episodeNumber: Int,
@@ -646,7 +725,7 @@ class MkvCascadeResolver(
         if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
         if (activeProviders.size >= 2) {
             val fanOutCount = minOf(activeProviders.size, 3)
-            val hedgeQueue = LinkedBlockingQueue<ProviderFetchOutcome>(fanOutCount)
+            val hedgeQueue = LinkedBlockingQueue<ProviderResolvedOutcome>(fanOutCount)
             val abandoned = AtomicBoolean(false)
             val futures = ArrayList<Future<*>>(fanOutCount)
             val primary = activeProviders[0]
@@ -654,9 +733,12 @@ class MkvCascadeResolver(
             futures.add(
                 sharedProviderPool.submit {
                     val outcome = runCatching {
-                        fetchFromProvider(primary, animeTitle, episodeNumber, abandoned)
+                        fetchAndResolveProvider(
+                            primary, animeTitle, episodeNumber, cacheKey,
+                            qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds, abandoned
+                        )
                     }.getOrElse { e ->
-                        ProviderFetchOutcome(primary.priority, error = e.message ?: e::class.java.simpleName)
+                        ProviderResolvedOutcome(primary.priority, error = e.message ?: e::class.java.simpleName)
                     }
                     hedgeQueue.offer(outcome)
                 }
@@ -666,9 +748,7 @@ class MkvCascadeResolver(
                 if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
 
                 if (fastPrimary != null) {
-                    val resolved = handleProviderOutcome(
-                        fastPrimary, cacheKey, qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds, attempted, errors, cfHosts
-                    )
+                    val resolved = consumeResolvedOutcome(fastPrimary, attempted, errors, cfHosts)
                     if (resolved != null) return resolved
                     idx = 1
                 } else {
@@ -678,9 +758,12 @@ class MkvCascadeResolver(
                         futures.add(
                             sharedProviderPool.submit {
                                 val outcome = runCatching {
-                                    fetchFromProvider(p, animeTitle, episodeNumber, abandoned)
+                                    fetchAndResolveProvider(
+                                        p, animeTitle, episodeNumber, cacheKey,
+                                        qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds, abandoned
+                                    )
                                 }.getOrElse { e ->
-                                    ProviderFetchOutcome(p.priority, error = e.message ?: e::class.java.simpleName)
+                                    ProviderResolvedOutcome(p.priority, error = e.message ?: e::class.java.simpleName)
                                 }
                                 hedgeQueue.offer(outcome)
                             }
@@ -691,9 +774,7 @@ class MkvCascadeResolver(
                         val remainingNs = deadlineNs - System.nanoTime()
                         if (remainingNs <= 0L) return@repeat
                         val done = pollKeepingInterrupt(hedgeQueue, remainingNs) ?: return@repeat
-                        val resolved = handleProviderOutcome(
-                            done, cacheKey, qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds, attempted, errors, cfHosts
-                        )
+                        val resolved = consumeResolvedOutcome(done, attempted, errors, cfHosts)
                         if (resolved != null) return resolved
                     }
                     idx = fanOutCount
@@ -709,10 +790,11 @@ class MkvCascadeResolver(
             if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
             val provider = activeProviders[idx++]
             attempted.add(provider.priority)
-            val outcome = fetchFromProvider(provider, animeTitle, episodeNumber)
-            val resolved = handleProviderOutcome(
-                outcome, cacheKey, qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds, attempted, errors, cfHosts
+            val outcome = fetchAndResolveProvider(
+                provider, animeTitle, episodeNumber, cacheKey,
+                qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds
             )
+            val resolved = consumeResolvedOutcome(outcome, attempted, errors, cfHosts)
             if (resolved != null) return resolved
         }
 
@@ -750,51 +832,6 @@ class MkvCascadeResolver(
             EndpointHealthScorer.recordSourceFailure(provider.priority.id)
             ProviderFetchOutcome(provider.priority, error = e.message ?: e::class.java.simpleName)
         }
-    }
-
-    private fun handleProviderOutcome(
-        outcome: ProviderFetchOutcome,
-        cacheKey: String,
-        qualityOrder: List<MkvQuality>,
-        allowBatchFallback: Boolean,
-        preferCompatibleContainer: Boolean,
-        preferStreamingEmbeds: Boolean,
-        attempted: List<SourcePriority>,
-        errors: MutableMap<SourcePriority, String>,
-        cfHosts: MutableSet<String>
-    ): CascadeResult.Success? {
-        if (outcome.cfHost != null) {
-            cfHosts.add(outcome.cfHost)
-        }
-        if (outcome.error != null) {
-            errors[outcome.source] = outcome.error
-            return null
-        }
-        if (outcome.candidates.isEmpty()) {
-            errors[outcome.source] = "judul/episode tidak ditemukan"
-            return null
-        }
-        SourceCircuitBreaker.recordSuccess(outcome.source)
-        val usable = rankCandidates(outcome.candidates, qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds)
-        if (usable.isEmpty()) {
-            errors[outcome.source] = "hanya arsip batch"
-            return null
-        }
-        val availQualities = usable.map { it.quality }.distinct().sortedByDescending { it.height }
-        val resolvedList = raceExtractByQualityOrder(usable, qualityOrder, maxResults = 3, preferStreamingEmbeds = preferStreamingEmbeds)
-        if (resolvedList.isNotEmpty()) {
-            putRawCache(cacheKey, outcome.candidates, System.currentTimeMillis())
-            val balancedHints = MkvQuality.ALL_DESC.flatMap { q -> usable.filter { it.quality == q }.take(2) }.take(8)
-            runCatching { onEpisodeResolved?.invoke(cacheKey, balancedHints.ifEmpty { usable.take(6) }) }
-            return CascadeResult.Success(
-                selected = resolvedList.first(),
-                alternatives = resolvedList.drop(1),
-                diagnostics = CascadeDiagnostics(attempted, errors, cfHosts),
-                availableQualities = availQualities
-            )
-        }
-        errors[outcome.source] = "${usable.size} link hoster gagal diekstrak/mati"
-        return null
     }
 
     private fun putRawCache(cacheKey: String, candidates: List<RawMkvCandidate>, nowMs: Long) {
@@ -904,7 +941,13 @@ class MkvCascadeResolver(
                             } else {
                                 unshortener.unshorten(candidate.rawUrl, candidate.pageReferer, maxHops = 5)
                             }
-                            val media = extractorRegistry.extract(finalUrl, candidate.pageReferer)
+                            var media = extractorRegistry.extract(finalUrl, candidate.pageReferer)
+                            if (media == null && candidate.isStreamEmbed && !abandoned.get() && !Thread.currentThread().isInterrupted) {
+                                val nested = StreamingFirstGuards.unwrapNestedEmbedUrl(clients, finalUrl, candidate.pageReferer)
+                                if (!nested.isNullOrBlank()) {
+                                    media = extractorRegistry.extract(nested, finalUrl)
+                                }
+                            }
                             if (media == null) {
                                 if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
                                 if (!candidate.isStreamEmbed) {
