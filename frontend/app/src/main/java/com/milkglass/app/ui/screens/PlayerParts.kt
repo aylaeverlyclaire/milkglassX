@@ -61,7 +61,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.withTransform
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import com.milkglass.app.core.design.MilkEasing
@@ -208,7 +208,7 @@ internal fun SeekIndicator(dir: Int, total: Int, modifier: Modifier = Modifier) 
 
 @Composable
 private fun SeekChevron(dir: Int, alpha: Float) {
-    Box(Modifier.graphicsLayer { scaleX = if (dir < 0) -1f else 1f }) {
+    Box(Modifier.scale(scaleX = if (dir < 0) -1f else 1f, scaleY = 1f)) {
         MilkIcon(MilkIcons.Chev, size = 24.dp, tint = Color.White.copy(alpha = alpha))
     }
 }
