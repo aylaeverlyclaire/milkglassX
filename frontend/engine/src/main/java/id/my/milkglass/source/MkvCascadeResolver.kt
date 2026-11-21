@@ -863,7 +863,7 @@ class MkvCascadeResolver(
                             if (media == null && candidate.isStreamEmbed && embedSniffer != null &&
                                 !abandoned.get() && !Thread.currentThread().isInterrupted
                             ) {
-                                media = runCatching { embedSniffer.invoke(finalUrl, candidate.pageReferer) }.getOrNull()
+                                media = runCatching { embedSniffer?.invoke(finalUrl, candidate.pageReferer) }.getOrNull()
                             }
                             if (media == null) {
                                 if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
