@@ -5,9 +5,15 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import com.milkglass.app.core.app.CrashReporter
 import id.my.milkglass.EngineRuntime
 
 class MilkglassApp : Application(), ImageLoaderFactory {
+    override fun onCreate() {
+        super.onCreate()
+        CrashReporter.install(this)
+    }
+
     override fun newImageLoader(): ImageLoader = ImageLoader.Builder(this)
         .okHttpClient { EngineRuntime.get(this).clients.mediaAndApiClient }
         .memoryCache { MemoryCache.Builder(this).maxSizePercent(0.25).build() }
