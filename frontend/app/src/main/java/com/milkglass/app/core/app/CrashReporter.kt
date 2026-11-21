@@ -33,6 +33,7 @@ object CrashReporter {
         val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             runCatching {
+                PerformanceReporter.onCrashDetected(appContext)
                 val payload = buildCrashPayloadJson(
                     throwable = throwable,
                     threadName = thread.name.orEmpty(),
