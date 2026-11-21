@@ -129,7 +129,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
             }
         }
     }
-    var cfChallenge by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var cfChallenge by remember(e.anime.id, e.episode) { mutableStateOf<Pair<String, String>?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
     DisposableEffect(playerManager) {
@@ -276,8 +276,8 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
     val a = e.anime
     val from = parseCssColor(a.colorFrom) ?: Color.Black
     val to = parseCssColor(a.colorTo) ?: Color.Black
-    var fx by remember { mutableStateOf(SeekFx(0, 0, 0)) }
-    var fxOn by remember { mutableStateOf(false) }
+    var fx by remember(e.anime.id, e.episode) { mutableStateOf(SeekFx(0, 0, 0)) }
+    var fxOn by remember(e.anime.id, e.episode) { mutableStateOf(false) }
     LaunchedEffect(fx.token) { if (fx.token > 0) { delay(SEEK_FX_MS); fxOn = false } }
 
     fun seekWithFx(dir: Int, keepControls: Boolean) {

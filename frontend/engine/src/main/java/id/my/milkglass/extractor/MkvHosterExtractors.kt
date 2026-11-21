@@ -2,6 +2,7 @@ package id.my.milkglass.extractor
 
 import id.my.milkglass.net.IsolatedHttpClients
 import id.my.milkglass.net.PublicIpGuard
+import id.my.milkglass.source.SourcePriority
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
@@ -225,9 +226,7 @@ class LinkUnshortener(
             val reqBuilder = Request.Builder().url(current)
             if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
 
-            val client = if (low.contains("otakudesu") || low.contains("samehadaku") ||
-                low.contains("oploverz") || low.contains("kusonime")
-            ) {
+            val client = if (SourcePriority.entries.any { low.contains(it.id) }) {
                 sourceNoRedirectClient
             } else {
                 clients.noRedirectClient
@@ -890,15 +889,20 @@ class MkvHosterExtractorRegistry(
         val src = JsUnpacker.unpack(html) ?: html
         val patterns = listOf(
             Regex("""["'](https?://[^"']+\.m3u8[^"']{0,300}?)["']""", RegexOption.IGNORE_CASE),
-            Regex("""file\s*:\s*["'](https?://[^"']+\.(?:mp4|m3u8)[^"']*)["']""", RegexOption.IGNORE_CASE),
-            Regex("""<source[^>]+src=["'](https?://[^"']+\.(?:mp4|m3u8)[^"']*)["']""", RegexOption.IGNORE_CASE),
-            Regex("""["'](https?://[^"']{15,}\.mp4[^"']{0,200}?)["']""", RegexOption.IGNORE_CASE)
+            Regex("""file\s*:\s*["'](https?://[^"']+\.(?:mp4|mkv|m3u8)[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""<source[^>]+src=["'](https?://[^"']+\.(?:mp4|mkv|m3u8)[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""["'](https?://[^"']{15,}\.(?:mp4|mkv)[^"']{0,200}?)["']""", RegexOption.IGNORE_CASE)
         )
         val videoUrl = patterns.firstNotNullOfOrNull { it.find(src)?.groupValues?.getOrNull(1) }
             ?.takeIf { it.startsWith("http") } ?: return null
         val isHls = videoUrl.contains(".m3u8", ignoreCase = true)
+        val hosterName = when {
+            url.contains("icefile.web.id", ignoreCase = true) -> "Icefile"
+            url.contains("desustream", ignoreCase = true) -> "Desustream"
+            else -> "Odstream"
+        }
         return ExtractedDirectMedia(
-            hoster = if (url.contains("desustream", ignoreCase = true)) "Desustream" else "Odstream",
+            hoster = hosterName,
             directUrl = videoUrl,
             referer = origin,
             supportsRange = !isHls,
