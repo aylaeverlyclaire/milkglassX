@@ -318,7 +318,8 @@ class EngineRuntime private constructor(private val appContext: Context) {
         return id.my.milkglass.net.SilentWebViewCfHandler.fetchHtmlSilently(
             context = appContext,
             url = targetUrl,
-            userAgent = clients.webViewUserAgent
+            userAgent = clients.webViewUserAgent,
+            timeoutMs = 3_500L
         )
     }
 
