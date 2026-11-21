@@ -296,7 +296,7 @@ private fun SheetBody(ctl: AppController, o: Overlay, vh: androidx.compose.ui.un
                 }
                 is Overlay.EditField -> {
                     val isName = o.key == "nm"
-                    var text by remember { mutableStateOf(if (isName) ctl.meName else ctl.meHandle) }
+                    var text by remember(o.key) { mutableStateOf(if (isName) ctl.meName else ctl.meHandle) }
                     AppTextField(text, { text = it }, maxLength = if (isName) 24 else 20)
                     MilkText(
                         ctl.editError ?: tr.t(if (isName) "profile.nameHelper" else "profile.usernameHelper"),
