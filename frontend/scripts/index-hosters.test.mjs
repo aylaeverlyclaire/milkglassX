@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeTitle,
+  extractMatchableTitles,
   scoreTitleMatch,
   unwrapShortenerUrl,
   isBlacklistedUrl,
@@ -92,4 +93,19 @@ test('selectEpisodesToIndex always keeps Episode 1 plus latest episodes', () => 
   const eps = Array.from({ length: 12 }, (_, i) => ({ ep: i + 1, url: `https://x/ep-${i + 1}` }));
   const picked = selectEpisodesToIndex(eps, 4);
   assert.deepEqual(picked.map((e) => e.ep), [1, 10, 11, 12]);
+});
+
+test('extractMatchableTitles merges title, title_alt, and Latin synonyms_json safely', () => {
+  const titles = extractMatchableTitles({
+    title: 'Sousou no Frieren',
+    title_alt: "Frieren: Beyond Journey's End",
+    synonyms_json: JSON.stringify(['Frieren at the Funeral', '葬送のフリーレン', 'Sousou no Frieren', 'ab']),
+  });
+  assert.deepEqual(titles, [
+    'Sousou no Frieren',
+    "Frieren: Beyond Journey's End",
+    'Frieren at the Funeral',
+  ]);
+  const bad = extractMatchableTitles({ title: 'Naruto', synonyms_json: '{bad json' });
+  assert.deepEqual(bad, ['Naruto']);
 });

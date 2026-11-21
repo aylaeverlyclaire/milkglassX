@@ -317,7 +317,7 @@ function normalizeHosterTitleKey(title: string): string {
 
 ingestRoutes.get('/catalog-list', async (c) => {
   const { results } = await c.env.DB.prepare(
-    `SELECT id, title, title_alt, status, popularity, episodes_total, has_live_source
+    `SELECT id, title, title_alt, synonyms_json, status, popularity, episodes_total, has_live_source
      FROM animes
      ORDER BY popularity DESC
      LIMIT 5000`

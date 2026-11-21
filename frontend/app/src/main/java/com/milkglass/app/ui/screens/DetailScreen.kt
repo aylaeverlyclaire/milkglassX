@@ -92,7 +92,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
     val ty = Milk.type
     val tr = ctl.tr
     val time = ctl.time
-    val a = ctl.animeOf(id) ?: run { LaunchedEffect(Unit) { ctl.goBack() }; return }
+    val a = ctl.animeOf(id) ?: run { LaunchedEffect(id) { ctl.goBack() }; return }
     val resume = ctl.continueInfo(a)
     val released = time.releasedEpisodeCount(a)
     val mx = minOf(a.totalEpisodes, released + if (time.isOngoing(a)) 1 else 0)
@@ -128,9 +128,9 @@ fun DetailScreen(ctl: AppController, id: Int) {
         }
         val scroll = rememberScrollState()
 
-        val ctaPin = remember { StickyPin() }
-        val tabsPin = remember { StickyPin() }
-        var viewportTop by remember { mutableFloatStateOf(0f) }
+        val ctaPin = remember(id) { StickyPin() }
+        val tabsPin = remember(id) { StickyPin() }
+        var viewportTop by remember(id) { mutableFloatStateOf(0f) }
 
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val density = LocalDensity.current
