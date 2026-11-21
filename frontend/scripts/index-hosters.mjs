@@ -461,6 +461,73 @@ export function extractHostersFromOploverzEpisodeJson(epObj, pageUrl) {
   return results.slice(0, 16);
 }
 
+export function buildSourceFirstCatalog(catalog, providerIndices) {
+  const matched = [];
+  const claimedUrls = new Set();
+  const syncItems = [];
+
+  for (const anime of catalog) {
+    const titles = extractMatchableTitles(anime);
+    const hits = [];
+    const sourceUrls = {};
+    for (const pIdx of providerIndices) {
+      let best = null;
+      let bestScore = 0;
+      for (const cand of pIdx.list) {
+        for (const t of titles) {
+          const sc = scoreTitleMatch(t, cand.title);
+          if (sc > bestScore) {
+            bestScore = sc;
+            best = cand;
+          }
+        }
+      }
+      if (best && bestScore >= 0.55) {
+        hits.push({ ...best, base: pIdx.base, score: bestScore });
+        if (best.url && best.url.startsWith('https://')) {
+          sourceUrls[pIdx.provider] = best.url;
+          claimedUrls.add(best.url);
+        }
+      }
+    }
+    if (hits.length > 0) {
+      matched.push({ anime, hits });
+      if (Object.keys(sourceUrls).length > 0) {
+        syncItems.push({ anime_id: anime.id, title: anime.title, source_urls: sourceUrls });
+      }
+    }
+  }
+
+  // Source-First: sertakan anime yang ada di Samehadaku/Otakudesu/NontonAnimeID meski belum masuk AniList top-N
+  const sourceOnlyByKey = new Map();
+  for (const pIdx of providerIndices) {
+    for (const cand of pIdx.list) {
+      if (!cand.url || !cand.url.startsWith('https://') || claimedUrls.has(cand.url)) continue;
+      const cleanTitle = String(cand.title || '')
+        .replace(/\(Episode[^)]*\)/gi, '')
+        .replace(/\b(?:Subtitle Indonesia|Sub Indo|BD)\b/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const key = normalizeTitle(cleanTitle).replace(/\s+/g, '');
+      if (key.length < 3) continue;
+      const existing = sourceOnlyByKey.get(key);
+      if (existing) {
+        if (!existing.source_urls[pIdx.provider]) existing.source_urls[pIdx.provider] = cand.url;
+      } else {
+        sourceOnlyByKey.set(key, {
+          title: cleanTitle.slice(0, 180),
+          source_urls: { [pIdx.provider]: cand.url },
+        });
+      }
+    }
+  }
+
+  for (const entry of sourceOnlyByKey.values()) {
+    syncItems.push(entry);
+  }
+  return { matched, syncItems };
+}
+
 export function selectEpisodesToIndex(episodes, maxEps) {
   if (episodes.length <= maxEps) return episodes;
   const picked = [];
@@ -594,9 +661,9 @@ async function main() {
 
   const orderedProviderResults = [
     ['samehadaku', sameBase, sameRes],
-    ['oploverz', oploBase, oploRes],
-    ['nontonanimeid', nontonBase, nontonRes],
     ['otakudesu', otakuBase, otakuRes],
+    ['nontonanimeid', nontonBase, nontonRes],
+    ['oploverz', oploBase, oploRes],
   ];
   for (const [provider, base, res] of orderedProviderResults) {
     if (res.status === 'fulfilled' && res.value.length > 0) {
@@ -611,31 +678,33 @@ async function main() {
     throw new Error('Tidak ada satu pun provider sumber anime yang dapat diakses.');
   }
 
-  const matched = [];
-  for (const anime of catalog) {
-    const titles = extractMatchableTitles(anime);
-    const hits = [];
-    for (const pIdx of providerIndices) {
-      let best = null;
-      let bestScore = 0;
-      for (const cand of pIdx.list) {
-        for (const t of titles) {
-          const sc = scoreTitleMatch(t, cand.title);
-          if (sc > bestScore) {
-            bestScore = sc;
-            best = cand;
-          }
-        }
+  const { matched, syncItems } = buildSourceFirstCatalog(catalog, providerIndices);
+  console.log(
+    `Matched ${matched.length}/${catalog.length} AniList anime + ${syncItems.length - matched.length} source-only anime across ${providerIndices.length} provider(s)`
+  );
+
+  // Sinkronkan seluruh source_urls_json ke D1 (Source-First Catalog) agar katalog langsung lengkap & bypass search saat Play
+  for (let i = 0; i < syncItems.length; i += 150) {
+    const chunk = syncItems.slice(i, i + 150);
+    try {
+      const res = await fetch(`${workerUrl}/v1/internal/sync-source-catalog`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Secret': adminSecret,
+          'User-Agent': USER_AGENT,
+        },
+        body: JSON.stringify({ items: chunk }),
+        signal: AbortSignal.timeout(30000),
+      });
+      if (res.ok) {
+        const j = await res.json();
+        console.log(`[sync-source-catalog] batch ${i / 150 + 1}: updated=${j.updated}, inserted=${j.inserted}`);
       }
-      if (best && bestScore >= 0.55) {
-        hits.push({ ...best, base: pIdx.base, score: bestScore });
-      }
-    }
-    if (hits.length > 0) {
-      matched.push({ anime, hits });
+    } catch (err) {
+      console.warn(`[sync-source-catalog] batch ${i / 150 + 1} error: ${err.message}`);
     }
   }
-  console.log(`Matched ${matched.length}/${catalog.length} catalog anime across ${providerIndices.length} provider(s)`);
 
   let totalHosters = 0;
   let totalEpisodes = 0;

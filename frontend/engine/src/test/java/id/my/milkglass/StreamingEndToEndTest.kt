@@ -110,11 +110,18 @@ class StreamingEndToEndTest {
     @Test
     fun sourcePriorityOrderMatchesSixSourceCascade() {
         assertEquals(1, SourcePriority.SAMEHADAKU.rank)
-        assertEquals(2, SourcePriority.OPLOVERZ.rank)
+        assertEquals(2, SourcePriority.OTAKUDESU.rank)
         assertEquals(3, SourcePriority.NONTONANIMEID.rank)
-        assertEquals(4, SourcePriority.OTAKUDESU.rank)
-        assertEquals(5, SourcePriority.ANIMASU.rank)
-        assertEquals(6, SourcePriority.KUSONIME.rank)
+        assertEquals(4, SourcePriority.KUSONIME.rank)
+        assertEquals(5, SourcePriority.OPLOVERZ.rank)
+        assertEquals(6, SourcePriority.ANIMASU.rank)
+    }
+
+    @Test
+    fun titleMatcherMatchesCompactAndYearVariants() {
+        assertTrue(TitleMatcher.score("HunterxHunter", "Hunter x Hunter (2011)") >= 0.9)
+        assertTrue(TitleMatcher.score("HUNTER×HUNTER (2011)", "Hunter x Hunter") >= 0.9)
+        assertTrue(TitleMatcher.score("Jujutsu Kaisen Season 2", "Jujutsu Kaisen Season 1") < 0.25)
     }
 
     @Test

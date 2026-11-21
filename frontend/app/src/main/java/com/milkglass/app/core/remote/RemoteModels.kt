@@ -38,6 +38,7 @@ data class RemoteAnime(
 
     val synopsis: String? = null,
     val playable: Boolean = true,
+    @SerialName("source_urls") val sourceUrls: Map<String, String> = emptyMap(),
 )
 
 @Serializable

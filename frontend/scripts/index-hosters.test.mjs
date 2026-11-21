@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeTitle,
+  buildSourceFirstCatalog,
   extractMatchableTitles,
   scoreTitleMatch,
   unwrapShortenerUrl,
@@ -108,4 +109,33 @@ test('extractMatchableTitles merges title, title_alt, and Latin synonyms_json sa
   ]);
   const bad = extractMatchableTitles({ title: 'Naruto', synonyms_json: '{bad json' });
   assert.deepEqual(bad, ['Naruto']);
+});
+
+test('buildSourceFirstCatalog binds source_urls to matched anime and keeps source-only titles deduplicated', () => {
+  const catalog = [{ id: 11061, title: 'Hunter x Hunter (2011)', title_alt: 'Hunter x Hunter' }];
+  const providerIndices = [
+    {
+      provider: 'samehadaku',
+      base: 'https://v2.samehadaku.how',
+      list: [
+        { title: 'Hunter x Hunter (2011)', url: 'https://v2.samehadaku.how/anime/hunter-x-hunter-2011/', provider: 'samehadaku' },
+        { title: 'Classroom of the Elite Season 4', url: 'https://v2.samehadaku.how/anime/classroom-of-the-elite-season-4/', provider: 'samehadaku' },
+      ],
+    },
+    {
+      provider: 'otakudesu',
+      base: 'https://otakudesu.blog',
+      list: [
+        { title: 'Classroom of the Elite Season 4 Subtitle Indonesia', url: 'https://otakudesu.blog/anime/cote-s4/', provider: 'otakudesu' },
+      ],
+    },
+  ];
+  const { matched, syncItems } = buildSourceFirstCatalog(catalog, providerIndices);
+  assert.equal(matched.length, 1);
+  assert.equal(syncItems.length, 2);
+  assert.equal(syncItems[0].anime_id, 11061);
+  assert.equal(syncItems[0].source_urls.samehadaku, 'https://v2.samehadaku.how/anime/hunter-x-hunter-2011/');
+  assert.equal(syncItems[1].anime_id, undefined);
+  assert.equal(syncItems[1].source_urls.samehadaku, 'https://v2.samehadaku.how/anime/classroom-of-the-elite-season-4/');
+  assert.equal(syncItems[1].source_urls.otakudesu, 'https://otakudesu.blog/anime/cote-s4/');
 });

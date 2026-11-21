@@ -28,6 +28,7 @@ data class Anime(
     val similarIds: List<Int>,
 
     val nextAirAt: Long? = null,
+    val sourceUrls: Map<String, String> = emptyMap(),
 ) {
 
     val romaji: String get() = altTitle.substringBefore(" · ")

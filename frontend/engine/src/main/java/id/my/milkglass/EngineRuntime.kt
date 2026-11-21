@@ -356,6 +356,24 @@ class EngineRuntime private constructor(private val appContext: Context) {
         return true
     }
 
+    /**
+     * Tanamkan URL series langsung dari katalog D1 (`source_urls`) ke `slugCache`
+     * sehingga pemutaran dan prefetch langsung melewati langkah pencarian judul (`/?s=...`).
+     */
+    fun seedSourceUrls(title: String, romajiTitle: String, sourceUrls: Map<String, String>) {
+        if (sourceUrls.isEmpty()) return
+        val titles = listOf(title, romajiTitle).map { it.trim() }.filter { it.length >= 2 }.distinct()
+        if (titles.isEmpty()) return
+        for ((rawKey, url) in sourceUrls) {
+            if (!url.startsWith("https://")) continue
+            val priority = SourcePriority.entries.firstOrNull { it.id.equals(rawKey.trim(), ignoreCase = true) }
+                ?: continue
+            for (t in titles) {
+                slugCache.put(priority, t, url)
+            }
+        }
+    }
+
     fun prefetchEpisode(
         title: String,
         romajiTitle: String,

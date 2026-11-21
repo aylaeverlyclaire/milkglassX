@@ -25,11 +25,11 @@ export interface SourceBaseUrls {
  */
 export const SOURCE_CASCADE_ORDER: readonly SourceId[] = [
   'samehadaku',
-  'oploverz',
-  'nontonanimeid',
   'otakudesu',
-  'animasu',
+  'nontonanimeid',
   'kusonime',
+  'oploverz',
+  'animasu',
 ] as const;
 
 export const DEFAULT_SOURCE_URLS: Readonly<SourceBaseUrls> = {

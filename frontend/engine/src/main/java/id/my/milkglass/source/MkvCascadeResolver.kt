@@ -36,11 +36,11 @@ enum class SourcePriority(
     val watermarkTier: Int
 ) {
     SAMEHADAKU(1, "samehadaku", "https://v2.samehadaku.how", 0),
-    OPLOVERZ(2, "oploverz", "https://oploverz.ch", 1),
+    OTAKUDESU(2, "otakudesu", "https://otakudesu.blog", 2),
     NONTONANIMEID(3, "nontonanimeid", "https://nontonanimeid.stream", 0),
-    OTAKUDESU(4, "otakudesu", "https://otakudesu.blog", 2),
-    ANIMASU(5, "animasu", "https://animasu.love", 0),
-    KUSONIME(6, "kusonime", "https://kusonime.com", 2)
+    KUSONIME(4, "kusonime", "https://kusonime.com", 2),
+    OPLOVERZ(5, "oploverz", "https://oploverz.ch", 1),
+    ANIMASU(6, "animasu", "https://animasu.love", 0)
 }
 
 enum class MediaContainer(val rank: Int, val label: String) {
@@ -194,7 +194,7 @@ internal object TitleMatcher {
     }
 
     private fun parseUncached(input: String): ParsedTitle {
-        val noBrackets = brackets.replace(input, " ")
+        val noBrackets = brackets.replace(input.replace('\u00D7', 'x'), " ")
         var season: Int? = null
         for (p in seasonPatterns) {
             val m = p.find(noBrackets)
@@ -246,7 +246,7 @@ internal object TitleMatcher {
     }
 
     fun tokenize(input: String): Set<String> {
-        val normalized = brackets.replace(input, " ")
+        val normalized = brackets.replace(input.replace('\u00D7', 'x'), " ")
             .replace(ordinalSeasonRegex, "season $1")
             .replace(shortSeasonRegex, "season $1")
             .replace(roman3Regex, "season 3")

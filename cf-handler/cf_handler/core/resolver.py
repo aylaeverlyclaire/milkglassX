@@ -62,9 +62,9 @@ BLACKLIST_HOSTS = (
 
 DEFAULT_SOURCE_ORDER: Tuple[str, ...] = (
     "samehadaku",
-    "oploverz",
-    "nontonanimeid",
     "otakudesu",
+    "nontonanimeid",
+    "oploverz",
     "animasu",
 )
 

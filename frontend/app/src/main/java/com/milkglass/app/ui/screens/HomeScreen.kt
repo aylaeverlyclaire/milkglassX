@@ -163,7 +163,9 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
         val ep = d.resume?.episode ?: 1
         if (ctl.online && ctl.episodeAccess(d.anime, ep) == com.milkglass.app.core.app.Access.Ok) {
             kotlinx.coroutines.delay(250)
-            id.my.milkglass.EngineRuntime.get(heroCtx).prefetchEpisode(
+            val rt = id.my.milkglass.EngineRuntime.get(heroCtx)
+            rt.seedSourceUrls(d.anime.title, d.anime.romaji, d.anime.sourceUrls)
+            rt.prefetchEpisode(
                 d.anime.title, d.anime.romaji, ep, ctl.persisted.settings.quality,
             )
         }
