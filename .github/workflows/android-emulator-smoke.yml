@@ -26,7 +26,7 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
       - uses: gradle/actions/setup-gradle@v6
       - name: Enable KVM access
         run: |
@@ -37,7 +37,7 @@ jobs:
       - name: Run instrumented UI smoke tests on Android Emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          api-level: 36
           target: default
           arch: x86_64
           profile: pixel_6
