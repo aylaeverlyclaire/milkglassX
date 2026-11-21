@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: index-hosters
@@ -23,15 +24,40 @@ jobs:
   index:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    services:
+      cf-handler:
+        image: [invalid URL]
+        credentials:
+          username: ${{ [invalid URL] }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        ports:
+          - 8000:8000
+        env:
+          PORT: "8000"
+          CF_HEADLESS: "true"
+          CF_BROWSER_NO_SANDBOX: "true"
+          CF_CACHE_ENABLED: "true"
+          CF_BROWSERS: "2"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: "26"
+      - name: Tunggu CF Handler siap
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              echo "CF Handler siap pada percobaan ke-$i"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "CF Handler belum merespons /health, lanjutkan dengan fallback langsung"
       - name: Indeks & verifikasi multi-hoster ke Cloudflare D1
         env:
           WORKER_URL: https://milkglass-backend.milkyliquid.workers.dev
           ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          CF_HANDLER_URL: http://127.0.0.1:8000
           MAX_ANIMES: ${{ github.event.inputs.max_animes || '300' }}
           MAX_EPS_PER_ANIME: ${{ github.event.inputs.max_eps || '4' }}
           CONCURRENCY: "6"
