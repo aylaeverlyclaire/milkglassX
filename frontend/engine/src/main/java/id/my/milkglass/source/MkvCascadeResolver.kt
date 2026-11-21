@@ -263,7 +263,7 @@ internal object TitleMatcher {
             .toSet()
     }
 
-    private val trailingYearRegex = Regex("(?:19|20)\d{2}$")
+    private val trailingYearRegex = Regex("""(?:19|20)\d{2}$""")
 
     fun score(query: String, candidate: String): Double {
         val pq = parse(query)
@@ -327,7 +327,7 @@ internal object TitleMatcher {
             out.add("$base Season ${p.season}")
             out.add("$base ${p.season}")
         }
-        val noYear = cleanFull.replace(Regex("\b(?:19|20)\d{2}\b"), " ").replace(whitespaceRegex, " ").trim()
+        val noYear = cleanFull.replace(Regex("""\b(?:19|20)\d{2}\b"""), " ").replace(whitespaceRegex, " ").trim()
         if (noYear.isNotBlank() && noYear != cleanFull) out.add(noYear)
         if (cleanFull.isNotBlank()) out.add(cleanFull)
         if (beforeColon.isNotBlank()) out.add(beforeColon)
