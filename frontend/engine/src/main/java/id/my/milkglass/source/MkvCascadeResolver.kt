@@ -35,11 +35,11 @@ enum class SourcePriority(
     val defaultBaseUrl: String,
     val watermarkTier: Int
 ) {
-    ANIMASU(1, "animasu", "https://animasu.love", 0),
-    SAMEHADAKU(2, "samehadaku", "https://v2.samehadaku.how", 0),
+    SAMEHADAKU(1, "samehadaku", "https://v2.samehadaku.how", 0),
+    OPLOVERZ(2, "oploverz", "https://oploverz.ch", 1),
     NONTONANIMEID(3, "nontonanimeid", "https://nontonanimeid.stream", 0),
-    OPLOVERZ(4, "oploverz", "https://oploverz.ch", 1),
-    OTAKUDESU(5, "otakudesu", "https://otakudesu.blog", 2),
+    OTAKUDESU(4, "otakudesu", "https://otakudesu.blog", 2),
+    ANIMASU(5, "animasu", "https://animasu.love", 0),
     KUSONIME(6, "kusonime", "https://kusonime.com", 2)
 }
 

@@ -1,3 +1,4 @@
+import { QUALITY_SCHEMA, SOURCE_ID_SCHEMA } from '../utils/sources';
 import { buildCfHandlerHeaders, getCfHandlerBaseUrl } from '../utils/cfHandler';
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
@@ -73,8 +74,8 @@ const hintBodySchema = z.object({
   candidates: z
     .array(
       z.object({
-        source: z.enum(['animasu', 'nontonanimeid', 'otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
-        quality: z.enum(['1080p', '720p', '480p', '360p']),
+        source: SOURCE_ID_SCHEMA,
+        quality: QUALITY_SCHEMA,
         hoster: z.string().trim().min(1).max(40),
         raw_url: z.string().max(2048),
         referer: z.string().max(2048).optional(),
@@ -268,8 +269,8 @@ const directBodySchema = z.object({
   candidates: z
     .array(
       z.object({
-        source: z.enum(['animasu', 'nontonanimeid', 'otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
-        quality: z.enum(['1080p', '720p', '480p', '360p']),
+        source: SOURCE_ID_SCHEMA,
+        quality: QUALITY_SCHEMA,
         hoster: z.string().trim().min(1).max(40),
         direct_url: z.string().max(2048),
         referer: z.string().max(2048).optional(),
@@ -385,7 +386,7 @@ const resolveQuerySchema = z.object({
   anime_id: z.coerce.number().int().positive().optional(),
   title: z.string().trim().min(1).max(160),
   ep: z.coerce.number().int().min(1).max(2000),
-  q: z.enum(['1080p', '720p', '480p', '360p']).default('1080p'),
+  q: QUALITY_SCHEMA.default('1080p'),
 });
 
 playRoutes.get(
@@ -494,10 +495,11 @@ playRoutes.get(
       ep: String(ep),
       quality: q,
     });
-    if (sourceMap.animasu) params.set('animasu', sourceMap.animasu);
-    if (sourceMap.otakudesu) params.set('otakudesu', sourceMap.otakudesu);
     if (sourceMap.samehadaku) params.set('samehadaku', sourceMap.samehadaku);
     if (sourceMap.oploverz) params.set('oploverz', sourceMap.oploverz);
+    if (sourceMap.nontonanimeid) params.set('nontonanimeid', sourceMap.nontonanimeid);
+    if (sourceMap.otakudesu) params.set('otakudesu', sourceMap.otakudesu);
+    if (sourceMap.animasu) params.set('animasu', sourceMap.animasu);
 
     const headers = buildCfHandlerHeaders(c.env);
 
