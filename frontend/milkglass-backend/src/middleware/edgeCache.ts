@@ -1,3 +1,4 @@
+import { sha1Hex } from '../utils/crypto';
 import { Context, Next } from 'hono';
 
 export interface EdgeCacheOptions {
@@ -59,11 +60,7 @@ export function normalizeCacheTitle(raw: string): string {
 }
 
 async function weakEtag(body: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(body));
-  const hex = Array.from(new Uint8Array(digest).slice(0, 10))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-  return `W/"${hex}"`;
+  return `W/"${await sha1Hex(body, 10)}"`;
 }
 
 function etagMatches(ifNoneMatch: string | undefined, etag: string | null): boolean {

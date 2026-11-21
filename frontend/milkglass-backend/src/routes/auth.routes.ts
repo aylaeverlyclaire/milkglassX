@@ -1,3 +1,4 @@
+import { sha256Hex, timingSafeEqualHex } from '../utils/crypto';
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
@@ -25,13 +26,6 @@ export function getValidatedJwtSecret(secret: string | undefined): Uint8Array {
   return new TextEncoder().encode(secret);
 }
 
-async function sha256Hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
 
 export async function deriveDeterministicRefreshToken(
   sessionId: string,
@@ -103,14 +97,6 @@ export async function hmacSha256Hex(keyText: string, message: string): Promise<s
     .join('');
 }
 
-function timingSafeEqualHex(a: string, b: string): boolean {
-  if (a.length !== b.length || a.length === 0) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
-}
 
 export async function verifyRequestProof(
   method: string,

@@ -1,3 +1,4 @@
+import { getCfHandlerBaseUrl, isCfHandlerConfigured } from '../utils/cfHandler';
 import { Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { z } from 'zod';
@@ -162,7 +163,7 @@ cfRoutes.get('/status', (c) => {
   return c.json({
     status: 'ok',
     data: {
-      configured: Boolean(c.env.CF_HANDLER_URL && c.env.CF_HANDLER_URL.trim().startsWith('http')),
+      configured: isCfHandlerConfigured(c.env),
     },
   });
 });
@@ -183,8 +184,8 @@ cfRoutes.get(
   edgeCache(900, 120, true, { allowedQueryParams: ['url'], privateClientCache: true }),
   zValidatorQuery(targetUrlQuerySchema),
   async (c) => {
-    const handlerBase = (c.env.CF_HANDLER_URL || '').trim().replace(/\/+$/, '');
-    if (!handlerBase.startsWith('http://') && !handlerBase.startsWith('https://')) {
+    const handlerBase = getCfHandlerBaseUrl(c.env);
+    if (!handlerBase) {
       c.header('X-Milkglass-NoCache', '1');
       return c.json(
         { status: 'error', available: false, message: 'CF handler belum dikonfigurasi.' },
@@ -277,8 +278,8 @@ cfRoutes.get(
   edgeCache(300, 60, true, { allowedQueryParams: ['url'], privateClientCache: true }),
   zValidatorQuery(targetUrlQuerySchema),
   async (c) => {
-    const handlerBase = (c.env.CF_HANDLER_URL || '').trim().replace(/\/+$/, '');
-    if (!handlerBase.startsWith('http://') && !handlerBase.startsWith('https://')) {
+    const handlerBase = getCfHandlerBaseUrl(c.env);
+    if (!handlerBase) {
       c.header('X-Milkglass-NoCache', '1');
       return c.json(
         { status: 'error', available: false, message: 'CF handler belum dikonfigurasi.' },

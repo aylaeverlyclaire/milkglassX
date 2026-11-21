@@ -1,3 +1,4 @@
+import { isCfHandlerConfigured } from '../utils/cfHandler';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { edgeCache } from '../middleware/edgeCache';
@@ -504,7 +505,7 @@ catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
     resolution_mode: 'CLIENT_CASCADE_MKV',
     target_format: 'MKV',
     target_resolutions: ['1080p', '720p', '480p'],
-    cf_handler_available: Boolean(c.env.CF_HANDLER_URL && c.env.CF_HANDLER_URL.trim().startsWith('http')),
+    cf_handler_available: isCfHandlerConfigured(c.env),
     sources: [
       { rank: 1, id: 'animasu', base_url: urls.animasu, watermark_tier: 0 },
       { rank: 2, id: 'samehadaku', base_url: urls.samehadaku, watermark_tier: 0 },

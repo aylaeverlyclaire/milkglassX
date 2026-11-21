@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { zValidator } from '@hono/zod-validator';
+import { zValidatorJson } from '../middleware/validator';
 import { z } from 'zod';
 import { rateLimit, hashClientIp } from '../middleware/rateLimit';
 import { AppBindings } from '../index';
@@ -22,7 +22,7 @@ const telemetryBodySchema = z.object({
 systemRoutes.post(
   '/telemetry/source',
   rateLimit(10, 60),
-  zValidator('json', telemetryBodySchema),
+  zValidatorJson(telemetryBodySchema),
   async (c) => {
     const { source_id, reason } = c.req.valid('json');
 
