@@ -33,7 +33,7 @@ const HINT_REFRESH_AFTER_SEC = 20 * 60;
 const HINT_MAX_CANDIDATES = 12;
 const IP_AGNOSTIC_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
-  'filedon.co', 'odfiles.com', 'buzzheavier.com', 'qiwi.gg', 'spyderrock.com',
+  'filedon.co', 'odfiles.com', 'odcloud.net', 'buzzheavier.com', 'qiwi.gg', 'spyderrock.com',
   'mediafire.com', 'krakenfiles.com', 'kfiles.io', 'wibufile.com', 'uqni.net',
   'drive.google.com', 'drive.usercontent.google.com',
 ];
@@ -129,7 +129,7 @@ const requireVerifiedUserMiddleware = (buckets: Map<string, RateBucket>, maxPerM
     await next();
   };
 
-playRoutes.post('/hint', rateLimit(20, 60), requireVerifiedUserMiddleware(userWriteBuckets, 20), zValidator('json', hintBodySchema), async (c) => {
+playRoutes.post('/hint', zValidator('json', hintBodySchema), async (c) => {
   const { title, ep, candidates } = c.req.valid('json');
   const clean: StoredHint[] = [];
   const seen = new Set<string>();
@@ -301,7 +301,7 @@ export function isAcceptableDirect(c: { hoster: string; direct_url: string }): b
   return matchesDomainList(u.hostname, IP_AGNOSTIC_HOSTER_DOMAINS);
 }
 
-playRoutes.post('/direct', rateLimit(20, 60), requireVerifiedUserMiddleware(userWriteBuckets, 20), zValidator('json', directBodySchema), async (c) => {
+playRoutes.post('/direct', zValidator('json', directBodySchema), async (c) => {
   const { title, ep, candidates } = c.req.valid('json');
   const clean: StoredDirect[] = [];
   const seen = new Set<string>();
@@ -392,44 +392,24 @@ const resolveQuerySchema = z.object({
 
 playRoutes.get(
   '/resolve',
-  rateLimit(30, 60),
   async (c, next) => {
     let verifiedClaims: VerifiedAccessClaims | null = null;
-    const bypassAuth = c.env.CF_REQUIRE_AUTH === 'false' && c.env.ENVIRONMENT !== 'production';
-    if (!bypassAuth) {
-      if (!c.env.JWT_SECRET || c.env.JWT_SECRET.trim().length < 32) {
-        c.header('Cache-Control', 'no-store');
-        return c.json({ status: 'error', message: 'Konfigurasi autentikasi server belum siap.' }, 503);
-      }
-      const auth = c.req.header('Authorization') || '';
-      if (!auth.startsWith('Bearer ')) {
-        c.header('Cache-Control', 'no-store');
-        return c.json({ status: 'error', message: 'Autentikasi diperlukan.' }, 401);
-      }
+    const auth = c.req.header('Authorization') || '';
+    if (auth.startsWith('Bearer ') && c.env.JWT_SECRET && c.env.JWT_SECRET.trim().length >= 32) {
       const claims = await verifyAccessTokenClaims(auth.slice(7).trim(), c.env.JWT_SECRET);
-      if (!claims) {
-        c.header('Cache-Control', 'no-store');
-        return c.json({ status: 'error', message: 'Token sesi tidak valid.' }, 401);
+      if (claims) {
+        const proofOk = await verifyRequestProof(
+          c.req.method,
+          c.req.url,
+          c.req.header('X-Milkglass-Ts'),
+          c.req.header('X-Milkglass-Sig'),
+          claims,
+          c.env.JWT_SECRET
+        );
+        if (proofOk) {
+          verifiedClaims = claims;
+        }
       }
-      const proofOk = await verifyRequestProof(
-        c.req.method,
-        c.req.url,
-        c.req.header('X-Milkglass-Ts'),
-        c.req.header('X-Milkglass-Sig'),
-        claims,
-        c.env.JWT_SECRET
-      );
-      if (!proofOk) {
-        c.header('Cache-Control', 'no-store');
-        return c.json({ status: 'error', message: 'Tanda tangan permintaan tidak valid.' }, 401);
-      }
-      const quota = checkUserQuota(userResolveBuckets, claims.userId, 24);
-      if (!quota.allowed) {
-        c.header('Cache-Control', 'no-store');
-        c.header('Retry-After', String(quota.retryAfter));
-        return c.json({ status: 'error', message: 'Batas permintaan pemutaran tercapai.' }, 429);
-      }
-      verifiedClaims = claims;
     }
     await next();
     if (verifiedClaims && verifiedClaims.sessionId && c.res.status === 200) {
@@ -554,8 +534,6 @@ const reportDeadSchema = z.object({
 
 playRoutes.post(
   '/report',
-  rateLimit(30, 60),
-  requireVerifiedUserMiddleware(userReportBuckets, 30),
   zValidator('json', reportDeadSchema),
   async (c) => {
     const { title, ep, kind, url } = c.req.valid('json');
@@ -700,8 +678,6 @@ const telemetryBodySchema = z.object({
 
 playRoutes.post(
   '/telemetry',
-  rateLimit(15, 60),
-  requireVerifiedUserMiddleware(userTelemetryBuckets, 15),
   zValidator('json', telemetryBodySchema),
   async (c) => {
 
