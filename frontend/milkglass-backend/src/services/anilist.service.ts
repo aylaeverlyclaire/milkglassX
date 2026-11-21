@@ -47,23 +47,9 @@ export interface AniListSearchMetadata {
   status: string;
 }
 
-export interface SourceBaseUrls {
-  animasu: string;
-  otakudesu: string;
-  samehadaku: string;
-  nontonanimeid: string;
-  oploverz: string;
-  kusonime: string;
-}
-
-export const DEFAULT_SOURCE_BASE_URLS: Readonly<SourceBaseUrls> = {
-  animasu: 'https://animasu.love',
-  otakudesu: 'https://otakudesu.blog',
-  samehadaku: 'https://v2.samehadaku.how',
-  nontonanimeid: 'https://nontonanimeid.stream',
-  oploverz: 'https://oploverz.ch',
-  kusonime: 'https://kusonime.com',
-};
+import { DEFAULT_SOURCE_URLS, type SourceBaseUrls } from '../utils/sources';
+export type { SourceBaseUrls };
+export const DEFAULT_SOURCE_BASE_URLS: Readonly<SourceBaseUrls> = DEFAULT_SOURCE_URLS;
 
 function parseRetryAfterMs(headerVal: string | null, fallbackMs = 1500, maxMs = 5000): number {
   if (!headerVal) return fallbackMs;

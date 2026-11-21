@@ -26,9 +26,9 @@ jobs:
     timeout-minutes: 30
     services:
       cf-handler:
-        image: [invalid URL]
+        image: ghcr.io/aylaeverlyclaire/milkglassx-cf-handler:latest
         credentials:
-          username: ${{ [invalid URL] }}
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
         ports:
           - 8000:8000
