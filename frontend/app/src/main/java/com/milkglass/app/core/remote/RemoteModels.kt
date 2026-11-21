@@ -1,5 +1,7 @@
 package com.milkglass.app.core.remote
 
+import androidx.compose.runtime.Immutable
+
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -10,6 +12,7 @@ val RemoteJson = Json {
 }
 
 @Serializable
+@Immutable
 data class RemoteAnime(
     val id: Int,
     @SerialName("mal_id") val malId: Int? = null,
@@ -38,12 +41,14 @@ data class RemoteAnime(
 )
 
 @Serializable
+@Immutable
 data class SyncMeta(
     @SerialName("synced_at") val syncedAt: Long? = null,
     @SerialName("full_synced_at") val fullSyncedAt: Long? = null,
 )
 
 @Serializable
+@Immutable
 data class HomeData(
     val ongoing: List<RemoteAnime> = emptyList(),
     val popular: List<RemoteAnime> = emptyList(),
@@ -52,6 +57,7 @@ data class HomeData(
 )
 
 @Serializable
+@Immutable
 data class HomeResponse(
     val status: String,
     val data: HomeData? = null,
@@ -60,6 +66,7 @@ data class HomeResponse(
 )
 
 @Serializable
+@Immutable
 data class BrowseResponse(
     val status: String,
     val data: List<RemoteAnime> = emptyList(),
@@ -67,6 +74,7 @@ data class BrowseResponse(
 )
 
 @Serializable
+@Immutable
 data class DetailResponse(
     val status: String,
     val data: RemoteAnime? = null,

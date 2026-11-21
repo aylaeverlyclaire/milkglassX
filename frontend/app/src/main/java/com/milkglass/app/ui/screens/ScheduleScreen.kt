@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,26 +67,30 @@ fun ScheduleScreen(ctl: AppController, scroll: ScrollState) {
     val days = remember(ctl, today) { (0 until 7).map { ctl.scheduleForDay(it) } }
     PageColumn(scroll) {
         (0 until 7).forEach { k ->
-            val ds = time.startOfDay(k)
-            val items = days[k]
-            Column {
+            key(k) {
+                val ds = time.startOfDay(k)
+                val items = days[k]
+                Column {
 
-                Row(Modifier.padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MilkText(tr.locale.weekdaysLong[time.weekdayOf(ds)], ty.sectionTitle, c.onSurface, Modifier.alignByBaseline())
-                    MilkText(
-                        "${time.dayOfMonthOf(ds)} ${tr.locale.monthsShort[time.monthIndexOf(ds)]}${if (k == 0) " · " + tr.t("common.today") else ""}",
-                        ty.caption, c.onSurfaceVariant, Modifier.alignByBaseline(),
-                    )
-                }
-                if (items.isEmpty()) {
-                    MilkText(tr.t("schedule.noReleasesDay"), ty.caption, c.onSurfaceVariant)
-                } else {
-                    val at = items.indexOfFirst { !ctl.hasAired(it.ts) }
-                    items.forEachIndexed { i, x ->
-                        if (k == 0 && i == (if (at < 0) items.size else at)) NowRow(ctl, nowTs)
-                        ScheduleRow(ctl, x, last = i == items.size - 1)
+                    Row(Modifier.padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MilkText(tr.locale.weekdaysLong[time.weekdayOf(ds)], ty.sectionTitle, c.onSurface, Modifier.alignByBaseline())
+                        MilkText(
+                            "${time.dayOfMonthOf(ds)} ${tr.locale.monthsShort[time.monthIndexOf(ds)]}${if (k == 0) " · " + tr.t("common.today") else ""}",
+                            ty.caption, c.onSurfaceVariant, Modifier.alignByBaseline(),
+                        )
                     }
-                    if (k == 0 && at < 0) NowRow(ctl, nowTs)
+                    if (items.isEmpty()) {
+                        MilkText(tr.t("schedule.noReleasesDay"), ty.caption, c.onSurfaceVariant)
+                    } else {
+                        val at = items.indexOfFirst { !ctl.hasAired(it.ts) }
+                        items.forEachIndexed { i, x ->
+                            if (k == 0 && i == (if (at < 0) items.size else at)) NowRow(ctl, nowTs)
+                            key("${x.a.id}.${x.ep}") {
+                                ScheduleRow(ctl, x, last = i == items.size - 1)
+                            }
+                        }
+                        if (k == 0 && at < 0) NowRow(ctl, nowTs)
+                    }
                 }
             }
         }

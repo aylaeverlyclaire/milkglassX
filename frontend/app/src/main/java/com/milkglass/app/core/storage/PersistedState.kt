@@ -1,5 +1,7 @@
 package com.milkglass.app.core.storage
 
+import androidx.compose.runtime.Immutable
+
 import com.milkglass.app.core.model.Conversation
 import com.milkglass.app.core.model.HistoryEntry
 import com.milkglass.app.core.model.Settings
@@ -7,6 +9,7 @@ import com.milkglass.app.core.model.Subscription
 import kotlinx.serialization.Serializable
 
 @Serializable
+@Immutable
 data class PersistedState(
     val displayName: String? = null,
     val handle: String? = null,

@@ -1,8 +1,11 @@
 package com.milkglass.app.core.model
 
+import androidx.compose.runtime.Immutable
+
 import kotlinx.serialization.Serializable
 
 @Serializable
+@Immutable
 data class Anime(
     val id: Int,
     val title: String,
@@ -31,6 +34,7 @@ data class Anime(
 }
 
 @Serializable
+@Immutable
 data class User(
     val name: String,
     val color: String,
@@ -41,9 +45,11 @@ data class User(
 )
 
 @Serializable
+@Immutable
 data class SharedEpisode(val animeId: Int? = null, val episode: Int? = null, val position: Double? = null)
 
 @Serializable
+@Immutable
 data class Message(
     val id: String? = null,
     val authorId: String? = null,
@@ -59,6 +65,7 @@ data class Message(
 )
 
 @Serializable
+@Immutable
 data class RateState(
     val sentAt: List<Long> = emptyList(),
     val strikes: Int = 0,
@@ -69,6 +76,7 @@ data class RateState(
 )
 
 @Serializable
+@Immutable
 data class Conversation(
     val id: String,
     val kind: String,
@@ -90,6 +98,7 @@ data class Conversation(
 )
 
 @Serializable
+@Immutable
 data class Settings(
     val theme: String = "system",
     val quality: String = "Auto",
@@ -102,6 +111,7 @@ data class Settings(
 )
 
 @Serializable
+@Immutable
 data class Subscription(
     val active: Int = 0,
     val plan: String? = null,
@@ -111,9 +121,11 @@ data class Subscription(
 )
 
 @Serializable
+@Immutable
 data class HistoryEntry(val id: Int, val episode: Int, val watchedAt: Long)
 
 @Serializable
+@Immutable
 data class FeatureFlags(
     val social: Boolean = false,
     val premium: Boolean = false,
@@ -129,9 +141,11 @@ data class FeatureFlags(
 )
 
 @Serializable
+@Immutable
 data class SeedMessage(val id: String? = null, val authorId: String, val text: String, val minutesAgo: Int)
 
 @Serializable
+@Immutable
 data class SeedConversation(
     val id: String,
     val kind: String,
