@@ -89,7 +89,12 @@ import id.my.milkglass.player.PlayerSnapshot
 import id.my.milkglass.player.PlayerState
 import com.milkglass.app.ui.components.CloudflareVerificationOverlay
 import id.my.milkglass.net.CloudflareChallengeCoordinator
+import id.my.milkglass.download.DownloadDrainOutcome
 import id.my.milkglass.download.MkvDownloadManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.rememberCoroutineScope
 import id.my.milkglass.download.MkvDownloadRequest
 import id.my.milkglass.download.MkvDownloadStatus
 import id.my.milkglass.resolver.StreamResolver
@@ -248,7 +253,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                         MilkButton("Coba Lagi", onClick = { playerManager.retry() }, variant = ButtonVariant.Outlined, small = true)
                     }
                 }
-                PlayerInfo(ctl, entry, Modifier.weight(1f))
+                PlayerInfo(ctl, entry, snap.availableResolutions, Modifier.weight(1f))
             }
         }
 
@@ -531,7 +536,12 @@ private fun PlayerOverlay(modifier: Modifier, fireworks: Boolean = false, conten
 }
 
 @Composable
-private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Modifier) {
+private fun PlayerInfo(
+    ctl: AppController,
+    entry: ViewEntry.Player,
+    availableResolutions: List<String>,
+    modifier: Modifier
+) {
     val c = Milk.colors
     val ty = Milk.type
     val tr = ctl.tr
@@ -545,10 +555,24 @@ private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Mo
         verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
         val ctx = LocalContext.current
+        val ioScope = rememberCoroutineScope()
         val dlManager = remember(ctx) { MkvDownloadManager(ctx.applicationContext) }
-        val targetQuality = remember(ctl.persisted.settings.quality) {
-            MkvQuality.fromText(ctl.persisted.settings.quality) ?: MkvQuality.P1080
+        val selectableQualities = remember(availableResolutions) {
+            val parsed = availableResolutions
+                .filterNot { it.equals("Auto", ignoreCase = true) }
+                .mapNotNull { MkvQuality.fromText(it) }
+                .distinct()
+                .sortedByDescending { it.height }
+            parsed.ifEmpty { MkvQuality.ALL_DESC }
         }
+        val defaultQuality = remember(ctl.persisted.settings.quality, selectableQualities) {
+            val pref = MkvQuality.fromText(ctl.persisted.settings.quality)
+            if (pref != null && pref in selectableQualities) pref else selectableQualities.first()
+        }
+        var targetQuality by remember(a.id, ep, defaultQuality) { mutableStateOf(defaultQuality) }
+        var showQualityPicker by remember(a.id, ep) { mutableStateOf(false) }
+        var exportingGallery by remember(a.id, ep) { mutableStateOf(false) }
+
         val animeSlug = remember(a.romaji, ep) {
             StreamResolver.buildEpisodeSlug(a.romaji.ifBlank { a.title }, ep).substringBefore("-ep-")
         }
@@ -556,8 +580,17 @@ private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Mo
             dlManager.buildUniqueWorkName(animeSlug, ep, targetQuality.label)
         }
         val dlStatus by dlManager.observeDownload(workName).collectAsState(initial = MkvDownloadStatus())
-        val alreadyDownloaded = remember(animeSlug, ep, targetQuality, dlStatus.isSucceeded) {
-            dlManager.getDownloadedFile(animeSlug, ep, targetQuality).let { it.exists() && it.length() > 1024L }
+        val downloadedFile = remember(animeSlug, ep, targetQuality, dlStatus.isSucceeded) {
+            dlManager.getDownloadedFile(animeSlug, ep, targetQuality)
+        }
+        val alreadyDownloaded = remember(downloadedFile, dlStatus.isSucceeded) {
+            downloadedFile.exists() && downloadedFile.length() > 1024L
+        }
+
+        LaunchedEffect(workName, dlStatus.isFailed, dlStatus.outcome) {
+            if (dlStatus.isFailed && dlStatus.outcome == DownloadDrainOutcome.UNAVAILABLE_MP4.name) {
+                ctl.showToast("Unduhan MP4 tidak tersedia untuk ${targetQuality.label}")
+            }
         }
 
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -565,33 +598,22 @@ private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Mo
             MilkText("${a.romaji} ${tr.t("player.minutesSuffix", "episodeMinutes" to a.episodeMinutes)}", ty.body, c.onSurfaceVariant)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {  // grid-exempt: 10dp sengaja (kontrol pemutar)
                 val btnLabel = when {
-                    alreadyDownloaded || dlStatus.isSucceeded -> "MKV ${targetQuality.label} Tersimpan"
-                    dlStatus.isRunning -> "Mengunduh ${dlStatus.progressPercent}%..."
-                    dlStatus.isFailed -> "Gagal • Unduh Ulang MKV"
-                    else -> "Unduh MKV ${targetQuality.label}"
+                    alreadyDownloaded || dlStatus.isSucceeded -> "MP4 ${targetQuality.label} Tersimpan"
+                    dlStatus.isRunning -> "Mengunduh ${targetQuality.label} ${dlStatus.progressPercent}%..."
+                    dlStatus.isFailed && dlStatus.outcome == DownloadDrainOutcome.UNAVAILABLE_MP4.name -> "MP4 Tidak Tersedia • Pilih Lain"
+                    dlStatus.isFailed -> "Gagal • Unduh Ulang MP4"
+                    else -> "Unduh MP4"
                 }
                 MilkButton(
                     text = btnLabel,
                     onClick = {
-                        if (!dlStatus.isRunning && !alreadyDownloaded) {
-                            runCatching {
-                                dlManager.enqueueEpisodeDownload(
-                                    MkvDownloadRequest(
-                                        animeSlug = animeSlug,
-                                        animeTitle = a.romaji.ifBlank { a.title },
-                                        episodeNumber = ep,
-                                        preferredQuality = targetQuality,
-                                        wifiOnly = ctl.persisted.settings.wifiOnlyDownloads != 0
-                                    )
-                                )
-                            }.onFailure { err ->
-                                ctl.showToast(err.message ?: "Gagal memulai unduhan MKV")
-                            }
+                        if (!dlStatus.isRunning) {
+                            showQualityPicker = !showQualityPicker
                         }
                     },
                     variant = if (alreadyDownloaded || dlStatus.isSucceeded) ButtonVariant.Outlined else ButtonVariant.Primary,
                     small = true,
-                    dimmed = dlStatus.isRunning || alreadyDownloaded
+                    dimmed = dlStatus.isRunning
                 )
                 if (dlStatus.isRunning) {
                     MilkButton(
@@ -600,6 +622,65 @@ private fun PlayerInfo(ctl: AppController, entry: ViewEntry.Player, modifier: Mo
                         variant = ButtonVariant.Outlined,
                         small = true
                     )
+                }
+                if ((alreadyDownloaded || dlStatus.isSucceeded) && !dlStatus.isRunning) {
+                    MilkButton(
+                        text = if (exportingGallery) "Menyimpan..." else "Simpan ke Galeri",
+                        onClick = {
+                            if (!exportingGallery) {
+                                exportingGallery = true
+                                ioScope.launch {
+                                    val res = withContext(Dispatchers.IO) {
+                                        dlManager.exportToGallery(
+                                            sourceFile = downloadedFile,
+                                            displayTitle = "${a.romaji.ifBlank { a.title }} EP $ep ${targetQuality.label}"
+                                        )
+                                    }
+                                    exportingGallery = false
+                                    res.onSuccess {
+                                        ctl.showToast("Disimpan ke Galeri (Movies/Milkglass)")
+                                    }.onFailure { err ->
+                                        ctl.showToast(err.message ?: "Gagal menyimpan ke Galeri")
+                                    }
+                                }
+                            }
+                        },
+                        variant = ButtonVariant.Outlined,
+                        small = true,
+                        dimmed = exportingGallery
+                    )
+                }
+            }
+            if (showQualityPicker && !dlStatus.isRunning) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    selectableQualities.forEach { q ->
+                        val qSaved = dlManager.getDownloadedFile(animeSlug, ep, q).let { it.exists() && it.length() > 1024L }
+                        MilkButton(
+                            text = if (qSaved) "${q.label} ✓" else q.label,
+                            onClick = {
+                                targetQuality = q
+                                showQualityPicker = false
+                                if (!qSaved) {
+                                    runCatching {
+                                        dlManager.enqueueEpisodeDownload(
+                                            MkvDownloadRequest(
+                                                animeSlug = animeSlug,
+                                                animeTitle = a.romaji.ifBlank { a.title },
+                                                episodeNumber = ep,
+                                                preferredQuality = q,
+                                                allowBatchFallback = false,
+                                                wifiOnly = ctl.persisted.settings.wifiOnlyDownloads != 0
+                                            )
+                                        )
+                                    }.onFailure { err ->
+                                        ctl.showToast(err.message ?: "Gagal memulai unduhan MP4")
+                                    }
+                                }
+                            },
+                            variant = if (q == targetQuality) ButtonVariant.Primary else ButtonVariant.Outlined,
+                            small = true
+                        )
+                    }
                 }
             }
         }
