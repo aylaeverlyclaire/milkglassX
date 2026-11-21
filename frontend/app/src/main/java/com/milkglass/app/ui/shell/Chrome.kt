@@ -74,6 +74,8 @@ private val NAV_ITEMS = listOf(
     Triple("collection", MilkIcons.LibO, MilkIcons.Lib),
 )
 
+private val THEME_MODES = listOf("system", "light", "dark")
+
 @Composable
 fun NavBar(ctl: AppController, activeTab: String, onSelect: (String) -> Unit) {
     val c = Milk.colors
@@ -304,7 +306,7 @@ private fun SheetBody(ctl: AppController, o: Overlay, vh: androidx.compose.ui.un
                     MilkButton(tr.t("common.save"), { ctl.saveEditField(o.key, text) }, wide = true)
                 }
                 is Overlay.SettingOptions -> {
-                    listOf("system", "light", "dark").forEach { v ->
+                    THEME_MODES.forEach { v ->
                         key(v) {
                             RadioRow(ctl.persisted.settings.theme == v, ctl.enumLabel("theme", v), null) { ctl.chooseSettingOption(o.key, v) }
                         }

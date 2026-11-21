@@ -1,5 +1,7 @@
 package com.milkglass.app.core.data
 
+import androidx.compose.runtime.Immutable
+
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -10,6 +12,7 @@ import kotlin.math.abs
 import kotlin.math.floor
 
 @Serializable
+@Immutable
 data class LocaleData(
     val weekdaysShort: List<String>,
     val weekdaysLong: List<String>,
@@ -19,7 +22,9 @@ data class LocaleData(
     val messages: Map<String, String>,
 )
 
+@Immutable
 data class LegalSection(val heading: String, val body: String)
+@Immutable
 data class LegalDoc(val title: String, val sections: List<LegalSection>)
 
 class Translator(val locale: LocaleData, private val onMissing: (String) -> Unit = {}) {

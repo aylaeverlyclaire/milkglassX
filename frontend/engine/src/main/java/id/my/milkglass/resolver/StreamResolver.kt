@@ -1,5 +1,7 @@
 package id.my.milkglass.resolver
 
+import id.my.milkglass.source.SeriesEpisodeMapCache
+
 import android.content.Context
 import id.my.milkglass.MilkglassEndpoints
 import id.my.milkglass.download.EndpointHealthScorer
@@ -888,10 +890,7 @@ class StreamResolver(
         }
     }
 
-    fun extractEpisodeNumber(slug: String): Int {
-        return Regex("-ep-(\\d+)$", RegexOption.IGNORE_CASE)
-            .find(slug)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
-    }
+    fun extractEpisodeNumber(slug: String): Int = SeriesEpisodeMapCache.extractEpisodeNumberFromSlug(slug)
 
     companion object {
         const val DEFAULT_BACKEND_BASE_URL = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL

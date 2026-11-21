@@ -1,11 +1,14 @@
 package com.milkglass.app.core.remote
 
+import androidx.compose.runtime.Immutable
+
 import com.milkglass.app.core.app.GENRES
 import com.milkglass.app.core.model.Anime
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+@Immutable
 data class CatalogEntry(val anime: Anime, val posterUrl: String?, val malId: Int?)
 
 object RemoteMapper {

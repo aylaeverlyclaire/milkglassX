@@ -1,5 +1,7 @@
 package com.milkglass.app.ui.screens
 
+import androidx.compose.foundation.layout.ColumnScope
+
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -35,15 +37,10 @@ import com.milkglass.app.ui.common.ToggleRow
 import com.milkglass.app.ui.common.milkClickable
 
 @Composable
-private fun SettingsGroup(title: String, rows: List<@Composable () -> Unit>) {
+private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column {
         SectionHeader(title)
-        MilkCard(Modifier.padding(top = 8.dp)) {
-            rows.forEachIndexed { i, r ->
-                if (i > 0) MilkDivider()
-                r()
-            }
-        }
+        MilkCard(Modifier.padding(top = 8.dp), content = content)
     }
 }
 
@@ -68,14 +65,16 @@ fun ProfilePage(ctl: AppController, scroll: ScrollState) {
                 }
             }
         }
-        SettingsGroup(tr.t("settings.account"), listOf(
-            { SettingsRow(tr.t("settings.name"), null, ctl.meName, { ctl.openEditField("nm") }) },
-            { SettingsRow(tr.t("user.username"), null, "@${ctl.meHandle}", { ctl.openEditField("hd") }) },
-        ))
-        SettingsGroup(tr.t("settings.session"), listOf(
-            { SettingsRow(tr.t("common.exit"), null, null, { ctl.confirmSignOut() }, trailing = { MilkIcon(MilkIcons.Out, tint = c.onSurfaceVariant) }) },
-            { SettingsRow(tr.t("settings.deleteAccount"), null, null, { ctl.confirmDeleteAccount() }, titleColor = c.error, trailing = null) },
-        ))
+        SettingsGroup(tr.t("settings.account")) {
+            SettingsRow(tr.t("settings.name"), null, ctl.meName, { ctl.openEditField("nm") })
+            MilkDivider()
+            SettingsRow(tr.t("user.username"), null, "@${ctl.meHandle}", { ctl.openEditField("hd") })
+        }
+        SettingsGroup(tr.t("settings.session")) {
+            SettingsRow(tr.t("common.exit"), null, null, { ctl.confirmSignOut() }, trailing = { MilkIcon(MilkIcons.Out, tint = c.onSurfaceVariant) })
+            MilkDivider()
+            SettingsRow(tr.t("settings.deleteAccount"), null, null, { ctl.confirmDeleteAccount() }, titleColor = c.error, trailing = null)
+        }
         MilkText(tr.t("settings.footer"), ty.caption, c.onSurfaceVariant, Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
     }
 }

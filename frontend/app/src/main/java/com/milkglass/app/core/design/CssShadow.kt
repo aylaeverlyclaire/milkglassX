@@ -1,5 +1,7 @@
 package com.milkglass.app.core.design
 
+import androidx.compose.runtime.Immutable
+
 import android.graphics.BlurMaskFilter
 import android.os.Build
 import androidx.compose.ui.Modifier
@@ -20,6 +22,7 @@ import androidx.compose.ui.unit.dp
 
 private const val LAYERS = 8
 
+@Immutable
 data class CssShadow(
     val dx: Dp,
     val dy: Dp,

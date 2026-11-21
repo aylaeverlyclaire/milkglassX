@@ -148,15 +148,7 @@ class SourceConfigStore(
     companion object {
         private const val CONFIG_TTL_MS = 6L * 60L * 60L * 1000L
 
-        private fun isSafeSourceBaseUrl(rawUrl: String): Boolean {
-            if (!rawUrl.startsWith("https://") || rawUrl.length > 256) return false
-            val parsed = runCatching { java.net.URI(rawUrl) }.getOrNull() ?: return false
-            if (!parsed.userInfo.isNullOrBlank()) return false
-            val host = parsed.host?.trim()?.lowercase() ?: return false
-            if (host.isBlank() || host == "localhost" || host.endsWith(".local") || host.contains(':')) return false
-            if (Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+$").matches(host)) return false
-            return host.contains('.')
-        }
+
 
         fun parseSourcesJson(json: String): Map<SourcePriority, String> {
             val root = runCatching { JSONObject(json) }.getOrNull() ?: return emptyMap()
@@ -166,7 +158,7 @@ class SourceConfigStore(
                 val item = arr.optJSONObject(i) ?: continue
                 val id = item.optString("id").trim().lowercase()
                 val baseUrl = item.optString("base_url").trim().trimEnd('/')
-                if (!isSafeSourceBaseUrl(baseUrl)) continue
+                if (!RemoteRulesStore.isSafeSourceBaseUrl(baseUrl)) continue
                 val src = SourcePriority.entries.firstOrNull { it.id == id } ?: continue
                 out[src] = baseUrl
             }

@@ -103,6 +103,9 @@ import id.my.milkglass.source.MkvQuality
 import kotlinx.coroutines.delay
 import kotlin.math.ceil
 
+private val TOP_SCRIM_GRADIENT = cssLinearGradient(180f, listOf(Color.Black.copy(alpha = .4f), CssTransparent))
+private val BOTTOM_SCRIM_GRADIENT = cssLinearGradient(180f, listOf(CssTransparent, Color.Black.copy(alpha = .75f)))
+
 @Composable
 fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
     val e = entry.engine
@@ -117,7 +120,6 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
             authTokenProvider = { ctl.persisted.accessToken }
         ).also { it.initialize() }
     }
-    val snap by playerManager.snapshot.collectAsState()
     LaunchedEffect(e, playerManager) {
         playerManager.progress.collect { prog ->
             if (prog.durationMs > 0L) {
@@ -173,26 +175,26 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         }
     }
 
-    LaunchedEffect(snap.availableResolutions) {
-        if (snap.availableResolutions.isNotEmpty()) {
-            ctl.availablePlayerQualities = snap.availableResolutions
-        }
-    }
-    LaunchedEffect(snap) {
-        e.nativeStreamActive = snap.isReady
-        e.nativeBuffering = snap.isLoading
-        e.isPlaying = snap.isPlaying
-        e.bufferTimer = if (snap.isLoading) 1.0 else 0.0
-        if (snap.durationMs > 0L) {
-            e.nativeDurationSeconds = (snap.durationMs / 1000L).toInt().coerceAtLeast(1)
-        } else {
-            e.nativeDurationSeconds = null
-        }
-        if (snap.isReady && snap.durationMs > 0L) {
-            e.syncFromNativePlayer(snap.positionMs)
-        }
-        if (snap.phase == PlaybackPhase.ENDED && snap.durationMs > 0L) {
-            e.position = (snap.durationMs / 1000.0)
+    LaunchedEffect(e, playerManager) {
+        playerManager.snapshot.collect { snap ->
+            if (snap.availableResolutions.isNotEmpty() && ctl.availablePlayerQualities != snap.availableResolutions) {
+                ctl.availablePlayerQualities = snap.availableResolutions
+            }
+            e.nativeStreamActive = snap.isReady
+            e.nativeBuffering = snap.isLoading
+            e.isPlaying = snap.isPlaying
+            e.bufferTimer = if (snap.isLoading) 1.0 else 0.0
+            e.nativeDurationSeconds = if (snap.durationMs > 0L) {
+                (snap.durationMs / 1000L).toInt().coerceAtLeast(1)
+            } else {
+                null
+            }
+            if (snap.isReady && snap.durationMs > 0L) {
+                e.syncFromNativePlayer(snap.positionMs)
+            }
+            if (snap.phase == PlaybackPhase.ENDED && snap.durationMs > 0L) {
+                e.position = (snap.durationMs / 1000.0)
+            }
         }
     }
 
@@ -203,8 +205,8 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
     val nearEnd by androidx.compose.runtime.remember(e) {
         androidx.compose.runtime.derivedStateOf { e.duration > 0 && e.duration - e.position <= 240.0 }
     }
-    LaunchedEffect(snap.isReady, e.anime.id, e.episode, ctl.persisted.settings.quality, nearEnd) {
-        if (snap.isReady && ctl.online) {
+    LaunchedEffect(e.nativeStreamActive, e.anime.id, e.episode, ctl.persisted.settings.quality, nearEnd) {
+        if (e.nativeStreamActive && ctl.online) {
             ctl.nextPlayableEpisode(e.anime, e.episode)?.let { nextEp ->
                 EngineRuntime.get(context.applicationContext).prefetchEpisode(
                     e.anime.title, e.anime.romaji, nextEp, ctl.persisted.settings.quality,
@@ -235,26 +237,8 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
 
                 Box(Modifier.fillMaxWidth().background(Color.Black).windowInsetsPadding(WindowInsets.statusBars))
                 VideoArea(ctl, e, playerManager, Modifier.fillMaxWidth().aspectRatio(16f / 9f).heightIn(max = vh * .56f), fullscreen = false)
-                val errObj = snap.error
-                if (snap.phase == PlaybackPhase.ERROR && errObj != null) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xFF2B1215))
-                            .padding(horizontal = 16.dp, vertical = 10.dp),  // grid-exempt: 10dp sengaja (kontrol pemutar)
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        MilkText(
-                            errObj.userMessage,
-                            Milk.type.style(12f, 500, 16f),
-                            Color(0xFFFFB4AB),
-                            Modifier.weight(1f).padding(end = 12.dp)
-                        )
-                        MilkButton("Coba Lagi", onClick = { playerManager.retry() }, variant = ButtonVariant.Outlined, small = true)
-                    }
-                }
-                PlayerInfo(ctl, entry, snap.availableResolutions, Modifier.weight(1f))
+                PlayerErrorBanner(playerManager)
+                PlayerInfo(ctl, entry, Modifier.weight(1f))
             }
         }
 
@@ -311,7 +295,7 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
 
     Box(
 
-        modifier.clipToBounds().background(cssLinearGradient((120 + e.episode * 17).toFloat(), listOf(from, to)))
+        modifier.clipToBounds().background(remember(from, to, e.episode) { cssLinearGradient((120 + e.episode * 17).toFloat(), listOf(from, to)) })
             .pointerInput(e) {
 
                 var lastTapAt = 0L
@@ -341,7 +325,7 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
         )
         Box(
             Modifier.align(Alignment.TopCenter).fillMaxWidth().height(80.dp).graphicsLayer { this.alpha = alpha }
-                .background(cssLinearGradient(180f, listOf(Color.Black.copy(alpha = .4f), CssTransparent))),
+                .background(TOP_SCRIM_GRADIENT),
         )
 
         Box(Modifier.fillMaxSize().then(cutout).graphicsLayer { this.alpha = alpha }) {
@@ -540,7 +524,7 @@ private fun PlayerBottomControls(
     Box(
         modifier.fillMaxWidth().height(96.dp)
             .graphicsLayer { this.alpha = alpha }
-            .background(cssLinearGradient(180f, listOf(CssTransparent, Color.Black.copy(alpha = .75f))))
+            .background(BOTTOM_SCRIM_GRADIENT)
             .pointerInput(e.faded) { if (!e.faded) detectTapGestures { } },
     ) {
         Row(Modifier.then(cutout).padding(start = 12.dp, end = 12.dp).offset(y = 24.dp).fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -596,12 +580,36 @@ private fun PlayerOverlay(modifier: Modifier, fireworks: Boolean = false, conten
 }
 
 @Composable
+private fun PlayerErrorBanner(playerManager: PlayerManager) {
+    val snap by playerManager.snapshot.collectAsState()
+    val errObj = snap.error
+    if (snap.phase == PlaybackPhase.ERROR && errObj != null) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF2B1215))
+                .padding(horizontal = 16.dp, vertical = 10.dp),  // grid-exempt: 10dp sengaja (kontrol pemutar)
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            MilkText(
+                errObj.userMessage,
+                Milk.type.style(12f, 500, 16f),
+                Color(0xFFFFB4AB),
+                Modifier.weight(1f).padding(end = 12.dp)
+            )
+            MilkButton("Coba Lagi", onClick = { playerManager.retry() }, variant = ButtonVariant.Outlined, small = true)
+        }
+    }
+}
+
+@Composable
 private fun PlayerInfo(
     ctl: AppController,
     entry: ViewEntry.Player,
-    availableResolutions: List<String>,
     modifier: Modifier
 ) {
+    val availableResolutions = ctl.availablePlayerQualities
     val c = Milk.colors
     val ty = Milk.type
     val tr = ctl.tr

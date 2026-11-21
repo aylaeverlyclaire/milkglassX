@@ -1,5 +1,7 @@
 package com.milkglass.app.core.remote
 
+import androidx.compose.runtime.Immutable
+
 import id.my.milkglass.EngineHttpTextClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -14,6 +16,7 @@ import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.cancellation.CancellationException
 
+@Immutable
 data class AniListExtras(val recommendedIds: List<Int>, val airingAtMs: Map<Int, Long>)
 
 interface AniListExtrasSource {

@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import id.my.milkglass.net.CloudflareChallengeCoordinator
+import id.my.milkglass.net.CloudflareChallengeDetector
 import kotlinx.coroutines.delay
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -52,15 +53,11 @@ fun CloudflareVerificationOverlay(
 
     LaunchedEffect(host, targetUrl) {
         val cookieManager = CookieManager.getInstance()
-        fun extractClearance(raw: String): String? =
-            raw.split(';').map { it.trim() }.firstOrNull { it.startsWith("cf_clearance=") }
-                ?.substringAfter("=")?.takeIf { it.isNotBlank() }
-
-        val initialClearance = extractClearance(cookieManager.getCookie(targetUrl).orEmpty())
+        val initialClearance = CloudflareChallengeDetector.extractClearanceCookie(cookieManager.getCookie(targetUrl))
         val deadlineMs = SystemClock.elapsedRealtime() + CF_POLL_TIMEOUT_MS
         while (!completed.get() && SystemClock.elapsedRealtime() < deadlineMs) {
             delay(CF_POLL_INTERVAL_MS)
-            val currentClearance = extractClearance(cookieManager.getCookie(targetUrl).orEmpty())
+            val currentClearance = CloudflareChallengeDetector.extractClearanceCookie(cookieManager.getCookie(targetUrl))
             if (currentClearance != null && currentClearance != initialClearance) {
                 cookieManager.flush()
                 completeOnce(true)

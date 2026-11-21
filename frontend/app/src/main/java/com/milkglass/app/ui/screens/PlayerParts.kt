@@ -1,5 +1,34 @@
 package com.milkglass.app.ui.screens
 
+import com.milkglass.app.core.design.Milk
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
+import com.milkglass.app.core.design.MilkIcon
+import com.milkglass.app.core.design.MilkIcons
+import com.milkglass.app.ui.common.MilkText
+
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
+import android.os.Build
+import android.view.WindowManager
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Immutable
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import kotlin.math.abs
+
 import androidx.compose.animation.core.Easing
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -32,7 +61,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.withTransform
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import com.milkglass.app.core.design.MilkEasing
@@ -121,5 +150,65 @@ fun FireworksCanvas(modifier: Modifier = Modifier, iterations: Int = Int.MAX_VAL
                 }
             }
         }
+    }
+}
+
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+@Composable
+fun FullscreenOrientationEffect(active: Boolean) {
+    val view = LocalView.current
+    DisposableEffect(active) {
+        val activity = view.context.findActivity()
+        val window = activity?.window
+        if (!active || activity == null || window == null) return@DisposableEffect onDispose { }
+        val prevOrientation = activity.requestedOrientation
+        val prevCutout = if (Build.VERSION.SDK_INT >= 28) window.attributes.layoutInDisplayCutoutMode else 0
+        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        val controller = WindowCompat.getInsetsController(window, view)
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        if (Build.VERSION.SDK_INT >= 28) {
+            window.attributes = window.attributes.also {
+                it.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        onDispose {
+            controller.show(WindowInsetsCompat.Type.systemBars())
+            if (Build.VERSION.SDK_INT >= 28) {
+                window.attributes = window.attributes.also { it.layoutInDisplayCutoutMode = prevCutout }
+            }
+            activity.requestedOrientation = prevOrientation
+        }
+    }
+}
+
+private val SEEK_TEXT_SHADOW = Shadow(Color.Black.copy(alpha = .6f), Offset(0f, 1f), 6f)
+
+@Immutable
+internal data class SeekFx(val dir: Int, val total: Int, val token: Int)
+
+@Composable
+internal fun SeekIndicator(dir: Int, total: Int, modifier: Modifier = Modifier) {
+    val t = rememberInfiniteTransition(label = "seekFx")
+    val p by t.animateFloat(0f, 1f, infiniteRepeatable(tween(720, easing = LinearEasing)), label = "phase")
+    val pulse = (1f - abs(p - .5f) * 1.4f).coerceIn(.35f, 1f)
+    val label = (if (dir < 0) "-" else "+") + total
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (dir < 0) SeekChevron(dir, pulse)
+        MilkText(label, Milk.type.style(20f, 700).copy(shadow = SEEK_TEXT_SHADOW), Color.White)
+        if (dir >= 0) SeekChevron(dir, pulse)
+    }
+}
+
+@Composable
+private fun SeekChevron(dir: Int, alpha: Float) {
+    Box(Modifier.scale(scaleX = if (dir < 0) -1f else 1f, scaleY = 1f)) {
+        MilkIcon(MilkIcons.Chev, size = 24.dp, tint = Color.White.copy(alpha = alpha))
     }
 }

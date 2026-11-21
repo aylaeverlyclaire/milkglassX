@@ -1,5 +1,7 @@
 package com.milkglass.app.core.remote
 
+import androidx.compose.runtime.Immutable
+
 import id.my.milkglass.EngineHttpTextClient
 import id.my.milkglass.MilkglassEndpoints
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +26,7 @@ const val DEFAULT_CATALOG_BASE_URL = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL
 
 const val CATALOG_STALE_AFTER_SEC = 18L * 3600L
 
+@Immutable
 data class CatalogResponse(
     val body: String?,
     val etag: String? = null,
@@ -127,6 +130,7 @@ class FileCatalogCache(private val file: File) : CatalogCache {
 
 enum class CatalogSource { NETWORK, CACHE }
 
+@Immutable
 data class CatalogHome(
     val ongoing: List<CatalogEntry>,
     val popular: List<CatalogEntry>,

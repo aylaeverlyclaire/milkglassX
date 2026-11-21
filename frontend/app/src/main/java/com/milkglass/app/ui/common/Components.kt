@@ -1,5 +1,7 @@
 package com.milkglass.app.ui.common
 
+import androidx.compose.runtime.remember
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -277,23 +279,23 @@ fun ProgressBar(pct: Float, height: Dp, track: Color, modifier: Modifier = Modif
 fun ArtBackdrop(spec: PosterSpec, anime: Anime, shadeAlpha: Float, shadeStop: Float, modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit) {
     val base = (shadeAlpha * 1.5f).coerceAtMost(.82f)
     val reach = (shadeStop + .2f).coerceAtMost(1f)
-    Box(modifier.background(gradientOf(anime))) {
-        PosterArt(spec, Modifier.matchParentSize())
-        Box(
-            Modifier.matchParentSize().background(
-                cssLinearGradient(
-                    0f,
-                    listOf(
-                        Color.Black.copy(alpha = base),
-                        Color.Black.copy(alpha = base * .72f),
-                        Color.Black.copy(alpha = base * .36f),
-                        Color.Black.copy(alpha = base * .12f),
-                        CssTransparent,
-                    ),
-                    listOf(0f, reach * .4f, reach * .7f, reach * .88f, reach),
-                ),
+    val baseBrush = remember(anime.colorFrom, anime.colorTo) { gradientOf(anime) }
+    val shadeBrush = remember(base, reach) {
+        cssLinearGradient(
+            0f,
+            listOf(
+                Color.Black.copy(alpha = base),
+                Color.Black.copy(alpha = base * .72f),
+                Color.Black.copy(alpha = base * .36f),
+                Color.Black.copy(alpha = base * .12f),
+                CssTransparent,
             ),
+            listOf(0f, reach * .4f, reach * .7f, reach * .88f, reach),
         )
+    }
+    Box(modifier.background(baseBrush)) {
+        PosterArt(spec, Modifier.matchParentSize())
+        Box(Modifier.matchParentSize().background(shadeBrush))
         content()
     }
 }
