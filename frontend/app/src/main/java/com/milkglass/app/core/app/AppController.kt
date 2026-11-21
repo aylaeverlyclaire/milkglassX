@@ -88,6 +88,8 @@ enum class NavKind { None, Push, Pop }
 
 private val UNSAFE_CHARS = Regex("[<>\"&]")
 private val COMBINING_MARKS = Regex("[\\u0300-\\u036f]")
+private val CROSS_SIGNS = Regex("[\u00D7\u2715\u2716\u2717]")
+private val NON_SEARCH_CHARS = Regex("[^a-z0-9\u3040-\u30FF\u4E00-\u9FFF]+")
 private const val SIMILAR_MEMO_MAX = 512
 private val HANDLE_RE = Regex("^[a-z0-9._]{3,20}$")
 private const val UNDO_TOAST_MS = 6000L
@@ -556,6 +558,9 @@ class AppController(
 
     private fun normalizeText(s: String) =
         Normalizer.normalize(s.lowercase(), Normalizer.Form.NFD).replace(COMBINING_MARKS, "")
+            .replace(CROSS_SIGNS, "x")
+            .replace(NON_SEARCH_CHARS, " ")
+            .trim()
 
     private class SearchDoc(val haystack: String, val title: String, val vibes: Set<String>)
 
