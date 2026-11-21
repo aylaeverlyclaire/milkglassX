@@ -882,12 +882,13 @@ class MkvCascadeResolver(
         val abandoned = AtomicBoolean(false)
         try {
             val topEmbed = batch.firstOrNull { it.isStreamEmbed }
-            if (topEmbed != null && embedSniffer != null) {
+            val sniffer = embedSniffer
+            if (topEmbed != null && sniffer != null) {
                 futures.add(
                     cs.submit {
                         runCatching {
                             if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
-                            val sniffed = embedSniffer.invoke(topEmbed.rawUrl, topEmbed.pageReferer) ?: return@runCatching null
+                            val sniffed = sniffer.invoke(topEmbed.rawUrl, topEmbed.pageReferer) ?: return@runCatching null
                             EndpointHealthScorer.recordSuccess(sniffed.hoster)
                             toResolvedMedia(topEmbed, sniffed)
                         }.getOrNull()
