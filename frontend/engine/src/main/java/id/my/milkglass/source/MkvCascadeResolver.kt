@@ -179,7 +179,6 @@ internal object TitleMatcher {
 
     private val parseCache = ConcurrentHashMap<String, ParsedTitle>()
 
-    /** Memoized: judul indeks diparse berulang kali saat pencocokan; regex-nya mahal. */
     fun parse(input: String): ParsedTitle {
         parseCache[input]?.let { return it }
         val p = parseUncached(input)
@@ -646,20 +645,22 @@ class MkvCascadeResolver(
         var idx = 0
         if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
         if (activeProviders.size >= 2) {
-            val primary = activeProviders[0]
-            val secondary = activeProviders[1]
-            val hedgeQueue = LinkedBlockingQueue<ProviderFetchOutcome>(2)
+            val fanOutCount = minOf(activeProviders.size, 3)
+            val hedgeQueue = LinkedBlockingQueue<ProviderFetchOutcome>(fanOutCount)
             val abandoned = AtomicBoolean(false)
+            val futures = ArrayList<Future<*>>(fanOutCount)
+            val primary = activeProviders[0]
             attempted.add(primary.priority)
-            val primaryFuture = sharedProviderPool.submit {
-                val outcome = runCatching {
-                    fetchFromProvider(primary, animeTitle, episodeNumber, abandoned)
-                }.getOrElse { e ->
-                    ProviderFetchOutcome(primary.priority, error = e.message ?: e::class.java.simpleName)
+            futures.add(
+                sharedProviderPool.submit {
+                    val outcome = runCatching {
+                        fetchFromProvider(primary, animeTitle, episodeNumber, abandoned)
+                    }.getOrElse { e ->
+                        ProviderFetchOutcome(primary.priority, error = e.message ?: e::class.java.simpleName)
+                    }
+                    hedgeQueue.offer(outcome)
                 }
-                hedgeQueue.offer(outcome)
-            }
-            var secondaryFuture: Future<*>? = null
+            )
             try {
                 val fastPrimary = pollKeepingInterrupt(hedgeQueue, TimeUnit.MILLISECONDS.toNanos(HEDGE_DELAY_MS))
                 if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
@@ -671,17 +672,22 @@ class MkvCascadeResolver(
                     if (resolved != null) return resolved
                     idx = 1
                 } else {
-                    attempted.add(secondary.priority)
-                    secondaryFuture = sharedProviderPool.submit {
-                        val outcome = runCatching {
-                            fetchFromProvider(secondary, animeTitle, episodeNumber, abandoned)
-                        }.getOrElse { e ->
-                            ProviderFetchOutcome(secondary.priority, error = e.message ?: e::class.java.simpleName)
-                        }
-                        hedgeQueue.offer(outcome)
+                    for (i in 1 until fanOutCount) {
+                        val p = activeProviders[i]
+                        attempted.add(p.priority)
+                        futures.add(
+                            sharedProviderPool.submit {
+                                val outcome = runCatching {
+                                    fetchFromProvider(p, animeTitle, episodeNumber, abandoned)
+                                }.getOrElse { e ->
+                                    ProviderFetchOutcome(p.priority, error = e.message ?: e::class.java.simpleName)
+                                }
+                                hedgeQueue.offer(outcome)
+                            }
+                        )
                     }
-                    val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(16L)
-                    repeat(2) {
+                    val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(9L)
+                    repeat(fanOutCount) {
                         val remainingNs = deadlineNs - System.nanoTime()
                         if (remainingNs <= 0L) return@repeat
                         val done = pollKeepingInterrupt(hedgeQueue, remainingNs) ?: return@repeat
@@ -690,12 +696,11 @@ class MkvCascadeResolver(
                         )
                         if (resolved != null) return resolved
                     }
-                    idx = 2
+                    idx = fanOutCount
                 }
             } finally {
                 abandoned.set(true)
-                if (!primaryFuture.isDone) primaryFuture.cancel(true)
-                secondaryFuture?.let { if (!it.isDone) it.cancel(true) }
+                futures.forEach { if (!it.isDone) it.cancel(true) }
             }
             if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
         }
@@ -818,11 +823,11 @@ class MkvCascadeResolver(
         maxResults: Int = 3,
         preferStreamingEmbeds: Boolean = true
     ): List<ResolvedMkvMedia> {
-        val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(12L)
+        val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(9L)
         if (preferStreamingEmbeds) {
             val embeds = candidates.filter { it.isStreamEmbed }
             if (embeds.isNotEmpty()) {
-                val extractedEmbeds = raceExtractCandidates(embeds, maxResults = maxResults, timeoutMs = 7_000L)
+                val extractedEmbeds = raceExtractCandidates(embeds, maxResults = maxResults, timeoutMs = 6_500L)
                 if (extractedEmbeds.isNotEmpty()) return extractedEmbeds
             }
         }
@@ -833,42 +838,79 @@ class MkvCascadeResolver(
             if (remainingMs <= 500L) break
             val tier = nonEmbeds.filter { it.quality == quality }
             if (tier.isEmpty()) continue
-            val tierBudgetMs = remainingMs.coerceAtMost(4_500L)
+            val tierBudgetMs = remainingMs.coerceAtMost(3_500L)
             val extracted = raceExtractCandidates(tier, maxResults = maxResults, timeoutMs = tierBudgetMs)
             if (extracted.isNotEmpty()) return extracted
         }
         return emptyList()
     }
 
+    private fun toResolvedMedia(candidate: RawMkvCandidate, media: ExtractedDirectMedia): ResolvedMkvMedia {
+        val detectedContainer = when {
+            media.isHls -> MediaContainer.HLS
+            media.directUrl.contains(".mp4", ignoreCase = true) -> MediaContainer.MP4
+            media.directUrl.contains(".mkv", ignoreCase = true) -> MediaContainer.MKV
+            else -> candidate.container
+        }
+        return ResolvedMkvMedia(
+            source = candidate.source,
+            quality = candidate.quality,
+            hoster = media.hoster,
+            directUrl = media.directUrl,
+            referer = media.referer,
+            supportsRange = media.supportsRange,
+            sizeLabel = candidate.sizeLabel,
+            isBatchArchive = candidate.isBatchArchive || media.isArchive,
+            container = detectedContainer,
+            isHls = media.isHls,
+            extraHeaders = media.extraHeaders
+        )
+    }
+
     private fun raceExtractCandidates(
         candidates: List<RawMkvCandidate>,
         maxResults: Int = 3,
-        timeoutMs: Long = 7_000L
+        timeoutMs: Long = 6_500L
     ): List<ResolvedMkvMedia> {
         val fresh = candidates.filterNot { DeadCandidateCache.isDead(it.rawUrl) }
         val pool = if (fresh.isNotEmpty()) fresh else candidates
         val batch = StreamingFirstGuards.selectExtractionBatch(pool)
         if (batch.isEmpty()) return emptyList()
         val cs = ExecutorCompletionService<ResolvedMkvMedia?>(sharedExtractionPool)
-        val futures = ArrayList<Future<ResolvedMkvMedia?>>(batch.size)
+        val futures = ArrayList<Future<ResolvedMkvMedia?>>(batch.size + 1)
         val results = mutableListOf<ResolvedMkvMedia>()
         val abandoned = AtomicBoolean(false)
         try {
+            val topEmbed = batch.firstOrNull { it.isStreamEmbed }
+            val sniffer = embedSniffer
+            if (topEmbed != null && sniffer != null) {
+                futures.add(
+                    cs.submit {
+                        runCatching {
+                            if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
+                            val sniffed = sniffer.invoke(topEmbed.rawUrl, topEmbed.pageReferer) ?: return@runCatching null
+                            EndpointHealthScorer.recordSuccess(sniffed.hoster)
+                            toResolvedMedia(topEmbed, sniffed)
+                        }.getOrNull()
+                    }
+                )
+            }
             for (candidate in batch) {
                 futures.add(
                     cs.submit {
                         runCatching {
-                            val finalUrl = unshortener.unshorten(candidate.rawUrl, candidate.pageReferer, maxHops = 5)
-                            var media = extractorRegistry.extract(finalUrl, candidate.pageReferer)
-                            if (media == null && candidate.isStreamEmbed && embedSniffer != null &&
-                                !abandoned.get() && !Thread.currentThread().isInterrupted
-                            ) {
-                                media = runCatching { embedSniffer?.invoke(finalUrl, candidate.pageReferer) }.getOrNull()
+                            val finalUrl = if (candidate.isStreamEmbed) {
+                                candidate.rawUrl
+                            } else {
+                                unshortener.unshorten(candidate.rawUrl, candidate.pageReferer, maxHops = 5)
                             }
+                            val media = extractorRegistry.extract(finalUrl, candidate.pageReferer)
                             if (media == null) {
                                 if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
-                                DeadCandidateCache.markDead(candidate.rawUrl)
-                                EndpointHealthScorer.recordFailure(candidate.hosterLabel)
+                                if (!candidate.isStreamEmbed) {
+                                    DeadCandidateCache.markDead(candidate.rawUrl)
+                                    EndpointHealthScorer.recordFailure(candidate.hosterLabel)
+                                }
                                 return@runCatching null
                             }
                             if (!media.isArchive && !extractorRegistry.verifyPlayableMedia(media)) {
@@ -878,32 +920,14 @@ class MkvCascadeResolver(
                                 return@runCatching null
                             }
                             EndpointHealthScorer.recordSuccess(media.hoster)
-                            val detectedContainer = when {
-                                media.isHls -> MediaContainer.HLS
-                                media.directUrl.contains(".mp4", ignoreCase = true) -> MediaContainer.MP4
-                                media.directUrl.contains(".mkv", ignoreCase = true) -> MediaContainer.MKV
-                                else -> candidate.container
-                            }
-                            ResolvedMkvMedia(
-                                source = candidate.source,
-                                quality = candidate.quality,
-                                hoster = media.hoster,
-                                directUrl = media.directUrl,
-                                referer = media.referer,
-                                supportsRange = media.supportsRange,
-                                sizeLabel = candidate.sizeLabel,
-                                isBatchArchive = candidate.isBatchArchive || media.isArchive,
-                                container = detectedContainer,
-                                isHls = media.isHls,
-                                extraHeaders = media.extraHeaders
-                            )
+                            toResolvedMedia(candidate, media)
                         }.getOrNull()
                     }
                 )
             }
             var deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
-            val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(120L)
-            repeat(batch.size) {
+            val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(100L)
+            repeat(futures.size) {
                 if (Thread.currentThread().isInterrupted) return@repeat
                 val remainingNs = deadlineNs - System.nanoTime()
                 if (remainingNs <= 0L) return@repeat
@@ -933,7 +957,7 @@ class MkvCascadeResolver(
     companion object {
         private const val RAW_CACHE_TTL_MS = 20L * 60L * 1000L
         private const val DISK_RAW_TTL_MS = 6L * 60L * 60L * 1000L
-        private const val HEDGE_DELAY_MS = 600L
+        private const val HEDGE_DELAY_MS = 250L
 
         private val extractSeq = AtomicInteger(1)
         private val sharedExtractionPool: ExecutorService = Executors.newFixedThreadPool(8) { r ->

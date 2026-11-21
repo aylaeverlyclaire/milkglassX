@@ -246,6 +246,7 @@ class OtakudesuSourceProvider(
         val out = mutableListOf<RawMkvCandidate>()
         // 1) Panen iframe default yang sudah ada di HTML awal halaman episode (0 request AJAX)
         out.addAll(StreamingFirstGuards.harvestOtakudesuDefaultEmbeds(epDoc, epUrl, targetQualities, seenUrls))
+        if (out.isNotEmpty()) return out
 
         val mirrorLinks = epDoc.select("ul.m360p li a[data-content], ul.m480p li a[data-content], ul.m720p li a[data-content]")
         if (mirrorLinks.isEmpty()) return out
