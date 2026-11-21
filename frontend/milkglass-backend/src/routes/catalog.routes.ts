@@ -539,6 +539,7 @@ function normalizeSearchSpaced(raw: string): string {
     .normalize('NFKD')
     .replace(/[\u0300-\u306f]/g, '')
     .toLowerCase()
+    .replace(/[\u00d7\u2715\u2716\u2717]/g, 'x')
     .replace(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');

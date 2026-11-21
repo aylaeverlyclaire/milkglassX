@@ -147,6 +147,10 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
     }
 
     DisposableEffect(e, e.episode, playerManager) {
+        if (e.anime.sourceUrls.isNotEmpty()) {
+            EngineRuntime.get(context.applicationContext)
+                .seedSourceUrls(e.anime.title, e.anime.romaji, e.anime.sourceUrls)
+        }
         val slug = StreamResolver.buildEpisodeSlug(e.anime.romaji.ifBlank { e.anime.title }, e.episode)
         e.onNativeSeekMs = { ms -> playerManager.seekTo(ms) }
         e.onNativePlayPause = { play -> if (play) playerManager.resume() else playerManager.pause() }

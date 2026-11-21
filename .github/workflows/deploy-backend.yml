@@ -2,7 +2,12 @@ name: Deploy backend (Cloudflare)
 
 on:
   workflow_dispatch:
-
+  push:
+    branches: [main]
+    paths:
+    - 'frontend/milkglass-backend/**'
+    - '.github/workflows/deploy-backend.yml'
+    
 permissions:
   contents: read
 
