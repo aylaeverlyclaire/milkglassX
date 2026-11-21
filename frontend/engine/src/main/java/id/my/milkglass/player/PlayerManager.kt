@@ -2,6 +2,8 @@ package id.my.milkglass.player
 
 import android.content.Context
 import android.net.Uri
+import android.os.StatFs
+import java.util.concurrent.CopyOnWriteArraySet
 import android.view.TextureView
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
@@ -142,7 +144,11 @@ class PlayerManager(
     private var activeStreamSession: LocalStreamSession? = null
     private var loadJob: Job? = null
     private var tickerJob: Job? = null
+    private var fullCacheJob: Job? = null
+    private var enrichJob: Job? = null
     private var lastRequest: PlaybackRequest? = null
+    private var activeCacheSlug: String? = null
+    private val activeCacheKeys = CopyOnWriteArraySet<String>()
 
     private val sessionCounter = AtomicLong(0L)
     @Volatile private var activeSessionId: Long = 0L
@@ -348,6 +354,23 @@ class PlayerManager(
         lastRequest = request
 
         cancelPrebuffer()
+        fullCacheJob?.cancel()
+        fullCacheJob = null
+        enrichJob?.cancel()
+        enrichJob = null
+
+        val prevSlug = activeCacheSlug
+        if (prevSlug != null && prevSlug != request.slug) {
+            val keysToEvict = activeCacheKeys.toList()
+            activeCacheKeys.clear()
+            if (keysToEvict.isNotEmpty()) {
+                playerScope.launch(Dispatchers.IO) {
+                    evictStreamCacheKeys(appContext, keysToEvict)
+                }
+            }
+        }
+        activeCacheSlug = request.slug
+
         setVideoBuffering(true)
         loadJob?.cancel()
         exoPlayer?.stop()
@@ -408,13 +431,39 @@ class PlayerManager(
                 } else {
                     setMaxVideoResolution(0)
                 }
+                val streamCacheKey = if (session.isHls || session.localHttpUrl.startsWith("file://", ignoreCase = true)) {
+                    null
+                } else {
+                    buildStreamCacheKey(request.slug, session.activeResolution, request.preferCompatibleContainer)
+                }
+                if (streamCacheKey != null) activeCacheKeys.add(streamCacheKey)
                 prepareMedia(
                     mediaUrl = session.localHttpUrl,
                     headers = session.headers,
                     isHls = session.isHls,
                     startPositionMs = request.startPositionMs,
-                    cacheKey = if (session.isHls) null else buildStreamCacheKey(request.slug, session.activeResolution, request.preferCompatibleContainer)
+                    cacheKey = streamCacheKey
                 )
+                if (streamCacheKey != null) {
+                    startBackgroundFullCache(session, streamCacheKey, sid)
+                }
+                if (!session.localHttpUrl.startsWith("file://", ignoreCase = true)) {
+                    enrichJob?.cancel()
+                    enrichJob = resolver.enrichAvailableResolutionsAsync(
+                        slug = request.slug,
+                        title = request.title,
+                        romajiTitle = request.romajiTitle,
+                        currentResolutions = session.availableResolutions,
+                        scope = playerScope
+                    ) { mergedLabels ->
+                        if (released || activeSessionId != sid) return@enrichAvailableResolutionsAsync
+                        val mergedAvail = (listOf("Auto") + mergedLabels).distinct()
+                        _availableResolutions.value = mergedAvail
+                        _snapshot.update {
+                            if (it.sessionId != sid) it else it.copy(availableResolutions = mergedAvail)
+                        }
+                    }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -695,6 +744,88 @@ class PlayerManager(
 
     fun getDuration(): Long = exoPlayer?.duration?.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
 
+    /**
+     * Opportunistic background full-episode caching untuk optimalisasi seekbar (maju-mundur tanpa reload).
+     * Disesuaikan dengan ruang kosong perangkat (>= 512 MiB) dan selalu mengalah saat player sedang buffering.
+     */
+    private fun startBackgroundFullCache(session: LocalStreamSession, cacheKey: String, sessionId: Long) {
+        fullCacheJob?.cancel()
+        fullCacheJob = playerScope.launch(Dispatchers.IO) {
+            val streamCache = getStreamCache(appContext) ?: return@launch
+            val cacheDir = File(appContext.cacheDir, "mkv_stream_cache")
+            val availableDiskBytes = runCatching { StatFs(cacheDir.absolutePath).availableBytes }.getOrDefault(0L)
+            if (availableDiskBytes < MIN_FREE_DISK_FOR_FULL_CACHE_BYTES) return@launch
+
+            val maxBudgetBytes = computeAdaptiveCacheBytes(availableDiskBytes)
+            // Tunggu pemutaran awal stabil terlebih dahulu
+            delay(2_500L)
+
+            val sharedOkHttp = EngineRuntime.get(appContext).clients.streamingClient
+            val upstreamFactory: DataSource.Factory = if (session.candidates.isNotEmpty()) {
+                FailoverHttpDataSource.Factory(
+                    client = sharedOkHttp,
+                    candidates = session.candidates,
+                    defaultUserAgent = session.headers["User-Agent"] ?: DEFAULT_USER_AGENT
+                )
+            } else {
+                OkHttpDataSource.Factory(sharedOkHttp)
+                    .setUserAgent(session.headers["User-Agent"] ?: DEFAULT_USER_AGENT)
+                    .setDefaultRequestProperties(session.headers)
+            }
+            val cacheDs = CacheDataSource.Factory()
+                .setCache(streamCache)
+                .setUpstreamDataSourceFactory(upstreamFactory)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+                .createDataSource()
+
+            val targetUri = Uri.parse(session.candidates.firstOrNull()?.directUrl ?: session.localHttpUrl)
+            val chunkBytes = 2L * 1024L * 1024L
+            var offset = 0L
+            val buf = ByteArray(64 * 1024)
+
+            while (isActive && !released && activeSessionId == sessionId) {
+                while (isActive && !released && activeSessionId == sessionId && isVideoBuffering.value) {
+                    delay(400L)
+                }
+                if (!isActive || released || activeSessionId != sessionId) break
+
+                val totalLen = runCatching {
+                    androidx.media3.datasource.cache.ContentMetadata.getContentLength(streamCache.getContentMetadata(cacheKey))
+                }.getOrDefault(C.LENGTH_UNSET.toLong())
+
+                if (totalLen > 0L) {
+                    if (offset >= totalLen || totalLen > maxBudgetBytes) break
+                } else if (offset >= maxBudgetBytes) {
+                    break
+                }
+
+                val len = if (totalLen > 0L) minOf(chunkBytes, totalLen - offset) else chunkBytes
+                val alreadyCached = runCatching { streamCache.getCachedBytes(cacheKey, offset, len) }.getOrDefault(0L)
+                if (alreadyCached >= len) {
+                    offset += len
+                    continue
+                }
+
+                val spec = DataSpec.Builder()
+                    .setUri(targetUri)
+                    .setPosition(offset)
+                    .setLength(len)
+                    .setKey(cacheKey)
+                    .build()
+                val writer = CacheWriter(cacheDs, spec, buf, null)
+                val ok = try {
+                    writer.cache()
+                    true
+                } catch (_: Throwable) {
+                    false
+                }
+                if (!ok) break
+                offset += len
+                delay(150L)
+            }
+        }
+    }
+
     private fun stopStreamSession(@Suppress("UNUSED_PARAMETER") syncClose: Boolean = false) {
         val current = activeStreamSession
         activeStreamSession = null
@@ -712,6 +843,10 @@ class PlayerManager(
         setVideoBuffering(false)
         loadJob?.cancel()
         loadJob = null
+        fullCacheJob?.cancel()
+        fullCacheJob = null
+        enrichJob?.cancel()
+        enrichJob = null
         tickerJob?.cancel()
         tickerJob = null
         stopStreamSession(syncClose = true)
@@ -881,15 +1016,32 @@ class PlayerManager(
             true
         }
 
+        private const val MIN_FREE_DISK_FOR_FULL_CACHE_BYTES = 512L * 1024L * 1024L
+
+        fun computeAdaptiveCacheBytes(availableDiskBytes: Long): Long {
+            val minBytes = 128L * 1024L * 1024L
+            val maxBytes = 1024L * 1024L * 1024L
+            return (availableDiskBytes / 10L).coerceIn(minBytes, maxBytes)
+        }
+
+        fun evictStreamCacheKeys(context: Context, keys: Collection<String>) {
+            val streamCache = getStreamCache(context.applicationContext) ?: return
+            for (k in keys) {
+                runCatching { streamCache.removeResource(k) }
+            }
+        }
+
         fun getStreamCache(context: Context): Cache? {
             sharedStreamCache?.let { return it }
             return synchronized(this) {
                 sharedStreamCache ?: runCatching {
                     val dir = File(context.applicationContext.cacheDir, "mkv_stream_cache")
                     if (!dir.exists()) dir.mkdirs()
+                    val availableBytes = runCatching { StatFs(dir.absolutePath).availableBytes }.getOrDefault(2560L * 1024L * 1024L)
+                    val adaptiveMaxBytes = computeAdaptiveCacheBytes(availableBytes)
                     SimpleCache(
                         dir,
-                        LeastRecentlyUsedCacheEvictor(256L * 1024L * 1024L),
+                        LeastRecentlyUsedCacheEvictor(adaptiveMaxBytes),
                         getDatabaseProvider(context.applicationContext)
                     )
                 }.getOrNull()?.also { sharedStreamCache = it }
