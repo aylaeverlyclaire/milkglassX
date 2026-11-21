@@ -110,7 +110,7 @@ fun CountdownText(ctl: AppController, ts: Long, modifier: Modifier = Modifier, h
     val now = ctl.nowMs
     val aired = ts <= now
 
-    var prevAired by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(aired) }
+    var prevAired by androidx.compose.runtime.remember(ts) { androidx.compose.runtime.mutableStateOf(aired) }
     androidx.compose.runtime.LaunchedEffect(aired) {
         if (aired && !prevAired) ctl.launchFireworks()
         prevAired = aired

@@ -14,6 +14,7 @@ import {
   purgeSourcesCache,
 } from '../middleware/edgeCache';
 import { AppBindings } from '../index';
+import { SOURCE_ID_SCHEMA } from '../utils/sources';
 
 export const ingestRoutes = new Hono<{ Bindings: AppBindings }>();
 
@@ -287,7 +288,7 @@ ingestRoutes.post('/catalog-import', async (c) => {
 });
 
 const sourceDomainSchema = z.object({
-  source: z.enum(['animasu', 'otakudesu', 'samehadaku', 'nontonanimeid', 'oploverz', 'kusonime']).default('animasu'),
+  source: SOURCE_ID_SCHEMA.default('animasu'),
   base_url: z.string().url().refine((u) => u.startsWith('https://'), {
     message: 'Harus HTTPS',
   }),

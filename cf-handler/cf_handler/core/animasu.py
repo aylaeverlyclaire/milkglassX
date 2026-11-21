@@ -355,6 +355,8 @@ async def search_animasu(
         results = parse_animasu_search(html_text, root) if html_text else []
         if len(_SEARCH_CACHE) > 256:
             _SEARCH_CACHE.clear()
+            for k in [k for k, lk in list(_SEARCH_LOCKS.items()) if k != cache_key and not lk.locked()]:
+                _SEARCH_LOCKS.pop(k, None)
         if results:
             _SEARCH_CACHE[cache_key] = (time.time(), results)
         return results
