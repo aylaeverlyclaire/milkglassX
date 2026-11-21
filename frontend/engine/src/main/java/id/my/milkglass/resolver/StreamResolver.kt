@@ -171,7 +171,7 @@ class StreamResolver(
     private val hintReportedAt = ConcurrentHashMap<String, Long>()
 
     fun reportDeadDirectUrl(title: String, ep: Int, directUrl: String, httpCode: Int) {
-        if (!hasAuthSession() || !directUrl.startsWith("https://")) return
+        if (!directUrl.startsWith("https://")) return
         if (title.trim().length < 2 || ep <= 0) return
         val statusStr = when (httpCode) {
             403 -> "403"
@@ -213,7 +213,7 @@ class StreamResolver(
     }
 
     fun reportHint(cacheKey: String, candidates: List<RawMkvCandidate>) {
-        if (candidates.isEmpty() || !hasAuthSession()) return
+        if (candidates.isEmpty()) return
         val now = System.currentTimeMillis()
         if (now < serverResolverDisabledUntilMs) return
         val title = cacheKey.substringBeforeLast('#', "").trim()
@@ -268,7 +268,7 @@ class StreamResolver(
     private val directReportedAt = ConcurrentHashMap<String, Long>()
 
     fun reportDirect(title: String, ep: Int, list: List<ResolvedMkvMedia>) {
-        if (list.isEmpty() || ep <= 0 || title.trim().length < 2 || !hasAuthSession()) return
+        if (list.isEmpty() || ep <= 0 || title.trim().length < 2) return
         val now = System.currentTimeMillis()
         if (now < serverResolverDisabledUntilMs) return
         val key = "${title.lowercase().trim()}#$ep#${list.first().quality.label}"
@@ -335,7 +335,6 @@ class StreamResolver(
     private var serverQuietUntilMs: Long = 0L
 
     private fun shouldAskServer(): Boolean {
-        if (!hasAuthSession()) return false
         val now = System.currentTimeMillis()
         return now >= serverResolverDisabledUntilMs && now >= serverQuietUntilMs
     }
@@ -514,7 +513,6 @@ class StreamResolver(
         anilistId: Int? = null
     ): Triple<List<ResolvedMkvMedia>, List<MkvQuality>, Boolean> {
         val empty = Triple(emptyList<ResolvedMkvMedia>(), emptyList<MkvQuality>(), false)
-        if (!hasAuthSession()) return empty
         val now = System.currentTimeMillis()
         if (now < serverResolverDisabledUntilMs) return empty
         val animeIdParam = if (anilistId != null && anilistId > 0) "&anime_id=$anilistId" else ""
@@ -536,7 +534,8 @@ class StreamResolver(
                     return@use null
                 }
                 val rawBody = resp.body?.string() ?: return@use null
-                if (!serverSignatureVerifier(rawBody, resp.header("X-Milkglass-Server-Sig"))) {
+                val serverSig = resp.header("X-Milkglass-Server-Sig")
+                if ((hasAuthSession() || !serverSig.isNullOrBlank()) && !serverSignatureVerifier(rawBody, serverSig)) {
                     return@use null
                 }
                 rawBody
