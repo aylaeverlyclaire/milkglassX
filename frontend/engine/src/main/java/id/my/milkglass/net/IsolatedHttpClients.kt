@@ -198,10 +198,29 @@ object CloudflareChallengeCoordinator {
 class CloudflareInterceptor(
     private val cookieBridge: WebViewCookieBridge,
     private val remoteSolver: ((host: String, url: String) -> RemoteClearance?)? = null,
+    private val silentLocalSolver: ((host: String, url: String) -> Boolean)? = null,
     private val onUserAgentOverride: ((host: String, userAgent: String) -> Unit)? = null
 ) : Interceptor {
 
     private val inFlightRemote = ConcurrentHashMap<String, CompletableFuture<RemoteClearance?>>()
+    private val inFlightSilent = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
+
+    private fun resolveSilentSingleFlight(host: String, urlStr: String): Boolean {
+        val solver = silentLocalSolver ?: return false
+        val key = host.lowercase()
+        val mine = CompletableFuture<Boolean>()
+        val existing = inFlightSilent.putIfAbsent(key, mine)
+        if (existing != null) {
+            return runCatching { existing.get(15, TimeUnit.SECONDS) }.getOrDefault(false)
+        }
+        return try {
+            val ok = runCatching { solver.invoke(host, urlStr) }.getOrDefault(false)
+            mine.complete(ok)
+            ok
+        } finally {
+            inFlightSilent.remove(key, mine)
+        }
+    }
 
     private fun resolveRemoteSingleFlight(host: String, urlStr: String): RemoteClearance? {
         val solver = remoteSolver ?: return null
@@ -260,6 +279,14 @@ class CloudflareInterceptor(
             }
             retryResp.close()
             cookieBridge.clearHostCookies(request.url)
+        }
+
+        if (resolveSilentSingleFlight(host, urlStr)) {
+            val silentRetry = chain.proceed(request)
+            if (!isCloudflareChallenge(silentRetry)) {
+                return silentRetry
+            }
+            silentRetry.close()
         }
 
         val verified = try {
@@ -601,6 +628,7 @@ class IsolatedHttpClients(
     val dns: Dns = CloudflareDohDns(),
     val cookieBridge: WebViewCookieBridge = WebViewCookieBridge(),
     remoteClearanceSolver: ((host: String, url: String) -> RemoteClearance?)? = null,
+    silentLocalSolver: ((host: String, url: String) -> Boolean)? = null,
     backendAuthInterceptor: Interceptor? = null,
     backendAuthenticatorFactory: ((OkHttpClient) -> Authenticator)? = null
 ) {
@@ -643,6 +671,11 @@ class IsolatedHttpClients(
             CloudflareInterceptor(
                 cookieBridge = cookieBridge,
                 remoteSolver = remoteClearanceSolver,
+                silentLocalSolver = silentLocalSolver ?: appContext?.let { ctx ->
+                    { _, targetUrl ->
+                        SilentWebViewCfHandler.solveClearanceSilently(ctx, targetUrl, webViewUserAgent)
+                    }
+                },
                 onUserAgentOverride = { h, ua -> hostUserAgents[h] = ua }
             )
         )

@@ -322,31 +322,38 @@ class EngineRuntime private constructor(private val appContext: Context) {
 
     private fun fetchRemoteHtml(targetUrl: String): String? {
         val now = System.currentTimeMillis()
-        if (now < remoteCfDisabledUntilMs) return null
-        if (!sessionStore.hasActiveSession()) return null
+        val remoteHtml = if (now >= remoteCfDisabledUntilMs && sessionStore.hasActiveSession()) {
+            val endpoint = "${MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL}/v1/cf/html?url=${URLEncoder.encode(targetUrl, "UTF-8")}"
+            val req = Request.Builder()
+                .url(endpoint)
+                .header("Accept", "application/json")
+                .build()
 
-        val endpoint = "${MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL}/v1/cf/html?url=${URLEncoder.encode(targetUrl, "UTF-8")}"
-        val req = Request.Builder()
-            .url(endpoint)
-            .header("Accept", "application/json")
-            .build()
-
-        return runCatching {
-            clients.cfSolverClient.newCall(req).execute().use { resp ->
-                if (resp.code == 503 || resp.code == 429) {
-                    remoteCfDisabledUntilMs = System.currentTimeMillis() + 5L * 60L * 1000L
-                    return@use null
+            runCatching {
+                clients.cfSolverClient.newCall(req).execute().use { resp ->
+                    if (resp.code == 503 || resp.code == 429) {
+                        remoteCfDisabledUntilMs = System.currentTimeMillis() + 5L * 60L * 1000L
+                        return@use null
+                    }
+                    if (!resp.isSuccessful) return@use null
+                    val raw = resp.body?.string().orEmpty()
+                    if (!sessionStore.verifyServerSignature(raw, resp.header("X-Milkglass-Server-Sig"))) {
+                        return@use null
+                    }
+                    val root = JSONObject(raw)
+                    if (root.optString("status") != "ok") return@use null
+                    root.optJSONObject("data")?.optString("html")?.takeIf { it.length >= 64 }
                 }
-                if (!resp.isSuccessful) return@use null
-                val raw = resp.body?.string().orEmpty()
-                if (!sessionStore.verifyServerSignature(raw, resp.header("X-Milkglass-Server-Sig"))) {
-                    return@use null
-                }
-                val root = JSONObject(raw)
-                if (root.optString("status") != "ok") return@use null
-                root.optJSONObject("data")?.optString("html")?.takeIf { it.length >= 64 }
-            }
-        }.getOrNull()
+            }.getOrNull()
+        } else {
+            null
+        }
+        if (remoteHtml != null) return remoteHtml
+        return id.my.milkglass.net.SilentWebViewCfHandler.fetchHtmlSilently(
+            context = appContext,
+            url = targetUrl,
+            userAgent = clients.webViewUserAgent
+        )
     }
 
     fun prewarmCloudflareEdge() {
@@ -365,6 +372,7 @@ class EngineRuntime private constructor(private val appContext: Context) {
         SourceCircuitBreaker.resetAll()
         DeadCandidateCache.clear()
         remoteCfDisabledUntilMs = 0L
+        id.my.milkglass.net.SilentWebViewCfHandler.clearCooldowns()
         prewarmCloudflareEdge()
         backgroundScope.launch {
             runCatching { sourceConfig.refreshIfNeeded() }
