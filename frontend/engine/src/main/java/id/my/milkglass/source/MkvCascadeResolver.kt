@@ -36,11 +36,11 @@ enum class SourcePriority(
     val watermarkTier: Int
 ) {
     SAMEHADAKU(1, "samehadaku", "https://v2.samehadaku.how", 0),
-    OPLOVERZ(2, "oploverz", "https://oploverz.ch", 1),
+    OTAKUDESU(2, "otakudesu", "https://otakudesu.blog", 2),
     NONTONANIMEID(3, "nontonanimeid", "https://nontonanimeid.stream", 0),
-    OTAKUDESU(4, "otakudesu", "https://otakudesu.blog", 2),
-    ANIMASU(5, "animasu", "https://animasu.love", 0),
-    KUSONIME(6, "kusonime", "https://kusonime.com", 2)
+    KUSONIME(4, "kusonime", "https://kusonime.com", 2),
+    OPLOVERZ(5, "oploverz", "https://oploverz.ch", 1),
+    ANIMASU(6, "animasu", "https://animasu.love", 0)
 }
 
 enum class MediaContainer(val rank: Int, val label: String) {

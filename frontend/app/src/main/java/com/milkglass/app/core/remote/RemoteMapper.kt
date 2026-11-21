@@ -58,6 +58,7 @@ object RemoteMapper {
             synopsis = r.synopsis.orEmpty(),
             similarIds = emptyList(),
             nextAirAt = if (hasAir) r.nextAiringAt * 1000 else null,
+            sourceUrls = r.sourceUrls.filterValues { it.startsWith("https://") },
         )
     }
 

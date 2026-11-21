@@ -115,7 +115,9 @@ fun DetailScreen(ctl: AppController, id: Int) {
             else -> resume.episode ?: 1
         }
         if (targetEp != null && ctl.online && ctl.episodeAccess(a, targetEp) == Access.Ok) {
-            EngineRuntime.get(detailCtx).prefetchEpisode(
+            val rt = EngineRuntime.get(detailCtx)
+            rt.seedSourceUrls(a.title, a.romaji, a.sourceUrls)
+            rt.prefetchEpisode(
                 a.title, a.romaji, targetEp, ctl.persisted.settings.quality,
                 prebuffer = !com.milkglass.app.core.poster.isMeteredNetwork(detailCtx),
             )

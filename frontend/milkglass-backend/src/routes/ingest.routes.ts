@@ -437,3 +437,79 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
     reconciled: reconcile,
   });
 });
+
+const syncSourceCatalogSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        anime_id: z.number().int().positive().optional(),
+        title: z.string().trim().min(1).max(200),
+        source_urls: z.record(z.string(), z.string().url().max(1024)),
+      })
+    )
+    .min(1)
+    .max(200),
+});
+
+function sourceCatalogStableId(title: string): number {
+  const clean = normalizeHosterTitleKey(title);
+  let hash = 2166136261;
+  for (let i = 0; i < clean.length; i++) {
+    hash ^= clean.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return 900_000_000 + ((hash >>> 0) % 999_999_999);
+}
+
+ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSchema), async (c) => {
+  const { items } = c.req.valid('json');
+  const now = Math.floor(Date.now() / 1000);
+  const stmts: D1PreparedStatement[] = [];
+  let updated = 0;
+  let inserted = 0;
+
+  for (const item of items) {
+    const cleanUrls: Record<string, string> = {};
+    for (const [k, v] of Object.entries(item.source_urls)) {
+      if (typeof v === 'string' && v.startsWith('https://')) {
+        cleanUrls[k.trim().toLowerCase()] = v.trim();
+      }
+    }
+    if (Object.keys(cleanUrls).length === 0) continue;
+    const urlsJson = JSON.stringify(cleanUrls);
+    if (item.anime_id) {
+      stmts.push(
+        c.env.DB.prepare(
+          `UPDATE animes
+           SET source_urls_json = ?1, has_live_source = 1, updated_at = ?2
+           WHERE id = ?3`
+        ).bind(urlsJson, now, item.anime_id)
+      );
+      updated++;
+    } else {
+      const sid = sourceCatalogStableId(item.title);
+      const compact = item.title.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 120);
+      stmts.push(
+        c.env.DB.prepare(
+          `INSERT INTO animes (
+             id, title, title_alt, synopsis, score, type, status, schedule_day,
+             duration, studio, release_season, poster_url, genres_json, popularity,
+             updated_at, episodes_total, next_airing_at, next_airing_ep,
+             has_live_source, norm_compact, source_urls_json
+           ) VALUES (?1, ?2, ?2, '', 0, 'TV', 1, 0, '24 min', '-', '-', '', '[]', 100, ?3, 12, 0, 0, 1, ?4, ?5)
+           ON CONFLICT(id) DO UPDATE SET
+             source_urls_json = excluded.source_urls_json,
+             has_live_source = 1,
+             updated_at = excluded.updated_at`
+        ).bind(sid, item.title, now, compact, urlsJson)
+      );
+      inserted++;
+    }
+  }
+
+  for (let i = 0; i < stmts.length; i += 80) {
+    await c.env.DB.batch(stmts.slice(i, i + 80));
+  }
+  await purgeHomeCache(c.req.url);
+  return c.json({ status: 'ok', updated, inserted });
+});

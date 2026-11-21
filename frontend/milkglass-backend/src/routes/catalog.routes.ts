@@ -33,12 +33,14 @@ export const catalogRoutes = new Hono<{ Bindings: AppBindings }>();
 const CATALOG_STALE_AFTER_SEC = 18 * 3600;
 const LIST_COLUMNS = `id, mal_id, title, title_alt, score, type, status, schedule_day,
                 duration, studio, release_season, poster_url, popularity, updated_at,
-                genres_json, episodes_total, next_airing_at, next_airing_ep`;
+                genres_json, episodes_total, next_airing_at, next_airing_ep, source_urls_json`;
 
 const META_QUERY = `SELECT key, value FROM catalog_meta WHERE key IN ('last_import_at', 'last_full_import_at')`;
 
-function shapeAnimeRow(row: Record<string, unknown>): Record<string, unknown> & { genres: string[] } {
-  const { genres_json, ...rest } = row;
+function shapeAnimeRow(
+  row: Record<string, unknown>
+): Record<string, unknown> & { genres: string[]; source_urls: Record<string, string> } {
+  const { genres_json, source_urls_json, ...rest } = row;
   let genres: string[] = [];
   try {
     const parsed = JSON.parse(String(genres_json || '[]'));
@@ -48,7 +50,20 @@ function shapeAnimeRow(row: Record<string, unknown>): Record<string, unknown> & 
   } catch {
     genres = [];
   }
-  return { ...rest, genres };
+  const source_urls: Record<string, string> = {};
+  if (typeof source_urls_json === 'string' && source_urls_json.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(source_urls_json) as Record<string, unknown>;
+      if (parsed && typeof parsed === 'object') {
+        for (const [k, v] of Object.entries(parsed)) {
+          if (typeof v === 'string' && v.startsWith('https://')) {
+            source_urls[k] = v;
+          }
+        }
+      }
+    } catch {}
+  }
+  return { ...rest, genres, source_urls };
 }
 
 function shapeRows(rows: Array<Record<string, unknown>> | undefined) {
@@ -707,6 +722,7 @@ catalogRoutes.get(
             mal_id: null,
             source: sourceId,
             source_url: url,
+            source_urls: { [sourceId]: url },
             title: rawTitle,
             title_alt: rawTitle,
             score: 0,
