@@ -84,6 +84,8 @@ import kotlin.math.abs
 import kotlin.math.max
 
 @OptIn(ExperimentalLayoutApi::class)
+private val DETAIL_TABS = listOf("episodes", "similar")
+
 @Composable
 fun DetailScreen(ctl: AppController, id: Int) {
     val c = Milk.colors
@@ -211,7 +213,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
                     .background(c.surface),
             ) {
                 Row(Modifier.fillMaxWidth().height(48.dp)) {
-                    listOf("episodes", "similar").forEach { t -> key(t) {
+                    DETAIL_TABS.forEach { t -> key(t) {
                         val active = t == ctl.detailTab
                         Box(
                             Modifier.weight(1f).height(48.dp)

@@ -147,10 +147,9 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
     val ty = Milk.type
     val tr = ctl.tr
     val time = ctl.time
-    ctl.nowMs
-
     if (ctl.catalog.isEmpty()) { CatalogEmpty(ctl); return }
-    val d = androidx.compose.runtime.remember(ctl.persisted, ctl.tick, ctl.catalog) {
+    val todayBucket = time.startOfToday()
+    val d = androidx.compose.runtime.remember(ctl.persisted, ctl.catalog, todayBucket) {
         val cl = ctl.continueWatchingList()
         val anime = cl.firstOrNull() ?: ctl.trendingList().first()
         HomeData(
@@ -170,7 +169,7 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
         }
     }
 
-    val stopped = androidx.compose.runtime.remember(ctl.persisted, ctl.tick) {
+    val stopped = androidx.compose.runtime.remember(ctl.persisted, d.cl, todayBucket) {
         d.cl.firstOrNull { ctl.isReturning(it) }?.let { s ->
             s to ctl.similarOf(s, 16).filter { ctl.startedEpisodes(it).isEmpty() }.take(8)
         }

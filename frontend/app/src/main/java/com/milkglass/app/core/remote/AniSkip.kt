@@ -1,5 +1,7 @@
 package com.milkglass.app.core.remote
 
+import androidx.compose.runtime.Immutable
+
 import id.my.milkglass.EngineHttpTextClient
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -8,10 +10,12 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import java.util.concurrent.ConcurrentHashMap
 
+@Immutable
 data class SkipWindow(val start: Double, val end: Double) {
     fun contains(p: Double) = p >= start && p < end
 }
 
+@Immutable
 data class SkipTimes(val opening: SkipWindow?, val ending: SkipWindow?) {
     companion object { val NONE = SkipTimes(null, null) }
 }

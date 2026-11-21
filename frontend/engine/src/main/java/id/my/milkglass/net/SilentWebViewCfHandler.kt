@@ -44,19 +44,7 @@ object SilentWebViewCfHandler {
         val hasClearanceCookie: Boolean
     )
 
-    fun isChallengeHtml(html: String?): Boolean {
-        if (html.isNullOrBlank()) return true
-        val lower = html.lowercase()
-        return lower.contains("cf-browser-verification") ||
-            lower.contains("cf_chl_opt") ||
-            lower.contains("challenges.cloudflare.com") ||
-            lower.contains("/cdn-cgi/challenge-platform/") ||
-            lower.contains("checking your browser") ||
-            lower.contains("attention required! | cloudflare") ||
-            lower.contains("your request was blocked") ||
-            lower.contains("verify you are human") ||
-            (lower.contains("just a moment") && (lower.contains("cloudflare") || lower.contains("enable javascript")))
-    }
+    fun isChallengeHtml(html: String?): Boolean = CloudflareChallengeDetector.isChallengeHtml(html)
 
     fun unescapeJsString(raw: String?): String? {
         if (raw.isNullOrBlank() || raw == "null") return null
@@ -193,7 +181,7 @@ object SilentWebViewCfHandler {
                 }
                 val cookieStr = runCatching { CookieManager.getInstance().getCookie(url).orEmpty() }
                     .getOrDefault("")
-                val hasClearance = cookieStr.contains("cf_clearance=")
+                val hasClearance = CloudflareChallengeDetector.hasClearanceCookie(cookieStr)
 
                 runCatching {
                     wv.evaluateJavascript(

@@ -1,5 +1,7 @@
 package com.milkglass.app.core.design
 
+import androidx.compose.runtime.Immutable
+
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.LinearEasing
@@ -18,6 +20,7 @@ object MilkEasing {
     val Linear: Easing = LinearEasing
 }
 
+@Immutable
 data class MilkAnim(
     val name: String,
     val durationMs: Int,

@@ -122,7 +122,7 @@ class WebViewCookieBridge(
 
     fun hasClearance(url: String): Boolean {
         val raw = managerOrNull()?.getCookie(url).orEmpty()
-        if (raw.contains("cf_clearance=")) return true
+        if (CloudflareChallengeDetector.hasClearanceCookie(raw)) return true
         val host = runCatching { url.toHttpUrl().host.lowercase() }.getOrNull() ?: return false
         return memoryOverrides[host]?.containsKey("cf_clearance") == true
     }
@@ -239,20 +239,7 @@ class CloudflareInterceptor(
         }
     }
 
-    private fun isCloudflareChallenge(response: Response): Boolean {
-        if (response.code != 403 && response.code != 503) return false
-        val mitigated = response.header("cf-mitigated")?.trim()?.lowercase()
-        if (mitigated == "challenge") return true
-        val server = response.header("Server")?.lowercase().orEmpty()
-        if (!server.contains("cloudflare")) return false
-        val snippet = runCatching { response.peekBody(8192L).string().lowercase() }.getOrDefault("")
-        if (snippet.isBlank()) return false
-        return snippet.contains("cf-browser-verification") ||
-            snippet.contains("cf_chl_opt") ||
-            snippet.contains("challenges.cloudflare.com") ||
-            snippet.contains("/cdn-cgi/challenge-platform/") ||
-            (snippet.contains("just a moment...") && snippet.contains("cloudflare"))
-    }
+    private fun isCloudflareChallenge(response: Response): Boolean = CloudflareChallengeDetector.isChallengeResponse(response)
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()

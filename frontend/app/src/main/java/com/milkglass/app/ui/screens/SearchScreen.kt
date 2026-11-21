@@ -60,6 +60,8 @@ import com.milkglass.app.ui.common.SectionHeader
 import com.milkglass.app.ui.common.TopBar
 import com.milkglass.app.ui.common.milkClickable
 
+private val SEARCH_GENRES = listOf("all") + GENRES
+
 @Composable
 private fun ChipRow(items: List<String>, activeIndex: (String) -> Boolean, label: (String) -> String, onClick: (String) -> Unit, modifier: Modifier = Modifier, edge: androidx.compose.ui.unit.Dp = Gutter) {
     LazyRow(
@@ -131,7 +133,7 @@ fun SearchScreen(ctl: AppController) {
         )
 
         ChipRow(
-            listOf("all") + GENRES, { it == ctl.searchGenre }, { ctl.enumLabel("genre", it) },
+            SEARCH_GENRES, { it == ctl.searchGenre }, { ctl.enumLabel("genre", it) },
             { ctl.searchGenre = it }, Modifier.padding(vertical = 8.dp),
 
         )
@@ -196,16 +198,18 @@ private fun SearchResults(ctl: AppController) {
             if (ctl.persisted.recentSearches.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SectionHeader(tr.t("search.recent"), right = { LabelStrong(tr.t("common.delete"), { ctl.clearRecentSearches() }) })
-                    MilkColumnGrid(ctl.persisted.recentSearches) { t -> MilkChip(t, false, { ctl.runSearch(t) }, Modifier.fillMaxWidth()) }
+                    MilkColumnGrid(ctl.persisted.recentSearches, itemKey = { it }) { t -> MilkChip(t, false, { ctl.runSearch(t) }, Modifier.fillMaxWidth()) }
                 }
             }
 
-            val tries = ctl.searchSuggestions()
-                .filter { s -> ctl.persisted.recentSearches.none { it.trim().equals(s.trim(), ignoreCase = true) } }
+            val tries = remember(ctl.catalog, ctl.persisted.recentSearches) {
+                ctl.searchSuggestions()
+                    .filter { s -> ctl.persisted.recentSearches.none { it.trim().equals(s.trim(), ignoreCase = true) } }
+            }
             if (tries.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SectionHeader(tr.t("search.trySearch"))
-                    MilkColumnGrid(tries) { t -> MilkChip(t, false, { ctl.runSearch(t) }, Modifier.fillMaxWidth()) }
+                    MilkColumnGrid(tries, itemKey = { it }) { t -> MilkChip(t, false, { ctl.runSearch(t) }, Modifier.fillMaxWidth()) }
                 }
             }
         }

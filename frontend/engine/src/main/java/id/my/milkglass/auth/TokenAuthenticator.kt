@@ -33,8 +33,6 @@ private val Context.sessionDataStore: DataStore<Preferences> by preferencesDataS
     name = "milkglass_session_datastore"
 )
 
-internal fun isTrustedBackendHost(host: String): Boolean =
-    MilkglassEndpoints.isTrustedBackendHost(host)
 
 internal fun computeHmacSha256Hex(key: String, message: String): String {
     val mac = Mac.getInstance("HmacSHA256")
@@ -204,7 +202,7 @@ class AuthBearerInterceptor(
 ) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val original = chain.request()
-        if (!original.isHttps || !isTrustedBackendHost(original.url.host)) {
+        if (!original.isHttps || !MilkglassEndpoints.isTrustedBackendHost(original.url.host)) {
             return chain.proceed(original)
         }
 
@@ -241,7 +239,7 @@ class SynchronizedTokenAuthenticator(
         .build()
 
     override fun authenticate(route: Route?, response: Response): Request? {
-        if (!response.request.isHttps || !isTrustedBackendHost(response.request.url.host)) return null
+        if (!response.request.isHttps || !MilkglassEndpoints.isTrustedBackendHost(response.request.url.host)) return null
         if (responseCount(response) >= 2) return null
 
         val failedBearer = response.request.header("Authorization")

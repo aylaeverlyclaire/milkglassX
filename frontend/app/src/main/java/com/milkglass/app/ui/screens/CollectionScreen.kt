@@ -219,7 +219,7 @@ private fun WatchingTab(ctl: AppController, activeTab: () -> String) {
 private fun CompletedTab(ctl: AppController, activeTab: () -> String) {
     val tr = ctl.tr
     val time = ctl.time
-    val list = ctl.catalog.filter { ctl.isCompleted(it) }
+    val list = remember(ctl.catalog, ctl.persisted.progress) { ctl.catalog.filter { ctl.isCompleted(it) } }
     if (list.isEmpty()) {
         EmptyBlock(MilkIcons.Check, tr.t("collection.noneCompleted"))
         return
@@ -243,17 +243,24 @@ private fun HistoryTab(ctl: AppController, activeTab: () -> String) {
     val ty = Milk.type
     val tr = ctl.tr
     val time = ctl.time
-    val items = ctl.persisted.history.sortedByDescending { it.watchedAt }
+    val today0 = time.startOfToday()
+    val items = remember(ctl.persisted.history) { ctl.persisted.history.sortedByDescending { it.watchedAt } }
     if (items.isEmpty()) {
         EmptyBlock(MilkIcons.Lib, tr.t("collection.historyEmpty"))
         return
     }
-    val today0 = time.startOfToday()
-    val groups = linkedMapOf("today" to mutableListOf<com.milkglass.app.core.model.HistoryEntry>(), "yesterday" to mutableListOf(), "longer" to mutableListOf())
-    items.forEach { h ->
-        val d = Math.floor((today0 - h.watchedAt).toDouble() / DAY_MS).toInt() + 1
-        val k = if (h.watchedAt >= today0) "today" else if (d <= 1) "yesterday" else "longer"
-        groups.getValue(k).add(h)
+    val groups = remember(items, today0) {
+        val g = linkedMapOf(
+            "today" to mutableListOf<com.milkglass.app.core.model.HistoryEntry>(),
+            "yesterday" to mutableListOf(),
+            "longer" to mutableListOf()
+        )
+        items.forEach { h ->
+            val d = Math.floor((today0 - h.watchedAt).toDouble() / DAY_MS).toInt() + 1
+            val k = if (h.watchedAt >= today0) "today" else if (d <= 1) "yesterday" else "longer"
+            g.getValue(k).add(h)
+        }
+        g
     }
     SelectionHeader(ctl, "history", tr.t("collection.historyHint", "length" to items.size)) {
         MilkIconButton(MilkIcons.Del, { ctl.confirmClearHistory() }, Modifier.offset(x = 8.dp), size = 40.dp)
@@ -267,11 +274,14 @@ private fun HistoryTab(ctl: AppController, activeTab: () -> String) {
                     val a = ctl.animeOf(h.id) ?: return@forEachIndexed
                     key("${h.id}.${h.episode}") {
                         if (i > 0) MilkDivider()
-                        val from = parseCssColor(a.colorFrom) ?: Color.Black
-                        val to = parseCssColor(a.colorTo) ?: Color.Black
+                        val thumbBg = remember(a.colorFrom, a.colorTo, h.episode) {
+                            val from = parseCssColor(a.colorFrom) ?: Color.Black
+                            val to = parseCssColor(a.colorTo) ?: Color.Black
+                            cssLinearGradient((120 + h.episode * 17).toFloat(), listOf(from, to))
+                        }
                         SelectableRow(ctl, "hist|${h.id}.${h.episode}", "history", activeTab, { ctl.playEpisode(h.id, h.episode) }) {
                             Box(
-                                Modifier.size(56.dp, 40.dp).clip(RoundedCornerShape(8.dp)).background(cssLinearGradient((120 + h.episode * 17).toFloat(), listOf(from, to))),
+                                Modifier.size(56.dp, 40.dp).clip(RoundedCornerShape(8.dp)).background(thumbBg),
                                 contentAlignment = Alignment.Center,
                             ) { MilkText("${h.episode}", ty.episodeThumb, Color.White) }
                             Column(Modifier.weight(1f)) {

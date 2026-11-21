@@ -392,12 +392,17 @@ object SeriesEpisodeMapCache {
         map.clear()
     }
 
+    private val EP_TEXT_REGEX = Regex("(?:episode|eps?|ep)\\s*0*(\\d{1,4})(?!\\d)", RegexOption.IGNORE_CASE)
+    private val EP_HREF_REGEX = Regex("(?:episode|eps?|ep)[-_\\s]*0*(\\d{1,4})(?!\\d)", RegexOption.IGNORE_CASE)
+    private val SLUG_EP_REGEX = Regex("-ep-(\\d+)$", RegexOption.IGNORE_CASE)
+
+    fun extractEpisodeNumberFromSlug(slug: String): Int =
+        SLUG_EP_REGEX.find(slug)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+
     fun extractEpisodeNumber(text: String, href: String): Int? {
-        val fromText = Regex("(?:episode|eps?|ep)\\s*0*(\\d{1,4})(?!\\d)", RegexOption.IGNORE_CASE)
-            .find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val fromText = EP_TEXT_REGEX.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
         if (fromText != null) return fromText
-        return Regex("(?:episode|eps?|ep)[-_\\s]*0*(\\d{1,4})(?!\\d)", RegexOption.IGNORE_CASE)
-            .find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        return EP_HREF_REGEX.find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
     }
 }
 

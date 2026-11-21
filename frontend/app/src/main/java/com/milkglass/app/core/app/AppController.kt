@@ -1,5 +1,9 @@
 package com.milkglass.app.core.app
 
+import androidx.compose.runtime.Stable
+
+import androidx.compose.runtime.Immutable
+
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -31,8 +35,10 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+@Immutable
 sealed interface ViewEntry {
     data object Search : ViewEntry
+@Immutable
     data class Detail(val id: Int) : ViewEntry
 
     class Player(val engine: PlayerEngine, val rec: List<Int>) : ViewEntry
@@ -40,19 +46,25 @@ sealed interface ViewEntry {
 
 class ExitingView(val id: Int, val index: Int, val entry: ViewEntry)
 
+@Immutable
 data class ListSelection(val scope: String, val keys: List<String>)
 
+@Immutable
 sealed interface Overlay {
+@Immutable
     data class LegalDocument(val key: String) : Overlay
     data object QualityPicker : Overlay
     data object ClearHistory : Overlay
     data object DeleteSelection : Overlay
+@Immutable
     data class EditField(val key: String) : Overlay
+@Immutable
     data class SettingOptions(val key: String) : Overlay
     data object DeleteAccount : Overlay
     data object SignOut : Overlay
 }
 
+@Immutable
 data class ToastMsg(
     val id: Long, val text: String, val ms: Long,
 
@@ -61,6 +73,7 @@ data class ToastMsg(
 
 enum class Access { Ok, Early, Lock }
 
+@Immutable
 data class ContinueInfo(
     val episode: Int?,
     val position: Double = 0.0,
@@ -68,6 +81,7 @@ data class ContinueInfo(
     val completed: Boolean = false,
 )
 
+@Immutable
 data class ScheduleEntry(val a: Anime, val ts: Long, val ep: Int)
 
 enum class NavKind { None, Push, Pop }
@@ -84,6 +98,7 @@ val GENRES = listOf(
     "romance", "sci-fi", "horror", "psychological", "thriller", "mahou-shoujo",
 )
 
+@Stable
 class AppController(
     val data: AppData,
     val posters: PosterStore,

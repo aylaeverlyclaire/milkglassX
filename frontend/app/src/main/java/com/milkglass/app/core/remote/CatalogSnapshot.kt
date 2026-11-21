@@ -1,5 +1,7 @@
 package com.milkglass.app.core.remote
 
+import androidx.compose.runtime.Immutable
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
@@ -20,18 +22,21 @@ const val BACKOFF_BASE_MS = 2L * 60_000L
 const val BACKOFF_MAX_MS = 30L * 60_000L
 
 @Serializable
+@Immutable
 data class StatusData(
     val version: String? = null,
     @SerialName("recheck_after_sec") val recheckAfterSec: Long? = null,
 )
 
 @Serializable
+@Immutable
 data class StatusResponse(
     val status: String,
     val data: StatusData? = null,
 )
 
 @Serializable
+@Immutable
 data class SnapshotMeta(
     val version: String? = null,
 
@@ -39,6 +44,7 @@ data class SnapshotMeta(
 )
 
 @Serializable
+@Immutable
 data class SnapshotResponse(
     val status: String,
     val data: List<RemoteAnime> = emptyList(),
@@ -47,6 +53,7 @@ data class SnapshotResponse(
 )
 
 @Serializable
+@Immutable
 data class SnapshotState(
     val schema: Int = SNAPSHOT_SCHEMA,
     val version: String,
@@ -127,6 +134,7 @@ class FileSnapshotStore(private val dir: File) : SnapshotStore {
 
 class CachedSnapshot(val entries: List<CatalogEntry>, val complete: Boolean)
 
+@Immutable
 sealed interface RefreshOutcome {
 
     data object Skipped : RefreshOutcome

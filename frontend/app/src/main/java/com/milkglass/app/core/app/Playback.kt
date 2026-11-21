@@ -1,5 +1,7 @@
 package com.milkglass.app.core.app
 
+import androidx.compose.runtime.Stable
+
 import com.milkglass.app.core.data.DAY_MS
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
@@ -47,6 +49,7 @@ fun savePlayback(s: PersistedState, a: Anime, episode: Int, rawPosition: Double,
     return s.copy(progress = progress, resumePositions = resume, lastWatched = lastWatched, history = history)
 }
 
+@Stable
 class PlayerEngine(
     private val ctl: AppController,
     val anime: Anime,

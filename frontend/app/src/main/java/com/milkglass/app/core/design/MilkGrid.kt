@@ -1,5 +1,7 @@
 package com.milkglass.app.core.design
 
+import androidx.compose.runtime.key
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -97,15 +99,23 @@ fun <T> MilkColumnGrid(
     modifier: Modifier = Modifier,
     span: Int = 2,
     rowGap: Dp = 8.dp,
+    itemKey: ((T) -> Any)? = null,
     cell: @Composable (T) -> Unit,
 ) {
     val cols = MilkGrid.columnsFor(LocalConfiguration.current.screenWidthDp.toFloat())
     val perRow = MilkGrid.perRow(cols, span)
+    val rows = androidx.compose.runtime.remember(items, perRow) { items.chunked(perRow) }
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(rowGap)) {
-        items.chunked(perRow).forEach { rowItems ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(MilkGrid.Gutter)) {
-                rowItems.forEach { item -> Box(Modifier.weight(1f)) { cell(item) } }
-                repeat(perRow - rowItems.size) { Spacer(Modifier.weight(1f)) }
+        rows.forEachIndexed { rowIdx, rowItems ->
+            key(rowIdx) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(MilkGrid.Gutter)) {
+                    rowItems.forEachIndexed { colIdx, item ->
+                        key(itemKey?.invoke(item) ?: colIdx) {
+                            Box(Modifier.weight(1f)) { cell(item) }
+                        }
+                    }
+                    repeat(perRow - rowItems.size) { Spacer(Modifier.weight(1f)) }
+                }
             }
         }
     }
