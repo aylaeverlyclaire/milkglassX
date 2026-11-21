@@ -5,7 +5,7 @@ import android.net.ConnectivityManager
 import coil.imageLoader
 import coil.request.CachePolicy
 import coil.request.ImageRequest
-import coil.size.Size
+import coil.size.Size as CoilSize
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -263,7 +263,7 @@ suspend fun prefetchPosters(context: Context, urls: List<String>, parallelism: I
                         loader.execute(
                             ImageRequest.Builder(context)
                                 .data(url)
-                                .size(Size(WARM_W, WARM_H))
+                                .size(CoilSize(WARM_W, WARM_H))
                                 .diskCachePolicy(CachePolicy.ENABLED)
                                 .networkCachePolicy(CachePolicy.ENABLED)
                                 .build(),
