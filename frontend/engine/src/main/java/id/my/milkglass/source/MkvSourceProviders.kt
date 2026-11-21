@@ -246,7 +246,8 @@ class OtakudesuSourceProvider(
         val out = mutableListOf<RawMkvCandidate>()
         // 1) Panen iframe default yang sudah ada di HTML awal halaman episode (0 request AJAX)
         out.addAll(StreamingFirstGuards.harvestOtakudesuDefaultEmbeds(epDoc, epUrl, targetQualities, seenUrls))
-        if (out.isNotEmpty()) return out
+        val hasHealthyDefault = out.any { !it.rawUrl.contains("nekocloud", ignoreCase = true) }
+        if (hasHealthyDefault) return out
 
         val mirrorLinks = epDoc.select("ul.m360p li a[data-content], ul.m480p li a[data-content], ul.m720p li a[data-content]")
         if (mirrorLinks.isEmpty()) return out
@@ -265,9 +266,9 @@ class OtakudesuSourceProvider(
         }.getOrNull() ?: return out
 
         for (a in mirrorLinks) {
-            if (out.size >= 4) break
+            if (out.size >= 3) break
             val label = a.text().trim()
-            if (HosterFilter.isBlacklisted(label, label)) continue
+            if (HosterFilter.isBlacklisted(label, label) || label.contains("nekocloud", ignoreCase = true)) continue
             val ulClass = a.parents().firstOrNull { it.tagName() == "ul" }?.className().orEmpty()
             val quality = MkvQuality.fromText(ulClass) ?: MkvQuality.P720
             if (quality !in targetQualities) continue
@@ -356,6 +357,19 @@ class SamehadakuSourceProvider(
                     ?.takeIf { it.first >= 0.40 }
                     ?.second
                 if (bestAnimeUrl != null) break
+            }
+            // Fallback slug langsung untuk Season 1 lama yang tenggelam di halaman 2–4 hasil pencarian WordPress
+            if (bestAnimeUrl == null) {
+                val parsed = TitleMatcher.parse(animeTitle)
+                if ((parsed.season == null || parsed.season == 1) && parsed.canonicalBase.length >= 3) {
+                    val slugGuess = parsed.canonicalBase.replace(" ", "-")
+                    val directUrl = "$root/anime/$slugGuess/"
+                    val probeDoc = runCatching { fetchDoc(directUrl, "$root/") }.getOrNull()
+                    val pageTitle = probeDoc?.selectFirst("h1.entry-title, h1")?.text()?.trim().orEmpty()
+                    if (pageTitle.isNotBlank() && TitleMatcher.score(animeTitle, pageTitle) >= 0.55) {
+                        bestAnimeUrl = directUrl
+                    }
+                }
             }
         }
         if (bestAnimeUrl == null) return emptyList()
