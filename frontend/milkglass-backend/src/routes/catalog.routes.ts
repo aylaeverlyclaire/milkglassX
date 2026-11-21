@@ -1,4 +1,4 @@
-import { buildSourceCatalogList, SOURCE_CASCADE_ORDER, TARGET_RESOLUTIONS } from '../utils/sources';
+import { buildSourceCatalogList, parseSourceCascadeOrder, SOURCE_CASCADE_ORDER, TARGET_RESOLUTIONS } from '../utils/sources';
 import { isCfHandlerConfigured } from '../utils/cfHandler';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -6,10 +6,6 @@ import { edgeCache } from '../middleware/edgeCache';
 import { rateLimit } from '../middleware/rateLimit';
 import { zValidatorParam, zValidatorQuery } from '../middleware/validator';
 import { recheckAfterSec } from '../services/sync-schedule';
-import {
-  mapAnimasuItemToCatalogRow,
-  searchAnimasu,
-} from '../services/animasu.service';
 import {
   getSourceBaseUrls,
   searchAniListMetadata,
@@ -501,14 +497,22 @@ catalogRoutes.get('/', edgeCache(300), async (c) => {
 });
 
 catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
-  const urls = await getSourceBaseUrls(readDb(c.env));
+  const rdb = readDb(c.env);
+  const [urls, orderRow] = await Promise.all([
+    getSourceBaseUrls(rdb),
+    rdb
+      .prepare("SELECT value FROM app_config WHERE key = 'source_cascade_order' LIMIT 1")
+      .first<{ value?: string }>()
+      .catch(() => null),
+  ]);
+  const order = parseSourceCascadeOrder(orderRow?.value);
   return c.json({
     status: 'ok',
     resolution_mode: 'CLIENT_CASCADE_MKV',
     target_format: 'MKV',
     target_resolutions: [...TARGET_RESOLUTIONS],
     cf_handler_available: isCfHandlerConfigured(c.env),
-    sources: buildSourceCatalogList(urls),
+    sources: buildSourceCatalogList(urls, order),
   });
 });
 
@@ -651,14 +655,10 @@ catalogRoutes.get(
         .bind(pattern)
         .all<Record<string, unknown>>();
     };
-    const urls = await getSourceBaseUrls(readDb(c.env));
-    const [animasuItems, d1Animes] = await Promise.all([
-      searchAnimasu(q, urls.animasu, c.env.CF_HANDLER_URL, c.env.CF_HANDLER_TOKEN),
-      queryD1Search(),
-    ]);
-
+    // D1-first instant search (<50ms): hindari memblokir pencarian pada scraping situs eksternal.
+    const d1Animes = await queryD1Search();
     let d1Rows = d1Animes.results ?? [];
-    if (animasuItems.length === 0 && d1Rows.length < 8) {
+    if (d1Rows.length < 8) {
       const { results: livePool } = await readDb(c.env)
         .prepare(
           `SELECT ${LIST_COLUMNS}, title_native, synonyms_json
@@ -680,39 +680,8 @@ catalogRoutes.get(
     }
 
     const shapedD1 = shapeRows(d1Rows);
-    const d1ByNorm = new Map<string, Record<string, unknown>>();
-    for (const row of shapedD1) {
-      const k = normalizeSearchSpaced(String(row.title || ''));
-      if (k && !d1ByNorm.has(k)) d1ByNorm.set(k, row);
-      const ka = normalizeSearchSpaced(String(row.title_alt || ''));
-      if (ka && !d1ByNorm.has(ka)) d1ByNorm.set(ka, row);
-    }
-
-    // Animasu sebagai pelayan pencarian utama (urutan teratas), diperkaya metadata D1 jika cocok,
-    // lalu dilengkapi hasil D1/AniList sekunder tanpa duplikasi.
     const merged: Array<Record<string, unknown>> = [];
     const seenTitleKeys = new Set<string>();
-    for (const item of animasuItems) {
-      const baseRow = mapAnimasuItemToCatalogRow(item);
-      const normKey = normalizeSearchSpaced(item.title);
-      if (normKey) seenTitleKeys.add(normKey);
-      const matchD1 = normKey ? d1ByNorm.get(normKey) : undefined;
-      if (matchD1) {
-        const altKey = normalizeSearchSpaced(String(matchD1.title_alt || ''));
-        if (altKey) seenTitleKeys.add(altKey);
-        merged.push({
-          ...matchD1,
-          slug: item.slug,
-          source: 'animasu',
-          source_url: item.url,
-          poster_url: item.poster_url || matchD1.poster_url,
-          episodes_total: item.episodes_total > 0 ? item.episodes_total : matchD1.episodes_total,
-        });
-      } else {
-        merged.push(baseRow);
-      }
-    }
-
     for (const row of shapedD1) {
       const k = normalizeSearchSpaced(String(row.title || ''));
       const ka = normalizeSearchSpaced(String(row.title_alt || ''));
@@ -728,7 +697,7 @@ catalogRoutes.get(
     return c.json({
       status: 'ok',
       query: q,
-      search_source: animasuItems.length > 0 ? 'animasu_primary' : shapedD1.length > 0 ? 'd1_fallback' : 'anilist_fallback',
+      search_source: merged.length > 0 ? 'd1_primary' : 'anilist_fallback',
       resolution_mode: 'CLIENT_CASCADE_MKV',
       data: merged,
       metadata: anilistFallback,

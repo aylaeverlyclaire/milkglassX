@@ -1,10 +1,9 @@
 package id.my.milkglass.source
 
 import android.content.Context
-import android.content.SharedPreferences
+import id.my.milkglass.net.DiskCachedJsonStore
 import id.my.milkglass.MilkglassEndpoints
 import id.my.milkglass.net.IsolatedHttpClients
-import okhttp3.Request
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.net.URI
@@ -23,16 +22,21 @@ class RemoteRulesStore(
     private val clients: IsolatedHttpClients,
     private val rulesUrl: String = "${MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL}/v1/catalog/rules"
 ) {
-    private val prefs: SharedPreferences? = context?.applicationContext
-        ?.getSharedPreferences("milkglass_remote_rules_v1", Context.MODE_PRIVATE)
+    private val diskCache = DiskCachedJsonStore(
+        context = context,
+        prefsName = "milkglass_remote_rules_v1",
+        ttlMs = RULES_TTL_MS,
+        maxDiskAgeMs = MAX_DISK_AGE_MS,
+        maxPayloadBytes = MAX_MANIFEST_BYTES
+    )
 
     private val rules = ConcurrentHashMap<SourcePriority, SourceRuleEntry>()
 
-    @Volatile private var lastSyncedAtMs: Long = 0L
-    @Volatile private var lastEtag: String? = null
-
     init {
-        loadFromDisk()
+        diskCache.loadCached()?.let { raw ->
+            val parsed = parseManifest(raw)
+            if (parsed.isNotEmpty()) rules.putAll(parsed)
+        }
     }
 
     fun baseUrlFor(source: SourcePriority): String? = rules[source]?.baseUrl
@@ -45,63 +49,14 @@ class RemoteRulesStore(
     fun selectorFor(source: SourcePriority, key: String, default: String): String =
         rules[source]?.selectors?.get(key) ?: default
 
-    fun refreshIfNeeded(force: Boolean = false): Boolean {
-        val now = System.currentTimeMillis()
-        if (!force && lastSyncedAtMs > 0L && (now - lastSyncedAtMs) < RULES_TTL_MS) {
-            return false
-        }
-        val reqBuilder = Request.Builder()
-            .url(rulesUrl)
-            .header("Accept", "application/json")
-        lastEtag?.takeIf { it.isNotBlank() }?.let { reqBuilder.header("If-None-Match", it) }
-
-        return runCatching {
-            clients.apiClient.newCall(reqBuilder.build()).execute().use { resp ->
-                if (resp.code == 304) {
-                    lastSyncedAtMs = now
-                    prefs?.edit()?.putLong("ts", now)?.apply()
-                    return@use true
-                }
-                if (!resp.isSuccessful) return@use false
-                val raw = resp.body?.string().orEmpty()
-                if (raw.length > MAX_MANIFEST_BYTES) return@use false
-                val parsed = parseManifest(raw)
-                if (parsed.isEmpty()) return@use false
-
-                rules.clear()
-                rules.putAll(parsed)
-                val newEtag = resp.header("ETag")?.trim()?.takeIf { it.isNotBlank() }
-                if (newEtag != null) lastEtag = newEtag
-                lastSyncedAtMs = now
-                saveToDisk(raw, newEtag, now)
-                true
-            }
-        }.getOrDefault(false)
-    }
-
-    private fun saveToDisk(rawJson: String, etag: String?, ts: Long) {
-        val p = prefs ?: return
-        runCatching {
-            p.edit()
-                .putLong("ts", ts)
-                .putString("json", rawJson)
-                .apply { if (etag != null) putString("etag", etag) }
-                .apply()
-        }
-    }
-
-    private fun loadFromDisk() {
-        val p = prefs ?: return
-        val ts = p.getLong("ts", 0L)
-        val raw = p.getString("json", null) ?: return
-        if (System.currentTimeMillis() - ts > MAX_DISK_AGE_MS) return
-        val parsed = parseManifest(raw)
-        if (parsed.isNotEmpty()) {
+    fun refreshIfNeeded(force: Boolean = false): Boolean =
+        diskCache.refreshIfNeeded(clients.apiClient, rulesUrl, force) { raw ->
+            val parsed = parseManifest(raw)
+            if (parsed.isEmpty()) return@refreshIfNeeded false
+            rules.clear()
             rules.putAll(parsed)
-            lastSyncedAtMs = ts
-            lastEtag = p.getString("etag", null)
+            true
         }
-    }
 
     companion object {
         private const val RULES_TTL_MS = 6L * 60L * 60L * 1000L

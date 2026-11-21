@@ -1,7 +1,7 @@
 package id.my.milkglass
 
 import android.content.Context
-import android.content.SharedPreferences
+import id.my.milkglass.net.DiskCachedJsonStore
 import id.my.milkglass.auth.AuthBearerInterceptor
 import id.my.milkglass.auth.SessionTokenStore
 import id.my.milkglass.auth.SynchronizedTokenAuthenticator
@@ -68,100 +68,65 @@ class SourceConfigStore(
     private val clients: IsolatedHttpClients,
     private val backendBaseUrl: String = MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL
 ) {
-    private val prefs: SharedPreferences? = context?.applicationContext
-        ?.getSharedPreferences("milkglass_source_config", Context.MODE_PRIVATE)
+    private val diskCache = DiskCachedJsonStore(
+        context = context,
+        prefsName = "milkglass_source_config_v2",
+        ttlMs = CONFIG_TTL_MS,
+        maxDiskAgeMs = CONFIG_TTL_MS * 4L
+    )
 
     private val urls = ConcurrentHashMap<SourcePriority, String>()
 
     @Volatile
-    private var lastSyncedAtMs: Long = 0L
-
-    @Volatile
-    private var lastEtag: String? = null
+    private var dynamicOrder: List<SourcePriority> = SourcePriority.entries
 
     init {
         SourcePriority.entries.forEach { urls[it] = it.defaultBaseUrl }
-        loadFromDisk()
+        diskCache.loadCached()?.let { applyRawJson(it) }
     }
 
     fun baseUrlFor(source: SourcePriority): String = urls[source] ?: source.defaultBaseUrl
 
+    fun orderedSources(): List<SourcePriority> = dynamicOrder
+
     fun snapshot(): Map<SourcePriority, String> = urls.toMap()
 
-    fun refreshIfNeeded(force: Boolean = false): Boolean {
-        val now = System.currentTimeMillis()
-        if (!force && lastSyncedAtMs > 0L && (now - lastSyncedAtMs) < CONFIG_TTL_MS) {
-            return false
-        }
-        val reqBuilder = Request.Builder()
-            .url("${backendBaseUrl.trimEnd('/')}/v1/catalog/sources")
-            .header("Accept", "application/json")
-        lastEtag?.takeIf { it.isNotBlank() }?.let { reqBuilder.header("If-None-Match", it) }
-        return runCatching {
-            clients.mediaAndApiClient.newCall(reqBuilder.build()).execute().use { resp ->
-                if (resp.code == 304) {
-                    lastSyncedAtMs = now
-                    return@use true
-                }
-                if (!resp.isSuccessful) return@use false
-                val raw = resp.body?.string().orEmpty()
-                val parsed = parseSourcesJson(raw)
-                if (parsed.isEmpty()) return@use false
-                parsed.forEach { (k, v) -> urls[k] = v }
-                resp.header("ETag")?.takeIf { it.isNotBlank() }?.let { lastEtag = it }
-                lastSyncedAtMs = now
-                saveToDisk(parsed, now)
-                true
-            }
-        }.getOrDefault(false)
+    private fun applyRawJson(raw: String): Boolean {
+        val parsed = parseSourcesJson(raw)
+        if (parsed.isEmpty()) return false
+        parsed.forEach { (k, v) -> urls[k] = v }
+        val serverOrder = parsed.keys.toList()
+        val missing = SourcePriority.entries.filterNot { it in serverOrder }
+        dynamicOrder = serverOrder + missing
+        return true
     }
 
-    private fun saveToDisk(map: Map<SourcePriority, String>, ts: Long) {
-        val p = prefs ?: return
-        runCatching {
-            val obj = JSONObject()
-            map.forEach { (k, v) -> obj.put(k.id, v) }
-            p.edit()
-                .putLong("ts", ts)
-                .putString("urls", obj.toString())
-                .apply()
-        }
-    }
-
-    private fun loadFromDisk() {
-        val p = prefs ?: return
-        val ts = p.getLong("ts", 0L)
-        val raw = p.getString("urls", null) ?: return
-        if (System.currentTimeMillis() - ts > CONFIG_TTL_MS * 4L) return
-        runCatching {
-            val obj = JSONObject(raw)
-            SourcePriority.entries.forEach { src ->
-                val v = obj.optString(src.id).trim().trimEnd('/')
-                if (v.startsWith("https://")) {
-                    urls[src] = v
-                }
-            }
-            lastSyncedAtMs = ts
-        }
-    }
+    fun refreshIfNeeded(force: Boolean = false): Boolean =
+        diskCache.refreshIfNeeded(
+            client = clients.mediaAndApiClient,
+            url = "${backendBaseUrl.trimEnd('/')}/v1/catalog/sources",
+            force = force,
+            onBody = ::applyRawJson
+        )
 
     companion object {
         private const val CONFIG_TTL_MS = 6L * 60L * 60L * 1000L
 
-
-
         fun parseSourcesJson(json: String): Map<SourcePriority, String> {
             val root = runCatching { JSONObject(json) }.getOrNull() ?: return emptyMap()
             val arr = root.optJSONArray("sources") ?: return emptyMap()
-            val out = linkedMapOf<SourcePriority, String>()
+            val ranked = mutableListOf<Triple<Int, SourcePriority, String>>()
             for (i in 0 until arr.length()) {
                 val item = arr.optJSONObject(i) ?: continue
                 val id = item.optString("id").trim().lowercase()
                 val baseUrl = item.optString("base_url").trim().trimEnd('/')
                 if (!RemoteRulesStore.isSafeSourceBaseUrl(baseUrl)) continue
                 val src = SourcePriority.entries.firstOrNull { it.id == id } ?: continue
-                out[src] = baseUrl
+                val rank = item.optInt("rank", i + 1)
+                ranked.add(Triple(rank, src, baseUrl))
             }
+            val out = linkedMapOf<SourcePriority, String>()
+            ranked.sortedBy { it.first }.forEach { (_, src, url) -> out[src] = url }
             return out
         }
     }
@@ -228,6 +193,7 @@ class EngineRuntime private constructor(private val appContext: Context) {
             clients = clients,
             slugCache = slugCache,
             baseUrlProvider = { resolveSourceBaseUrl(it) },
+            sourceOrderProvider = { sourceConfig.orderedSources() },
             indexLookup = { source, title -> availabilityIndex.lookupBestUrl(source, title) },
             remoteHtmlFetcher = { url -> fetchRemoteHtml(url) },
             onAllSourcesFailed = { triggerSourceConfigRecovery() },
