@@ -15,12 +15,15 @@ import id.my.milkglass.source.OploverzSourceProvider
 import id.my.milkglass.source.AnimasuSourceProvider
 import id.my.milkglass.source.OtakudesuSourceProvider
 import id.my.milkglass.source.RawMkvCandidate
+import id.my.milkglass.source.ResolutionConsolidator
 import id.my.milkglass.source.ResolvedMkvMedia
 import id.my.milkglass.source.SamehadakuSourceProvider
 import id.my.milkglass.source.SourcePriority
 import id.my.milkglass.source.SourceSlugCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
@@ -117,6 +120,7 @@ class StreamResolver(
     private val hintExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "milkglass-hint").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
     }
+    private val consolidator = ResolutionConsolidator(clients, slugCache, sourceBaseUrls)
     private val hintReportedAt = ConcurrentHashMap<String, Long>()
     /**
      * Laporkan URL direct yang mati (403/404/410) secara asinkron agar Edge/D1 segera mengeviksi.
@@ -178,18 +182,20 @@ class StreamResolver(
         val title = cacheKey.substringBeforeLast('#', "").trim()
         val ep = cacheKey.substringAfterLast('#', "").toIntOrNull() ?: return
         if (title.length < 2 || ep <= 0) return
-        val last = hintReportedAt[cacheKey]
+        val reportSignature = "${cacheKey}#${candidates.map { "${it.source.id}:${it.quality.label}" }.distinct().sorted().joinToString(",")}"
+        val last = hintReportedAt[reportSignature]
         if (last != null && now - last < 30L * 60L * 1000L) return
-        if (hintReportedAt.size > 64) hintReportedAt.clear()
-        hintReportedAt[cacheKey] = now
+        if (hintReportedAt.size > 96) hintReportedAt.clear()
+        hintReportedAt[reportSignature] = now
         hintExecutor.execute {
             runCatching {
                 val arr = JSONArray()
-                candidates.filter { !it.isBatchArchive }.take(8).forEach { c ->
+                candidates.filter { !it.isBatchArchive }.take(12).forEach { c ->
                     arr.put(
                         JSONObject().put("source", c.source.id).put("quality", c.quality.label)
                             .put("hoster", c.hosterLabel.take(40)).put("raw_url", c.rawUrl)
                             .put("referer", c.pageReferer)
+                            .put("container", c.container.name)
                     )
                 }
                 if (arr.length() == 0) return@runCatching
@@ -616,6 +622,14 @@ class StreamResolver(
         resolvedCache.keys.removeIf { it.startsWith(prefix) }
     }
 
+    fun resolveConsolidatedMp4Candidates(title: String, episode: Int, quality: MkvQuality): List<ResolvedMkvMedia> {
+        val raw = consolidator.getConsolidatedCandidates(title, episode)
+        if (raw.isEmpty()) return emptyList()
+        val mp4Raw = raw.filter { !it.isBatchArchive && (it.container == MediaContainer.MP4 || it.rawUrl.contains(".mp4", ignoreCase = true)) }
+        if (mp4Raw.isEmpty()) return emptyList()
+        return cascadeResolver.resolveFromRaw(mp4Raw, quality, preferCompatibleContainer = true)
+    }
+
     fun cachedCandidatesFor(slug: String, quality: MkvQuality): List<ResolvedMkvMedia> {
         val nowMs = System.currentTimeMillis()
         val stdKey = "${slug.lowercase()}#${quality.label}#std"
@@ -756,6 +770,23 @@ class StreamResolver(
             if (joinedEntry != null) return startFromEntry(joinedEntry, scope)
         }
 
+        val consolidatedRaw = consolidator.getConsolidatedCandidates(searchTitle, episodeNum)
+        if (consolidatedRaw.any { it.quality == preferredQuality }) {
+            val fromConsolidated = cascadeResolver.resolveFromRaw(
+                raw = consolidatedRaw,
+                preferredQuality = preferredQuality,
+                preferCompatibleContainer = preferCompatibleContainer
+            )
+            if (fromConsolidated.isNotEmpty()) {
+                val mergedQuals = (consolidatedRaw.map { it.quality } + fromConsolidated.map { it.quality }).distinct().sortedByDescending { it.height }
+                val entry = cacheEntryFor(fromConsolidated, mergedQuals)
+                if (resolvedCache.size > 32) resolvedCache.clear()
+                resolvedCache[sessionCacheKey] = entry
+                reportDirect(searchTitle, episodeNum, fromConsolidated)
+                return startFromEntry(entry, scope)
+            }
+        }
+
         val altTitle = if (searchTitle == romajiTitle) title else romajiTitle
         val outcome = raceResolve(
             searchTitle = searchTitle,
@@ -803,6 +834,58 @@ class StreamResolver(
             candidates = candidates,
             closeSession = {}
         )
+    }
+
+    /**
+     * Fase 2 (Non-blocking): Konsolidasi resolusi lintas source setelah video mulai diputar.
+     * Menunggu buffering awal reda terlebih dahulu agar tidak merebut bandwidth playback.
+     */
+    fun enrichAvailableResolutionsAsync(
+        slug: String,
+        title: String,
+        romajiTitle: String,
+        currentResolutions: List<String>,
+        scope: CoroutineScope,
+        onResolutionsUpdated: (List<String>) -> Unit
+    ): Job = scope.launch(Dispatchers.IO) {
+        val episodeNum = extractEpisodeNumber(slug)
+        val searchTitle = romajiTitle.ifBlank { title }.ifBlank {
+            slug.replace(Regex("-ep-\\d+$", RegexOption.IGNORE_CASE), "").replace('-', ' ')
+        }
+        if (searchTitle.isBlank() || episodeNum <= 0) return@launch
+        val existingQualities = currentResolutions.mapNotNull { MkvQuality.fromText(it) }.toSet()
+
+        // Beri prioritas penuh pada buffering awal pemutaran (maks 4 detik tunggu)
+        var waitedMs = 0L
+        while (id.my.milkglass.player.PlayerManager.isVideoBuffering.value && waitedMs < 4_000L) {
+            delay(250L)
+            waitedMs += 250L
+        }
+
+        val existingSourceId = resolvedCache.entries
+            .firstOrNull { it.key.startsWith("${slug.lowercase()}#") }
+            ?.value?.resolvedSourceId
+        runCatching {
+            consolidator.consolidateInBackground(
+                animeTitle = searchTitle,
+                episodeNumber = episodeNum,
+                existingQualities = existingQualities,
+                excludeSourceId = existingSourceId,
+                onMergedHints = { key, hints -> reportHint(key, hints) },
+                onQualitiesUpdated = { mergedQualities ->
+                    val labels = mergedQualities.map { it.label }
+                    if (labels.isNotEmpty()) {
+                        val slugPrefix = "${slug.lowercase()}#"
+                        for ((k, entry) in resolvedCache.entries) {
+                            if (k.startsWith(slugPrefix)) {
+                                resolvedCache[k] = entry.copy(availableResolutions = labels)
+                            }
+                        }
+                        onResolutionsUpdated(labels)
+                    }
+                }
+            )
+        }
     }
 
     fun extractEpisodeNumber(slug: String): Int {

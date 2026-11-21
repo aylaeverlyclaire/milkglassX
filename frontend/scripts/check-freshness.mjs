@@ -7,7 +7,8 @@ export function evaluateStatus(data, minTotal) {
     const h = data.age_sec == null ? null : (data.age_sec / 3600).toFixed(1);
     problems.push(h === null ? 'katalog belum pernah disinkron' : `katalog basi: impor terakhir ${h} jam lalu (batas ${(data.stale_after_sec / 3600).toFixed(0)} jam)`);
   }
-  if (!(data.total >= minTotal)) problems.push(`judul terlalu sedikit: ${data.total} < ${minTotal}`);
+  const totalCount = typeof data.total_catalog === 'number' ? data.total_catalog : data.total;
+  if (!(totalCount >= minTotal)) problems.push(`judul terlalu sedikit: ${totalCount} < ${minTotal}`);
   return problems;
 }
 
