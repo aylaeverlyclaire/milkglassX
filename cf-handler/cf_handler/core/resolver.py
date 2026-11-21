@@ -60,9 +60,32 @@ BLACKLIST_HOSTS = (
     "trakteer.id",
 )
 
+DEFAULT_SOURCE_ORDER: Tuple[str, ...] = (
+    "samehadaku",
+    "oploverz",
+    "nontonanimeid",
+    "otakudesu",
+    "animasu",
+)
+
 _RESOLVE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _RESOLVE_LOCKS: Dict[str, asyncio.Lock] = {}
 _CACHE_TTL_SEC = 900.0
+
+
+def parse_source_order(raw: Optional[str]) -> List[str]:
+    if not raw or not raw.strip():
+        return list(DEFAULT_SOURCE_ORDER)
+    valid = set(DEFAULT_SOURCE_ORDER)
+    ordered: List[str] = []
+    for token in raw.split(","):
+        sid = token.strip().lower()
+        if sid in valid and sid not in ordered:
+            ordered.append(sid)
+    for fallback in DEFAULT_SOURCE_ORDER:
+        if fallback not in ordered:
+            ordered.append(fallback)
+    return ordered
 
 
 class _AnchorIframeParser(HTMLParser):
@@ -495,8 +518,16 @@ async def resolve_split_plane(
     preferred_quality: str,
     source_urls: Dict[str, str],
     cf_handler: Any = None,
+    source_order: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    cache_key = f"{title.strip().lower()}#{ep}#{preferred_quality.lower()}"
+    effective_order = source_order if source_order else list(DEFAULT_SOURCE_ORDER)
+    ordered = [
+        (sid, source_urls[sid])
+        for sid in effective_order
+        if sid in source_urls and source_urls[sid].startswith("https://")
+    ]
+    order_sig = ",".join(sid for sid, _ in ordered)
+    cache_key = f"{title.strip().lower()}#{ep}#{preferred_quality.lower()}#{order_sig}"
     now = time.time()
     cached = _RESOLVE_CACHE.get(cache_key)
     if cached and (now - cached[0]) <= _CACHE_TTL_SEC:
@@ -510,18 +541,13 @@ async def resolve_split_plane(
 
         directs: List[Dict[str, Any]] = []
         ip_locked: List[Dict[str, Any]] = []
-        ordered = [
-            (sid, source_urls[sid])
-            for sid in ("animasu", "otakudesu", "samehadaku", "oploverz")
-            if sid in source_urls and source_urls[sid].startswith("https://")
-        ]
 
         async with AsyncSession(impersonate="chrome124") as session:
             for sid, burl in ordered:
                 d_list, lock_list = await _resolve_from_source(session, sid, burl, title, ep, cf_handler)
                 directs.extend(d_list)
                 ip_locked.extend(lock_list)
-                if directs or (sid == "animasu" and ip_locked):
+                if directs or ip_locked:
                     break
 
         q_rank = {preferred_quality.lower(): 0, "1080p": 1, "720p": 2, "480p": 3, "360p": 4}
@@ -537,6 +563,8 @@ async def resolve_split_plane(
         }
         if len(_RESOLVE_CACHE) > 256:
             _RESOLVE_CACHE.clear()
+            for k in [k for k, lk in list(_RESOLVE_LOCKS.items()) if k != cache_key and not lk.locked()]:
+                _RESOLVE_LOCKS.pop(k, None)
         if directs or ip_locked:
             _RESOLVE_CACHE[cache_key] = (time.time(), payload)
         return payload
