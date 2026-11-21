@@ -8,7 +8,7 @@ plugins {
 
 android {
     namespace = "id.my.milkglass"
-    compileSdk = 36
+    compileSdk = 37
     defaultConfig {
         minSdk = 26
         consumerProguardFiles("consumer-rules.pro")
