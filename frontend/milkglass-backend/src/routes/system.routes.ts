@@ -7,8 +7,6 @@ import { AppBindings } from '../index';
 export const systemRoutes = new Hono<{ Bindings: AppBindings }>();
 
 const DEFAULT_TELEMETRY_REPO = 'aylaeverlyclaire/milkglassX';
-const CRASH_ISSUE_DEDUP_SEC = 6 * 3600;
-const PERF_ISSUE_DEDUP_SEC = 24 * 3600;
 
 systemRoutes.get('/health', (c) => {
   return c.json({
@@ -154,7 +152,6 @@ async function dispatchGitHubCrashIssue(
 
 systemRoutes.post(
   '/crash-report',
-  rateLimit(10, 60),
   zValidatorJson(crashReportSchema),
   async (c) => {
     const report = c.req.valid('json');
@@ -195,25 +192,10 @@ systemRoutes.post(
 
     let issueScheduled = false;
     if (c.env.GITHUB_TELEMETRY_TOKEN?.trim()) {
-      try {
-        const recentIssue = await c.env.DB.prepare(
-          `SELECT id FROM crash_reports
-           WHERE fingerprint = ?1 AND github_issue_url != '' AND created_at >= ?2
-           LIMIT 1`
-        )
-          .bind(fingerprint, nowSec - CRASH_ISSUE_DEDUP_SEC)
-          .first<{ id: number }>()
-          .catch(() => null);
-
-        if (!recentIssue) {
-          issueScheduled = true;
-          c.executionCtx.waitUntil(
-            dispatchGitHubCrashIssue(c.env, report, fingerprint, reportId)
-          );
-        }
-      } catch {
-        // Non-fatal
-      }
+      issueScheduled = true;
+      c.executionCtx.waitUntil(
+        dispatchGitHubCrashIssue(c.env, report, fingerprint, reportId)
+      );
     }
 
     return c.json({
@@ -301,7 +283,6 @@ async function dispatchGitHubPerfIssue(
 
 systemRoutes.post(
   '/perf-report',
-  rateLimit(10, 60),
   zValidatorJson(perfReportSchema),
   async (c) => {
     const report = c.req.valid('json');
@@ -344,25 +325,10 @@ systemRoutes.post(
 
     let issueScheduled = false;
     if (!report.is_stable && c.env.GITHUB_TELEMETRY_TOKEN?.trim()) {
-      try {
-        const recentIssue = await c.env.DB.prepare(
-          `SELECT id FROM perf_reports
-           WHERE device_key = ?1 AND version_code = ?2 AND github_issue_url != '' AND created_at >= ?3
-           LIMIT 1`
-        )
-          .bind(deviceKey, report.version_code, nowSec - PERF_ISSUE_DEDUP_SEC)
-          .first<{ id: number }>()
-          .catch(() => null);
-
-        if (!recentIssue) {
-          issueScheduled = true;
-          c.executionCtx.waitUntil(
-            dispatchGitHubPerfIssue(c.env, report, deviceKey, reportId)
-          );
-        }
-      } catch {
-        // Non-fatal
-      }
+      issueScheduled = true;
+      c.executionCtx.waitUntil(
+        dispatchGitHubPerfIssue(c.env, report, deviceKey, reportId)
+      );
     }
 
     return c.json({
