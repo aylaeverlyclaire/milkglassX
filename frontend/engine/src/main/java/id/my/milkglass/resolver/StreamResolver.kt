@@ -49,7 +49,7 @@ data class LocalStreamSession(
     val expectedSizeBytes: Long,
     val availableResolutions: List<String> = listOf("1080p", "720p", "480p"),
     val activeResolution: String = "1080p",
-    val resolvedSourceId: String = "animasu",
+    val resolvedSourceId: String = SourcePriority.SAMEHADAKU.id,
     val resolvedHoster: String = "Pixeldrain",
     val isHls: Boolean = false,
     val headers: Map<String, String> = emptyMap(),

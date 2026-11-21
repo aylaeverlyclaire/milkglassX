@@ -656,20 +656,98 @@ catalogRoutes.get(
         .all<Record<string, unknown>>();
     };
     // D1-first instant search (<50ms): hindari memblokir pencarian pada scraping situs eksternal.
-    const d1Animes = await queryD1Search();
+    const scrapeSourceSearch = async (
+      sourceId: 'samehadaku' | 'otakudesu',
+      baseUrl: string
+    ): Promise<Array<Record<string, unknown>>> => {
+      const root = baseUrl.trim().replace(/\/+$/, '');
+      if (!root.startsWith('https://')) return [];
+      try {
+        const resp = await fetch(`${root}/?s=${encodeURIComponent(q)}&post_type=anime`, {
+          method: 'GET',
+          headers: {
+            Accept: 'text/html,application/xhtml+xml,*/*',
+            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8',
+            Referer: `${root}/`,
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          },
+          signal: AbortSignal.timeout(2_200),
+        });
+        if (!resp.ok) return [];
+        const html = await resp.text();
+        const items: Array<Record<string, unknown>> = [];
+        const seenUrls = new Set<string>();
+        const re =
+          sourceId === 'otakudesu'
+            ? /<h2[^>]*>\s*<a[^>]+href="(https?:\/\/[^"]+\/anime\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
+            : /<a[^>]+href="(https?:\/\/[^"]+\/anime\/[^"]+)"[^>]*title="([^"]+)"/gi;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(html)) !== null && items.length < 12) {
+          const url = m[1].trim();
+          const rawTitle = m[2]
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&#8211;|&ndash;/gi, '-')
+            .replace(/\(Episode[^)]*\)/gi, '')
+            .replace(/\b(?:Subtitle Indonesia|Sub Indo|BD)\b/gi, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!url || !rawTitle || seenUrls.has(url)) continue;
+          seenUrls.add(url);
+          let hash = 2166136261;
+          const seed = `${sourceId}:${url.toLowerCase()}`;
+          for (let i = 0; i < seed.length; i++) {
+            hash ^= seed.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+          }
+          const stableId = 900_000_000 + ((hash >>> 0) % 999_999_999);
+          items.push({
+            id: stableId,
+            mal_id: null,
+            source: sourceId,
+            source_url: url,
+            title: rawTitle,
+            title_alt: rawTitle,
+            score: 0,
+            type: 'TV',
+            status: 1,
+            schedule_day: 0,
+            duration: '24 min',
+            studio: sourceId === 'samehadaku' ? 'Samehadaku' : 'Otakudesu',
+            release_season: '-',
+            poster_url: '',
+            popularity: 0,
+            updated_at: Math.floor(Date.now() / 1000),
+            genres: [],
+            episodes_total: 12,
+            next_airing_at: 0,
+            next_airing_ep: 0,
+          });
+        }
+        return items;
+      } catch {
+        return [];
+      }
+    };
+
+    const rdb = readDb(c.env);
+    const [d1Animes, sourceUrls] = await Promise.all([
+      queryD1Search(),
+      getSourceBaseUrls(rdb),
+    ]);
     let d1Rows = d1Animes.results ?? [];
-    if (d1Rows.length < 8) {
-      const { results: livePool } = await readDb(c.env)
+    if (d1Rows.length < 12) {
+      const { results: fullPool } = await rdb
         .prepare(
           `SELECT ${LIST_COLUMNS}, title_native, synonyms_json
            FROM animes
-           WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))
-           ORDER BY popularity DESC
-           LIMIT 600`
+           ORDER BY has_live_source DESC, popularity DESC
+           LIMIT 1000`
         )
         .all<Record<string, unknown>>();
       const seenIds = new Set(d1Rows.map((r) => r.id));
-      const scored = (livePool ?? [])
+      const scored = (fullPool ?? [])
         .filter((r) => !seenIds.has(r.id))
         .map((r) => ({ row: r, score: scoreMultilingualRow(qSpaced, qCompact, r) }))
         .filter((x) => x.score > 0)
@@ -679,14 +757,25 @@ catalogRoutes.get(
       d1Rows = [...d1Rows, ...scored];
     }
 
+    const [sameLive, otakuLive] = await Promise.allSettled([
+      scrapeSourceSearch('samehadaku', sourceUrls.samehadaku),
+      scrapeSourceSearch('otakudesu', sourceUrls.otakudesu),
+    ]);
+    const liveRows: Array<Record<string, unknown>> = [
+      ...(sameLive.status === 'fulfilled' ? sameLive.value : []),
+      ...(otakuLive.status === 'fulfilled' ? otakuLive.value : []),
+    ];
+
     const shapedD1 = shapeRows(d1Rows);
     const merged: Array<Record<string, unknown>> = [];
-    const seenTitleKeys = new Set<string>();
-    for (const row of shapedD1) {
-      const k = normalizeSearchSpaced(String(row.title || ''));
-      const ka = normalizeSearchSpaced(String(row.title_alt || ''));
-      if ((k && seenTitleKeys.has(k)) || (ka && seenTitleKeys.has(ka))) continue;
-      if (k) seenTitleKeys.add(k);
+    const seenCompactKeys = new Set<string>();
+    const compactKey = (s: unknown) => normalizeSearchSpaced(String(s || '')).replace(/\s+/g, '');
+    for (const row of [...shapedD1, ...liveRows]) {
+      const k = compactKey(row.title);
+      const ka = compactKey(row.title_alt);
+      if ((k && seenCompactKeys.has(k)) || (ka && seenCompactKeys.has(ka))) continue;
+      if (k) seenCompactKeys.add(k);
+      if (ka) seenCompactKeys.add(ka);
       merged.push(row);
       if (merged.length >= 30) break;
     }
@@ -697,7 +786,7 @@ catalogRoutes.get(
     return c.json({
       status: 'ok',
       query: q,
-      search_source: merged.length > 0 ? 'd1_primary' : 'anilist_fallback',
+      search_source: liveRows.length > 0 ? 'd1_and_live_sources' : merged.length > 0 ? 'd1_primary' : 'anilist_fallback',
       resolution_mode: 'CLIENT_CASCADE_MKV',
       data: merged,
       metadata: anilistFallback,

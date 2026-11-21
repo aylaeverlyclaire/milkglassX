@@ -263,6 +263,8 @@ internal object TitleMatcher {
             .toSet()
     }
 
+    private val trailingYearRegex = Regex("(?:19|20)\d{2}$")
+
     fun score(query: String, candidate: String): Double {
         val pq = parse(query)
         val pc = parse(candidate)
@@ -274,6 +276,19 @@ internal object TitleMatcher {
         var sc = inter / union
         if (pq.canonicalBase.length >= 3 && pc.canonicalBase.contains(pq.canonicalBase)) {
             sc += 0.25
+        }
+        // Toleran spasi, simbol, dan akhiran tahun rilis (mis. "HunterxHunter" == "Hunter x Hunter (2011)")
+        val qCompact = pq.canonicalBase.replace(" ", "")
+        val cCompact = pc.canonicalBase.replace(" ", "")
+        val qNoYear = trailingYearRegex.replace(qCompact, "")
+        val cNoYear = trailingYearRegex.replace(cCompact, "")
+        if (qCompact.length >= 4 && cCompact.length >= 4) {
+            when {
+                qCompact == cCompact || (qNoYear.length >= 4 && qNoYear == cNoYear) -> sc = maxOf(sc, 0.95)
+                cCompact.contains(qCompact) || qCompact.contains(cCompact) ||
+                    (qNoYear.length >= 4 && cNoYear.length >= 4 && (cNoYear.contains(qNoYear) || qNoYear.contains(cNoYear))) ->
+                    sc = maxOf(sc, 0.72)
+            }
         }
         if (pq.formatKind != pc.formatKind) {
             // Jangan tukar TV series dengan Movie / OVA / Special / Side Story
@@ -312,6 +327,8 @@ internal object TitleMatcher {
             out.add("$base Season ${p.season}")
             out.add("$base ${p.season}")
         }
+        val noYear = cleanFull.replace(Regex("\b(?:19|20)\d{2}\b"), " ").replace(whitespaceRegex, " ").trim()
+        if (noYear.isNotBlank() && noYear != cleanFull) out.add(noYear)
         if (cleanFull.isNotBlank()) out.add(cleanFull)
         if (beforeColon.isNotBlank()) out.add(beforeColon)
         if (base.isNotBlank()) out.add(base)
@@ -867,12 +884,33 @@ class SamehadakuSourceProvider(
         targetQualities: Set<MkvQuality>,
         existing: List<RawMkvCandidate>
     ): List<RawMkvCandidate> {
-        val options = epDoc.select("div.east_player_option[data-post], li div[data-post][data-nume]")
-        if (options.isEmpty()) return emptyList()
         val seenUrls = existing.mapTo(HashSet()) { it.rawUrl }
         val out = mutableListOf<RawMkvCandidate>()
+        // 1) Panen iframe default yang SUDAH ada di HTML awal (0 request AJAX tambahan)
+        for (ifr in epDoc.select("#player_embed iframe[src], .player-embed iframe[src], iframe[src]")) {
+            val src = ifr.absUrl("src").trim()
+            if (src.startsWith("http") && !HosterFilter.isBlacklisted("Embed", src) && seenUrls.add(src)) {
+                val q = MkvQuality.fromText(src) ?: MkvQuality.P1080
+                if (q in targetQualities) {
+                    out.add(
+                        RawMkvCandidate(
+                            source = priority,
+                            quality = q,
+                            hosterLabel = if (src.contains("icefile", ignoreCase = true)) "Icefile" else "SamehadakuEmbed",
+                            rawUrl = src,
+                            pageReferer = epUrl,
+                            container = MediaContainer.MKV
+                        )
+                    )
+                }
+            }
+        }
+        if (out.isNotEmpty()) return out
+
+        val options = epDoc.select("div.east_player_option[data-post], li div[data-post][data-nume]")
+        if (options.isEmpty()) return emptyList()
         for (opt in options) {
-            if (out.size >= 4) break
+            if (out.size >= 2) break
             val label = opt.text().trim()
             if (HosterFilter.isBlacklisted(label, label)) continue
             val postId = opt.attr("data-post").trim()
