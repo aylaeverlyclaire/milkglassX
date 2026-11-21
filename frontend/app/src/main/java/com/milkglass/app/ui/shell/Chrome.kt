@@ -85,23 +85,25 @@ fun NavBar(ctl: AppController, activeTab: String, onSelect: (String) -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         NAV_ITEMS.forEach { (name, outlined, filled) ->
-            val active = name == activeTab
-            Column(
-                Modifier.weight(1f).clickable(remember { MutableInteractionSource() }, null) { onSelect(name) },
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Box(
-                    Modifier.width(56.dp).height(32.dp).clip(RoundedCornerShape(16.dp))
-                        .then(if (active) Modifier.background(c.secondaryContainer) else Modifier),
-                    contentAlignment = Alignment.Center,
+            key(name) {
+                val active = name == activeTab
+                Column(
+                    Modifier.weight(1f).clickable(remember { MutableInteractionSource() }, null) { onSelect(name) },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    MilkIcon(if (active) filled else outlined, tint = if (active) c.onSecondaryContainer else c.onSurfaceVariant)
+                    Box(
+                        Modifier.width(56.dp).height(32.dp).clip(RoundedCornerShape(16.dp))
+                            .then(if (active) Modifier.background(c.secondaryContainer) else Modifier),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        MilkIcon(if (active) filled else outlined, tint = if (active) c.onSecondaryContainer else c.onSurfaceVariant)
+                    }
+                    MilkText(
+                        ctl.enumLabel("mainTab", name), Milk.type.navLabel,
+                        if (active) c.onSurface else c.onSurfaceVariant, maxLines = 1,
+                    )
                 }
-                MilkText(
-                    ctl.enumLabel("mainTab", name), Milk.type.navLabel,
-                    if (active) c.onSurface else c.onSurfaceVariant, maxLines = 1,
-                )
             }
         }
     }
@@ -269,9 +271,11 @@ private fun SheetBody(ctl: AppController, o: Overlay, vh: androidx.compose.ui.un
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         doc?.sections?.forEachIndexed { i, sct ->
-                            Column {
-                                MilkText("${i + 1}. ${sct.heading}", ty.subtitle, c.onSurface)
-                                MilkText(sct.body, ty.body, c.onSurfaceVariant)
+                            key(i, sct.heading) {
+                                Column {
+                                    MilkText("${i + 1}. ${sct.heading}", ty.subtitle, c.onSurface)
+                                    MilkText(sct.body, ty.body, c.onSurfaceVariant)
+                                }
                             }
                         }
                     }
@@ -279,11 +283,13 @@ private fun SheetBody(ctl: AppController, o: Overlay, vh: androidx.compose.ui.un
                 }
                 Overlay.QualityPicker -> {
                     ctl.availablePlayerQualities.forEach { q ->
-                        RadioRow(
-                            ctl.persisted.settings.quality == q,
-                            if (q == "Auto") tr.t("player.automatic") else q,
-                            if (q == "Auto") tr.t("player.adaptsToNetwork") else null,
-                        ) { ctl.setQuality(q) }
+                        key(q) {
+                            RadioRow(
+                                ctl.persisted.settings.quality == q,
+                                if (q == "Auto") tr.t("player.automatic") else q,
+                                if (q == "Auto") tr.t("player.adaptsToNetwork") else null,
+                            ) { ctl.setQuality(q) }
+                        }
                     }
                 }
                 is Overlay.EditField -> {
@@ -299,7 +305,9 @@ private fun SheetBody(ctl: AppController, o: Overlay, vh: androidx.compose.ui.un
                 }
                 is Overlay.SettingOptions -> {
                     listOf("system", "light", "dark").forEach { v ->
-                        RadioRow(ctl.persisted.settings.theme == v, ctl.enumLabel("theme", v), null) { ctl.chooseSettingOption(o.key, v) }
+                        key(v) {
+                            RadioRow(ctl.persisted.settings.theme == v, ctl.enumLabel("theme", v), null) { ctl.chooseSettingOption(o.key, v) }
+                        }
                     }
                 }
                 else -> Unit

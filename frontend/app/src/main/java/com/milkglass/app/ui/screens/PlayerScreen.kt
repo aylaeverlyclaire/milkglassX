@@ -39,6 +39,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -331,52 +332,13 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
             },
     ) {
 
-        val subLines by playerManager.subtitleLines.collectAsState()
-        val videoAspect by playerManager.videoAspectRatio.collectAsState()
-        Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
-            AndroidView(
-                factory = { ctx ->
-                    TextureView(ctx).also { tv ->
-                        playerManager.attachTextureView(tv)
-                    }
-                },
-                update = { tv ->
-                    playerManager.attachTextureView(tv)
-                },
-                onRelease = { tv -> playerManager.detachTextureView(tv) },
-                modifier = Modifier.fillMaxHeight().aspectRatio(videoAspect, matchHeightConstraintsFirst = true)
-            )
-        }
-        if (e.nativeStreamActive && subLines.isNotEmpty()) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(
-                        start = 16.dp,
-                        end = 16.dp,
-                        bottom = if (fullscreen) 28.dp else 10.dp  // grid-exempt: 10dp sengaja (kontrol pemutar)
-                    ),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                subLines.takeLast(3).forEach { line ->
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color.Black.copy(alpha = 0.52f))
-                            .padding(horizontal = 8.dp, vertical = 2.dp)
-                    ) {
-                        MilkText(
-                            text = line,
-                            style = ty.style(if (fullscreen) 16f else 12.5f, 600, if (fullscreen) 21f else 17f)
-                                .copy(shadow = Shadow(Color.Black, androidx.compose.ui.geometry.Offset(0f, 1.5f), 4f)),
-                            color = Color.White,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
-                    }
-                }
-            }
-        }
+        PlayerVideoSurface(playerManager)
+        PlayerSubtitleOverlay(
+            playerManager = playerManager,
+            active = e.nativeStreamActive,
+            fullscreen = fullscreen,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
         Box(
             Modifier.align(Alignment.TopCenter).fillMaxWidth().height(80.dp).graphicsLayer { this.alpha = alpha }
                 .background(cssLinearGradient(180f, listOf(Color.Black.copy(alpha = .4f), CssTransparent))),
@@ -443,44 +405,23 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
             }
         }
 
-        Box(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(96.dp)
-                .graphicsLayer { this.alpha = alpha }
-                .background(cssLinearGradient(180f, listOf(CssTransparent, Color.Black.copy(alpha = .75f))))
-                .pointerInput(e.faded) { if (!e.faded) detectTapGestures { } },
-        ) {
-            Row(Modifier.then(cutout).padding(start = 12.dp, end = 12.dp).offset(y = 24.dp).fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
-                val durLabel = if (e.duration > 0) ctl.time.formatDuration(e.duration.toDouble()) else "--:--"
-                MilkText("${ctl.time.formatDuration(if (e.duration > 0) e.position else 0.0)} / $durLabel", ty.style(12f, 400, mono = true), Color.White)
-                Spacer(Modifier.weight(1f))
-                Box(
-                    Modifier.height(32.dp).clip(RoundedCornerShape(16.dp))
-                        .background(Color.White.copy(alpha = .18f))
-                        .milkClickable(enabled = !e.faded, pressDim = false) { ctl.overlay = com.milkglass.app.core.app.Overlay.QualityPicker }
-                        .padding(horizontal = 12.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    val activeRes = playerManager.snapshot.collectAsState().value.activeResolution
-                    val qualityLabel = if (ctl.persisted.settings.quality == "Auto") "Otomatis · $activeRes" else activeRes
-                    MilkText(qualityLabel, ty.style(12f, 600), Color.White)
-                }
-                Box(
-                    Modifier.size(36.dp, 40.dp).clip(RoundedCornerShape(20.dp)).milkClickable(enabled = !e.faded, pressDim = false) { e.toggleFullscreen() },
-                    contentAlignment = Alignment.Center,
-                ) { MilkIcon(MilkIcons.Fs, size = 20.dp, tint = Color.White) }
-            }
-            SeekBar(e.position, e.duration, fullscreen, { e.seekTo(it) }, Modifier.then(cutout).padding(horizontal = 8.dp).offset(y = 60.dp).fillMaxWidth())
-        }
+        PlayerBottomControls(
+            ctl = ctl,
+            e = e,
+            playerManager = playerManager,
+            fullscreen = fullscreen,
+            alpha = alpha,
+            cutout = cutout,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
 
-        if (fullscreen && e.duration > 0) {
-            val frac = (e.position / e.duration).toFloat().coerceIn(0f, 1f)
-            Box(
-                Modifier.align(Alignment.BottomStart).fillMaxWidth().height(2.dp)
-                    .graphicsLayer { this.alpha = 1f - alpha }
-                    .background(Color.White.copy(alpha = .3f)),
-            ) {
-                Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(c.primary))
-            }
+        if (fullscreen) {
+            FullscreenProgressHairline(
+                e = e,
+                alpha = alpha,
+                primary = c.primary,
+                modifier = Modifier.align(Alignment.BottomStart)
+            )
         }
 
         if (e.inEnding && !e.hasEnded && e.noticeTimer <= 0 && !e.isOffline) {
@@ -521,6 +462,125 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun PlayerVideoSurface(playerManager: PlayerManager) {
+    val videoAspect by playerManager.videoAspectRatio.collectAsState()
+    Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+        AndroidView(
+            factory = { ctx ->
+                TextureView(ctx).also { tv ->
+                    playerManager.attachTextureView(tv)
+                }
+            },
+            update = { tv ->
+                playerManager.attachTextureView(tv)
+            },
+            onRelease = { tv -> playerManager.detachTextureView(tv) },
+            modifier = Modifier.fillMaxHeight().aspectRatio(videoAspect, matchHeightConstraintsFirst = true)
+        )
+    }
+}
+
+@Composable
+private fun PlayerSubtitleOverlay(
+    playerManager: PlayerManager,
+    active: Boolean,
+    fullscreen: Boolean,
+    modifier: Modifier = Modifier
+) {
+    if (!active) return
+    val subLines by playerManager.subtitleLines.collectAsState()
+    if (subLines.isEmpty()) return
+    val ty = Milk.type
+    Column(
+        modifier = modifier.padding(
+            start = 16.dp,
+            end = 16.dp,
+            bottom = if (fullscreen) 28.dp else 10.dp  // grid-exempt: 10dp sengaja (kontrol pemutar)
+        ),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        subLines.takeLast(3).forEachIndexed { idx, line ->
+            key(idx, line) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color.Black.copy(alpha = 0.52f))
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    MilkText(
+                        text = line,
+                        style = ty.style(if (fullscreen) 16f else 12.5f, 600, if (fullscreen) 21f else 17f)
+                            .copy(shadow = Shadow(Color.Black, androidx.compose.ui.geometry.Offset(0f, 1.5f), 4f)),
+                        color = Color.White,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerBottomControls(
+    ctl: AppController,
+    e: PlayerEngine,
+    playerManager: PlayerManager,
+    fullscreen: Boolean,
+    alpha: Float,
+    cutout: Modifier,
+    modifier: Modifier = Modifier
+) {
+    val ty = Milk.type
+    val activeRes = playerManager.snapshot.collectAsState().value.activeResolution
+    Box(
+        modifier.fillMaxWidth().height(96.dp)
+            .graphicsLayer { this.alpha = alpha }
+            .background(cssLinearGradient(180f, listOf(CssTransparent, Color.Black.copy(alpha = .75f))))
+            .pointerInput(e.faded) { if (!e.faded) detectTapGestures { } },
+    ) {
+        Row(Modifier.then(cutout).padding(start = 12.dp, end = 12.dp).offset(y = 24.dp).fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
+            val durLabel = if (e.duration > 0) ctl.time.formatDuration(e.duration.toDouble()) else "--:--"
+            MilkText("${ctl.time.formatDuration(if (e.duration > 0) e.position else 0.0)} / $durLabel", ty.style(12f, 400, mono = true), Color.White)
+            Spacer(Modifier.weight(1f))
+            Box(
+                Modifier.height(32.dp).clip(RoundedCornerShape(16.dp))
+                    .background(Color.White.copy(alpha = .18f))
+                    .milkClickable(enabled = !e.faded, pressDim = false) { ctl.overlay = com.milkglass.app.core.app.Overlay.QualityPicker }
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                val qualityLabel = if (ctl.persisted.settings.quality == "Auto") "Otomatis · $activeRes" else activeRes
+                MilkText(qualityLabel, ty.style(12f, 600), Color.White)
+            }
+            Box(
+                Modifier.size(36.dp, 40.dp).clip(RoundedCornerShape(20.dp)).milkClickable(enabled = !e.faded, pressDim = false) { e.toggleFullscreen() },
+                contentAlignment = Alignment.Center,
+            ) { MilkIcon(MilkIcons.Fs, size = 20.dp, tint = Color.White) }
+        }
+        SeekBar(e.position, e.duration, fullscreen, { e.seekTo(it) }, Modifier.then(cutout).padding(horizontal = 8.dp).offset(y = 60.dp).fillMaxWidth())
+    }
+}
+
+@Composable
+private fun FullscreenProgressHairline(
+    e: PlayerEngine,
+    alpha: Float,
+    primary: Color,
+    modifier: Modifier = Modifier
+) {
+    if (e.duration <= 0) return
+    val frac = (e.position / e.duration).toFloat().coerceIn(0f, 1f)
+    Box(
+        modifier.fillMaxWidth().height(2.dp)
+            .graphicsLayer { this.alpha = 1f - alpha }
+            .background(Color.White.copy(alpha = .3f)),
+    ) {
+        Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(primary))
     }
 }
 
@@ -654,32 +714,34 @@ private fun PlayerInfo(
             if (showQualityPicker && !dlStatus.isRunning) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     selectableQualities.forEach { q ->
-                        val qSaved = dlManager.getDownloadedFile(animeSlug, ep, q).let { it.exists() && it.length() > 1024L }
-                        MilkButton(
-                            text = if (qSaved) "${q.label} ✓" else q.label,
-                            onClick = {
-                                targetQuality = q
-                                showQualityPicker = false
-                                if (!qSaved) {
-                                    runCatching {
-                                        dlManager.enqueueEpisodeDownload(
-                                            MkvDownloadRequest(
-                                                animeSlug = animeSlug,
-                                                animeTitle = a.romaji.ifBlank { a.title },
-                                                episodeNumber = ep,
-                                                preferredQuality = q,
-                                                allowBatchFallback = false,
-                                                wifiOnly = ctl.persisted.settings.wifiOnlyDownloads != 0
+                        key(q.label) {
+                            val qSaved = dlManager.getDownloadedFile(animeSlug, ep, q).let { it.exists() && it.length() > 1024L }
+                            MilkButton(
+                                text = if (qSaved) "${q.label} ✓" else q.label,
+                                onClick = {
+                                    targetQuality = q
+                                    showQualityPicker = false
+                                    if (!qSaved) {
+                                        runCatching {
+                                            dlManager.enqueueEpisodeDownload(
+                                                MkvDownloadRequest(
+                                                    animeSlug = animeSlug,
+                                                    animeTitle = a.romaji.ifBlank { a.title },
+                                                    episodeNumber = ep,
+                                                    preferredQuality = q,
+                                                    allowBatchFallback = false,
+                                                    wifiOnly = ctl.persisted.settings.wifiOnlyDownloads != 0
+                                                )
                                             )
-                                        )
-                                    }.onFailure { err ->
-                                        ctl.showToast(err.message ?: "Gagal memulai unduhan MP4")
+                                        }.onFailure { err ->
+                                            ctl.showToast(err.message ?: "Gagal memulai unduhan MP4")
+                                        }
                                     }
-                                }
-                            },
-                            variant = if (q == targetQuality) ButtonVariant.Primary else ButtonVariant.Outlined,
-                            small = true
-                        )
+                                },
+                                variant = if (q == targetQuality) ButtonVariant.Primary else ButtonVariant.Outlined,
+                                small = true
+                            )
+                        }
                     }
                 }
             }

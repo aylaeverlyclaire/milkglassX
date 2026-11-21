@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
@@ -167,7 +168,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
                 )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        a.genres.forEach { g -> MilkBadge(ctl.enumLabel("genre", g), onClick = { ctl.searchByGenre(g) }) }
+                        a.genres.forEach { g -> key(g) { MilkBadge(ctl.enumLabel("genre", g), onClick = { ctl.searchByGenre(g) }) } }
                     }
                     MilkBadge(
                         statusText, statusKind,
@@ -210,7 +211,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
                     .background(c.surface),
             ) {
                 Row(Modifier.fillMaxWidth().height(48.dp)) {
-                    listOf("episodes", "similar").forEach { t ->
+                    listOf("episodes", "similar").forEach { t -> key(t) {
                         val active = t == ctl.detailTab
                         Box(
                             Modifier.weight(1f).height(48.dp)
@@ -223,7 +224,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
                                     .clip(RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp)).background(accent),
                             )
                         }
-                    }
+                    } }
                 }
                 Box(Modifier.fillMaxWidth().height(1.dp).background(c.outlineVariant))
             }
@@ -241,8 +242,10 @@ fun DetailScreen(ctl: AppController, id: Int) {
                     }
                     MilkCard(Modifier.padding(top = 8.dp)) {
                         eps.forEachIndexed { i, e ->
-                            if (i > 0) MilkDivider()
-                            EpisodeRow(ctl, a, e)
+                            key(e) {
+                                if (i > 0) MilkDivider()
+                                EpisodeRow(ctl, a, e)
+                            }
                         }
                     }
                 }
@@ -251,10 +254,12 @@ fun DetailScreen(ctl: AppController, id: Int) {
                     ctl.similarOf(a).chunked(2).forEach { row ->
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             row.forEach { b ->
-                                Column(Modifier.weight(1f).milkClickable { ctl.openDetail(b.id) }) {
-                                    PosterView(ctl.posterSpec(b, false), b, time.formatRating(b.rating), Modifier.fillMaxWidth())
-                                    Clamp1(b.romaji, ty.subtitle, c.onSurface, Modifier.padding(top = 8.dp).fillMaxWidth())
-                                    Clamp1(ctl.genreSummary(b), ty.caption, c.onSurfaceVariant, Modifier.fillMaxWidth())
+                                key(b.id) {
+                                    Column(Modifier.weight(1f).milkClickable { ctl.openDetail(b.id) }) {
+                                        PosterView(ctl.posterSpec(b, false), b, time.formatRating(b.rating), Modifier.fillMaxWidth())
+                                        Clamp1(b.romaji, ty.subtitle, c.onSurface, Modifier.padding(top = 8.dp).fillMaxWidth())
+                                        Clamp1(ctl.genreSummary(b), ty.caption, c.onSurfaceVariant, Modifier.fillMaxWidth())
+                                    }
                                 }
                             }
                             if (row.size == 1) Spacer(Modifier.weight(1f))
@@ -351,7 +356,7 @@ internal fun EpisodeStrip(ctl: AppController, a: Anime, eps: List<Int>, current:
         contentPadding = PaddingValues(horizontal = Gutter),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(eps) { e ->
+        items(eps, key = { it }) { e ->
             val isCurrent = e == current
             val watched = ctl.isWatched(a, e)
             val playable = ctl.episodeAccess(a, e) == Access.Ok
