@@ -44,6 +44,7 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import id.my.milkglass.EngineRuntime
+import PlayerManager
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.flow.first
 import com.milkglass.app.ui.common.ArtBackdrop
@@ -122,9 +123,9 @@ fun DetailScreen(ctl: AppController, id: Int) {
                 a.title, a.romaji, targetEp, ctl.persisted.settings.quality,
                 prebuffer = true,
                 prebufferHeadBytes = if (metered) {
-                    id.my.milkglass.player.PlayerManager.PREBUFFER_METERED_HEAD_BYTES
+                    PlayerManager.PREBUFFER_METERED_HEAD_BYTES
                 } else {
-                    id.my.milkglass.player.PlayerManager.PREBUFFER_HEAD_BYTES
+                    PlayerManager.PREBUFFER_HEAD_BYTES
                 },
             )
         }
