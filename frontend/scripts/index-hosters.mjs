@@ -275,6 +275,51 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
   const results = [];
   const seen = new Set();
 
+  // Prioritas 1: Panen embed streaming langsung (iframe player & mirror select base64)
+  const addEmbed = (rawUrl, label, qualityHint) => {
+    const href = unwrapShortenerUrl(String(rawUrl || '').trim().replace(/&amp;/g, '&'));
+    if (!href || !/^https?:\/\//i.test(href)) return;
+    if (/youtube\.com|youtu\.be|facebook\.com|disqus\.com|google\.com\/recaptcha|doubleclick|googlesyndication/i.test(href)) return;
+    if (isBlacklistedUrl(label || 'Embed', href)) return;
+    const quality = parseQuality(`${qualityHint || ''} ${label || ''} ${href}`) || '720p';
+    const dedupKey = `${quality}|${href}`;
+    if (seen.has(dedupKey)) return;
+    seen.add(dedupKey);
+    let hostLabel = label || 'Embed';
+    try { hostLabel = `Embed:${new URL(href).hostname.replace(/^www\./, '')}`; } catch {}
+    results.push({
+      url: href,
+      quality,
+      hoster: hostLabel.slice(0, 60),
+      provider,
+      container: 'mp4',
+      referer: pageUrl,
+      isEmbed: true,
+    });
+  };
+
+  const iframeRe = /<iframe[^>]+src=["'](https?:\/\/[^"']+)["'][^>]*>/gi;
+  let im;
+  while ((im = iframeRe.exec(html)) !== null) {
+    addEmbed(im[1], 'Embed', '');
+  }
+
+  const optRe = /<option[^>]+value=["']([^"']+)["'][^>]*>([\s\S]*?)<\/option>/gi;
+  let om;
+  while ((om = optRe.exec(html)) !== null) {
+    const val = om[1].trim();
+    const label = om[2].replace(/<[^>]+>/g, '').trim();
+    if (/^https?:\/\//i.test(val)) {
+      addEmbed(val, label, label);
+    } else if (/^[A-Za-z0-9+/=]{16,}$/.test(val)) {
+      try {
+        const decoded = Buffer.from(val, 'base64').toString('utf8');
+        const srcM = decoded.match(/src=["'](https?:\/\/[^"']+)["']/i);
+        if (srcM) addEmbed(srcM[1], label, label);
+      } catch {}
+    }
+  }
+
   const rowRe = /<(?:li|div[^>]*class="[^"]*soraurlx[^"]*")[^>]*>([\s\S]*?)<\/(?:li|div)>/gi;
   let rowMatch;
   while ((rowMatch = rowRe.exec(html)) !== null) {
@@ -331,7 +376,7 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     }
   }
 
-  results.sort((a, b) => hostReliabilityIndex(a.hoster, a.url) - hostReliabilityIndex(b.hoster, b.url));
+  results.sort((a, b) => (a.isEmbed ? 0 : 1) - (b.isEmbed ? 0 : 1) || hostReliabilityIndex(a.hoster, a.url) - hostReliabilityIndex(b.hoster, b.url));
   const byQuality = new Map();
   for (const item of results) {
     const arr = byQuality.get(item.quality) || [];
@@ -427,8 +472,11 @@ async function fetchText(url, referer = '', timeoutMs = 15000) {
 
   const cfHandler = (process.env.CF_HANDLER_URL || '').trim().replace(/\/+$/, '');
   if (!cfHandler) throw new Error(`Blocked fetching ${url}`);
+  const cfHeaders = { 'User-Agent': USER_AGENT, Accept: 'text/html,*/*' };
+  const cfToken = (process.env.CF_HANDLER_TOKEN || '').trim();
+  if (cfToken) cfHeaders['x-auth-token'] = cfToken;
   const proxyRes = await fetch(`${cfHandler}/fetch?url=${encodeURIComponent(url)}`, {
-    headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,*/*' },
+    headers: cfHeaders,
     signal: AbortSignal.timeout(timeoutMs + 10000),
   });
   if (!proxyRes.ok) throw new Error(`CF_HANDLER HTTP ${proxyRes.status} for ${url}`);
