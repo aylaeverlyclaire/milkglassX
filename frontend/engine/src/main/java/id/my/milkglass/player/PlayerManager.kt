@@ -592,9 +592,10 @@ class PlayerManager(
     ) {
         val playerInstance = exoPlayer ?: return
         val sharedOkHttp = EngineRuntime.get(appContext).clients.streamingClient
+        val httpProps = headers.filterKeys { !it.equals("User-Agent", ignoreCase = true) }
         val httpFactory = OkHttpDataSource.Factory(sharedOkHttp)
             .setUserAgent(headers["User-Agent"] ?: DEFAULT_USER_AGENT)
-            .setDefaultRequestProperties(headers)
+            .setDefaultRequestProperties(httpProps)
 
         val upstreamFactory = DefaultDataSource.Factory(appContext, httpFactory)
         val isLocalFile = mediaUrl.startsWith("file://", ignoreCase = true)

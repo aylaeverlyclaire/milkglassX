@@ -198,7 +198,15 @@ class EngineRuntime private constructor(private val appContext: Context) {
             remoteHtmlFetcher = { url -> fetchRemoteHtml(url) },
             onAllSourcesFailed = { triggerSourceConfigRecovery() },
             rawStore = rawCandidateStore,
-            onEpisodeResolved = { key, list -> hintSink?.invoke(key, list) }
+            onEpisodeResolved = { key, list -> hintSink?.invoke(key, list) },
+            embedSniffer = { url, referer ->
+                id.my.milkglass.extractor.EmbedMediaSniffer.sniff(
+                    context = appContext,
+                    embedUrl = url,
+                    pageReferer = referer,
+                    userAgent = clients.webViewUserAgent
+                )
+            }
         )
     }
 
@@ -331,6 +339,7 @@ class EngineRuntime private constructor(private val appContext: Context) {
         DeadCandidateCache.clear()
         remoteCfDisabledUntilMs = 0L
         id.my.milkglass.net.SilentWebViewCfHandler.clearCooldowns()
+        id.my.milkglass.extractor.EmbedMediaSniffer.clearCooldowns()
         prewarmCloudflareEdge()
         backgroundScope.launch {
             runCatching { sourceConfig.refreshIfNeeded() }
