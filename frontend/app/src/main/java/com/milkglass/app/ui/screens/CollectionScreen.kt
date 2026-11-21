@@ -25,6 +25,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.CompositionLocalProvider
@@ -81,10 +82,12 @@ fun CollectionPage(ctl: AppController, scrolls: List<ScrollState>, activeTab: ()
             Box(Modifier.fillMaxWidth().height(48.dp)) {
                 Row(Modifier.fillMaxSize()) {
                     SUB_TABS.forEachIndexed { i, name ->
-                        Box(
-                            Modifier.weight(1f).fillMaxHeight().milkClickable(pressDim = false) { ctl.selectCollectionTab(name) },
-                            contentAlignment = Alignment.Center,
-                        ) { MilkText(ctl.enumLabel("collectionTab", name), ty.tab, if (index == i) c.primary else c.onSurfaceVariant) }
+                        key(name) {
+                            Box(
+                                Modifier.weight(1f).fillMaxHeight().milkClickable(pressDim = false) { ctl.selectCollectionTab(name) },
+                                contentAlignment = Alignment.Center,
+                            ) { MilkText(ctl.enumLabel("collectionTab", name), ty.tab, if (index == i) c.primary else c.onSurfaceVariant) }
+                        }
                     }
                 }
                 androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -180,13 +183,15 @@ private fun WatchlistTab(ctl: AppController, activeTab: () -> String) {
     SelectionHeader(ctl, "watchlist", tr.t("collection.titleCount", "length" to list.size))
     MilkCard {
         list.forEachIndexed { i, a ->
-            if (i > 0) MilkDivider()
-            val r = ctl.continueInfo(a)
-            val sub = if (r != null) {
-                if (r.completed) tr.t("collection.completed")
-                else tr.t("collection.episodeOfTotal", "value" to (ctl.startedEpisodes(a).maxOrNull() ?: 0), "totalEpisodes" to a.totalEpisodes)
-            } else tr.t("collection.notWatched", "totalEpisodes" to a.totalEpisodes)
-            SelectableRow(ctl, "watchlist|${a.id}", "watchlist", activeTab, { ctl.openDetail(a.id) }) { AnimeRowContent(ctl, a, sub, this) }
+            key(a.id) {
+                if (i > 0) MilkDivider()
+                val r = ctl.continueInfo(a)
+                val sub = if (r != null) {
+                    if (r.completed) tr.t("collection.completed")
+                    else tr.t("collection.episodeOfTotal", "value" to (ctl.startedEpisodes(a).maxOrNull() ?: 0), "totalEpisodes" to a.totalEpisodes)
+                } else tr.t("collection.notWatched", "totalEpisodes" to a.totalEpisodes)
+                SelectableRow(ctl, "watchlist|${a.id}", "watchlist", activeTab, { ctl.openDetail(a.id) }) { AnimeRowContent(ctl, a, sub, this) }
+            }
         }
     }
 }
@@ -202,8 +207,10 @@ private fun WatchingTab(ctl: AppController, activeTab: () -> String) {
     SelectionHeader(ctl, "watching", tr.t("collection.titleCount", "length" to list.size))
     MilkCard {
         list.forEachIndexed { i, a ->
-            if (i > 0) MilkDivider()
-            SelectableRow(ctl, "watching|${a.id}", "watching", activeTab, { ctl.openDetail(a.id) }) { AnimeRowContent(ctl, a, ctl.continueLabel(a), this) }
+            key(a.id) {
+                if (i > 0) MilkDivider()
+                SelectableRow(ctl, "watching|${a.id}", "watching", activeTab, { ctl.openDetail(a.id) }) { AnimeRowContent(ctl, a, ctl.continueLabel(a), this) }
+            }
         }
     }
 }
@@ -220,9 +227,11 @@ private fun CompletedTab(ctl: AppController, activeTab: () -> String) {
     SelectionHeader(ctl, "completed", tr.t("collection.titleCount", "length" to list.size))
     MilkCard {
         list.forEachIndexed { i, a ->
-            if (i > 0) MilkDivider()
-            SelectableRow(ctl, "completed|${a.id}", "completed", activeTab, { ctl.openDetail(a.id) }) {
-                AnimeRowContent(ctl, a, tr.t("collection.episodesRating", "totalEpisodes" to a.totalEpisodes, "formatRating" to time.formatRating(a.rating)), this)
+            key(a.id) {
+                if (i > 0) MilkDivider()
+                SelectableRow(ctl, "completed|${a.id}", "completed", activeTab, { ctl.openDetail(a.id) }) {
+                    AnimeRowContent(ctl, a, tr.t("collection.episodesRating", "totalEpisodes" to a.totalEpisodes, "formatRating" to time.formatRating(a.rating)), this)
+                }
             }
         }
     }
@@ -251,24 +260,28 @@ private fun HistoryTab(ctl: AppController, activeTab: () -> String) {
     }
     groups.forEach { (k, list) ->
         if (list.isEmpty()) return@forEach
-        SectionHeader(tr.t(when (k) { "today" -> "common.today"; "yesterday" -> "time.yesterday"; else -> "collection.longer" }))
-        MilkCard {
-            list.forEachIndexed { i, h ->
-                if (i > 0) MilkDivider()
-                val a = ctl.animeOf(h.id) ?: return@forEachIndexed
-                val from = parseCssColor(a.colorFrom) ?: Color.Black
-                val to = parseCssColor(a.colorTo) ?: Color.Black
-                SelectableRow(ctl, "hist|${h.id}.${h.episode}", "history", activeTab, { ctl.playEpisode(h.id, h.episode) }) {
-                    Box(
-                        Modifier.size(56.dp, 40.dp).clip(RoundedCornerShape(8.dp)).background(cssLinearGradient((120 + h.episode * 17).toFloat(), listOf(from, to))),
-                        contentAlignment = Alignment.Center,
-                    ) { MilkText("${h.episode}", ty.episodeThumb, Color.White) }
-                    Column(Modifier.weight(1f)) {
-                        Clamp1(a.romaji, ty.settingTitle, c.onSurface)
-                        MilkText(
-                            "${tr.t("common.episodeAbbr")} ${h.episode} · ${time.formatTimeAgo(h.watchedAt)}",
-                            ty.caption, c.onSurfaceVariant,
-                        )
+        key(k) {
+            SectionHeader(tr.t(when (k) { "today" -> "common.today"; "yesterday" -> "time.yesterday"; else -> "collection.longer" }))
+            MilkCard {
+                list.forEachIndexed { i, h ->
+                    val a = ctl.animeOf(h.id) ?: return@forEachIndexed
+                    key("${h.id}.${h.episode}") {
+                        if (i > 0) MilkDivider()
+                        val from = parseCssColor(a.colorFrom) ?: Color.Black
+                        val to = parseCssColor(a.colorTo) ?: Color.Black
+                        SelectableRow(ctl, "hist|${h.id}.${h.episode}", "history", activeTab, { ctl.playEpisode(h.id, h.episode) }) {
+                            Box(
+                                Modifier.size(56.dp, 40.dp).clip(RoundedCornerShape(8.dp)).background(cssLinearGradient((120 + h.episode * 17).toFloat(), listOf(from, to))),
+                                contentAlignment = Alignment.Center,
+                            ) { MilkText("${h.episode}", ty.episodeThumb, Color.White) }
+                            Column(Modifier.weight(1f)) {
+                                Clamp1(a.romaji, ty.settingTitle, c.onSurface)
+                                MilkText(
+                                    "${tr.t("common.episodeAbbr")} ${h.episode} · ${time.formatTimeAgo(h.watchedAt)}",
+                                    ty.caption, c.onSurfaceVariant,
+                                )
+                            }
+                        }
                     }
                 }
             }

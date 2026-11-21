@@ -22,6 +22,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.remember
@@ -65,7 +66,7 @@ private fun ChipRow(items: List<String>, activeIndex: (String) -> Boolean, label
         modifier.fillMaxWidth(),
         contentPadding = PaddingValues(horizontal = edge),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) { items(items) { g -> MilkChip(label(g), activeIndex(g), { onClick(g) }) } }
+    ) { items(items, key = { it }) { g -> MilkChip(label(g), activeIndex(g), { onClick(g) }) } }
 }
 
 @Composable
@@ -178,7 +179,9 @@ private fun SearchResults(ctl: AppController) {
 
             SuggestionRow(typed.trim(), onPick = { ctl.runSearch(typed); }, onFill = null)
             suggestions.filterNot { it.equals(typed.trim(), ignoreCase = true) }.forEach { s ->
-                SuggestionRow(s, onPick = { ctl.runSearch(s) }, onFill = { ctl.searchQuery = s })
+                key(s) {
+                    SuggestionRow(s, onPick = { ctl.runSearch(s) }, onFill = { ctl.searchQuery = s })
+                }
             }
         }
         return
@@ -211,23 +214,25 @@ private fun SearchResults(ctl: AppController) {
             MilkText(tr.t("search.results", "count" to results.size), ty.caption, c.onSurfaceVariant)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 results.forEach { a ->
-                    MilkCard {
-                        Row(
-                            Modifier.fillMaxWidth().heightIn(min = 80.dp).milkClickable { ctl.openAndPlay(a.id) }
-                                .padding(start = 8.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Poster(ctl, a, 52.dp)
-                            Column(Modifier.weight(1f)) {
-                                Clamp1(a.romaji, ty.subtitle, c.onSurface)
-                                Clamp1("${a.title} · ${a.studio}", ty.caption, c.onSurfaceVariant)
-                                MilkText(
-                                    "${ctl.genreSummary(a)} · ★ ${time.formatRating(a.rating)} · ${a.year}${if (time.isOngoing(a)) tr.t("search.airingSuffix") else ""}",
-                                    ty.body, c.onSurfaceVariant,
-                                )
+                    key(a.id) {
+                        MilkCard {
+                            Row(
+                                Modifier.fillMaxWidth().heightIn(min = 80.dp).milkClickable { ctl.openAndPlay(a.id) }
+                                    .padding(start = 8.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Poster(ctl, a, 52.dp)
+                                Column(Modifier.weight(1f)) {
+                                    Clamp1(a.romaji, ty.subtitle, c.onSurface)
+                                    Clamp1("${a.title} · ${a.studio}", ty.caption, c.onSurfaceVariant)
+                                    MilkText(
+                                        "${ctl.genreSummary(a)} · ★ ${time.formatRating(a.rating)} · ${a.year}${if (time.isOngoing(a)) tr.t("search.airingSuffix") else ""}",
+                                        ty.body, c.onSurfaceVariant,
+                                    )
+                                }
+                                MilkIcon(MilkIcons.Play, size = 24.dp, tint = c.primary)
                             }
-                            MilkIcon(MilkIcons.Play, size = 24.dp, tint = c.primary)
                         }
                     }
                 }

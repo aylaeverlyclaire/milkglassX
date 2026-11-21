@@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
 import com.milkglass.app.core.design.accentFor
 import com.milkglass.app.ui.common.milkCombinedClickable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -72,12 +73,18 @@ fun Poster(ctl: AppController, a: Anime, width: androidx.compose.ui.unit.Dp, pro
 }
 
 @Composable
-fun <T> Carousel(items: List<T>, gap: androidx.compose.ui.unit.Dp = 12.dp, modifier: Modifier = Modifier, item: @Composable (T) -> Unit) {
+fun <T> Carousel(
+    items: List<T>,
+    gap: androidx.compose.ui.unit.Dp = 12.dp,
+    modifier: Modifier = Modifier,
+    key: ((T) -> Any)? = { (it as? Anime)?.id ?: it.hashCode() },
+    item: @Composable (T) -> Unit,
+) {
     LazyRow(
         modifier.fillMaxWidth().bleed(Gutter),
         contentPadding = PaddingValues(horizontal = Gutter),
         horizontalArrangement = Arrangement.spacedBy(gap),
-    ) { items(items) { item(it) } }
+    ) { items(items, key = key) { item(it) } }
 }
 
 @Composable
@@ -227,7 +234,7 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
         if (cl.size > 1) {
             Column {
                 SectionHeader(tr.t("home.continueWatchingShort"))
-                Carousel(cl.drop(1), modifier = Modifier.padding(top = 8.dp)) { a ->
+                Carousel(cl.drop(1), modifier = Modifier.padding(top = 8.dp), key = { it.id }) { a ->
                     val r = ctl.continueInfo(a)
                     val pct = if (r != null && r.position != 0.0) (r.position / ctl.durationSeconds(a) * 100).toFloat() else 0f
                     AnimeCard(ctl, a, ctl.continueLabel(a), progressPct = pct)
@@ -238,14 +245,14 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
         if (stopped != null && stopped.second.isNotEmpty()) {
             Column {
                 SectionHeader(tr.t("home.similarTo", "title" to stopped.first.romaji))
-                Carousel(stopped.second, modifier = Modifier.padding(top = 8.dp)) { a -> AnimeCard(ctl, a, ctl.genreSummary(a)) }
+                Carousel(stopped.second, modifier = Modifier.padding(top = 8.dp), key = { it.id }) { a -> AnimeCard(ctl, a, ctl.genreSummary(a)) }
             }
         }
 
         if (today.isNotEmpty()) {
             Column {
                 SectionHeader(tr.t("home.airingToday"), right = { LabelStrong(tr.t("home.allSchedule"), { onSelectTab("schedule") }) })
-                Carousel(today, modifier = Modifier.padding(top = 8.dp)) { (a, ts, ep) ->
+                Carousel(today, modifier = Modifier.padding(top = 8.dp), key = { "${it.a.id}.${it.ep}" }) { (a, ts, ep) ->
                     Column(Modifier.width(132.dp).milkClickable { ctl.openAndPlay(a.id) }) {
                         Poster(ctl, a, 132.dp)
                         Clamp1(a.romaji, ty.subtitle, c.onSurface, Modifier.padding(top = 8.dp).fillMaxWidth())
@@ -258,7 +265,7 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
 
         Column {
             SectionHeader(tr.t("home.mostPopular"))
-            Carousel(trending.withIndex().toList(), modifier = Modifier.padding(top = 8.dp)) { (i, a) ->
+            Carousel(trending.withIndex().toList(), modifier = Modifier.padding(top = 8.dp), key = { it.value.id }) { (i, a) ->
                 AnimeCard(ctl, a, tr.t("home.ratingCount", "value" to i + 1, "formatCompactCount" to time.formatCompactCount(a.voteCount)))
             }
         }
@@ -286,19 +293,21 @@ fun LikeSection(ctl: AppController, list: List<Anime>, head: @Composable () -> U
             if (rest.isNotEmpty()) {
                 MilkCard {
                     rest.forEachIndexed { i, b ->
-                        if (i > 0) MilkDivider()
-                        Row(
-                            Modifier.fillMaxWidth().heightIn(min = 80.dp).milkClickable { ctl.openAndPlay(b.id) }
-                                .padding(start = 8.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Poster(ctl, b, 52.dp)
-                            Column(Modifier.weight(1f)) {
-                                Clamp1(b.romaji, ty.subtitle, c.onSurface)
-                                Clamp1("${ctl.genreSummary(b)} · ★ ${time.formatRating(b.rating)}", ty.caption, c.onSurfaceVariant)
+                        key(b.id) {
+                            if (i > 0) MilkDivider()
+                            Row(
+                                Modifier.fillMaxWidth().heightIn(min = 80.dp).milkClickable { ctl.openAndPlay(b.id) }
+                                    .padding(start = 8.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Poster(ctl, b, 52.dp)
+                                Column(Modifier.weight(1f)) {
+                                    Clamp1(b.romaji, ty.subtitle, c.onSurface)
+                                    Clamp1("${ctl.genreSummary(b)} · ★ ${time.formatRating(b.rating)}", ty.caption, c.onSurfaceVariant)
+                                }
+                                ChevronIcon()
                             }
-                            ChevronIcon()
                         }
                     }
                 }
