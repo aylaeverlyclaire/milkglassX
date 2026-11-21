@@ -1,5 +1,7 @@
 package com.milkglass.app.ui.screens
 
+import com.milkglass.app.core.design.Milk
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.ui.Alignment
