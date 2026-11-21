@@ -28,7 +28,7 @@ function checkUserQuota(buckets: Map<string, RateBucket>, userId: string, maxPer
 // ---------------------------------------------------------------------------------------------
 const HINT_MAX_AGE_SEC = 12 * 3600;
 const HINT_REFRESH_AFTER_SEC = 20 * 60;
-const HINT_MAX_CANDIDATES = 8;
+const HINT_MAX_CANDIDATES = 12;
 const IP_AGNOSTIC_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
   'filedon.co', 'odfiles.com', 'buzzheavier.com', 'qiwi.gg', 'spyderrock.com',
@@ -72,18 +72,19 @@ const hintBodySchema = z.object({
   candidates: z
     .array(
       z.object({
-        source: z.enum(['animasu', 'otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
+        source: z.enum(['animasu', 'nontonanimeid', 'otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
         quality: z.enum(['1080p', '720p', '480p', '360p']),
         hoster: z.string().trim().min(1).max(40),
         raw_url: z.string().max(2048),
         referer: z.string().max(2048).optional(),
+        container: z.enum(['MKV', 'MP4', 'HLS', 'UNKNOWN']).optional(),
       })
     )
     .min(1)
     .max(HINT_MAX_CANDIDATES),
 });
 
-type StoredHint = { source: string; quality: string; hoster: string; raw_url: string; referer?: string };
+type StoredHint = { source: string; quality: string; hoster: string; raw_url: string; referer?: string; container?: string };
 
 async function requireVerifiedUser(c: any, buckets: Map<string, RateBucket> = userWriteBuckets, maxPerMin = 24): Promise<{ claims: VerifiedAccessClaims | null; deny: Response | null }> {
   if (c.env.CF_REQUIRE_AUTH === 'false' && c.env.ENVIRONMENT !== 'production') {
@@ -133,23 +134,57 @@ playRoutes.post('/hint', rateLimit(20, 60), requireVerifiedUserMiddleware(userWr
     if (!isKnownHosterUrl(cand.raw_url) || seen.has(cand.raw_url)) continue;
     const ref = cand.referer && isPublicHttpsUrl(cand.referer) ? cand.referer : '';
     seen.add(cand.raw_url);
-    clean.push({ source: cand.source, quality: cand.quality, hoster: cand.hoster, raw_url: cand.raw_url, referer: ref });
+    clean.push({
+      source: cand.source,
+      quality: cand.quality,
+      hoster: cand.hoster,
+      raw_url: cand.raw_url,
+      referer: ref,
+      ...(cand.container ? { container: cand.container } : {}),
+    });
   }
   if (clean.length === 0) return c.json({ status: 'ok', stored: false });
 
   const key = hintKey(title, ep);
   const now = Math.floor(Date.now() / 1000);
   try {
-    const existing = await c.env.DB.prepare('SELECT updated_at FROM play_hints WHERE key = ?1').bind(key).first<{ updated_at: number }>();
-    if (existing && now - existing.updated_at < HINT_REFRESH_AFTER_SEC) {
-      return c.json({ status: 'ok', stored: false, fresh: true });
+    const existing = await c.env.DB.prepare('SELECT payload, updated_at FROM play_hints WHERE key = ?1')
+      .bind(key)
+      .first<{ payload: string; updated_at: number }>();
+    let merged: StoredHint[] = clean;
+    if (existing && now - existing.updated_at < HINT_MAX_AGE_SEC) {
+      let prev: StoredHint[] = [];
+      try {
+        const parsed = JSON.parse(existing.payload) as StoredHint[];
+        if (Array.isArray(parsed)) prev = parsed;
+      } catch {}
+      const prevQualities = new Set(prev.map((h) => h.quality));
+      const prevSources = new Set(prev.map((h) => h.source));
+      const prevUrls = new Set(prev.map((h) => h.raw_url));
+      const addsCoverage = clean.some(
+        (h) => !prevQualities.has(h.quality) || !prevSources.has(h.source) || !prevUrls.has(h.raw_url)
+      );
+      if (!addsCoverage && now - existing.updated_at < HINT_REFRESH_AFTER_SEC) {
+        return c.json({ status: 'ok', stored: false, fresh: true });
+      }
+      // Additive merge lintas source & resolusi (maks 3 kandidat per resolusi, maks 12 total)
+      const perQuality = new Map<string, StoredHint[]>();
+      for (const item of [...clean, ...prev]) {
+        if (!item || !isKnownHosterUrl(item.raw_url)) continue;
+        const bucket = perQuality.get(item.quality) ?? [];
+        if (bucket.length < 3 && !bucket.some((x) => x.raw_url === item.raw_url)) {
+          bucket.push(item);
+          perQuality.set(item.quality, bucket);
+        }
+      }
+      merged = Array.from(perQuality.values()).flat().slice(0, 12);
     }
     await c.env.DB.prepare(
       `INSERT INTO play_hints (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
        ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, report_count = report_count + 1`
-    ).bind(key, JSON.stringify(clean), now).run();
-    c.executionCtx.waitUntil(purgePlayResolveCache(c.req.url, title, ep));
-    return c.json({ status: 'ok', stored: true });
+    ).bind(key, JSON.stringify(merged), now).run();
+    c.executionCtx?.waitUntil?.(purgePlayResolveCache(c.req.url, title, ep));
+    return c.json({ status: 'ok', stored: true, merged_count: merged.length });
   } catch {
     return c.json({ status: 'ok', stored: false, degraded: true });
   }
@@ -232,7 +267,7 @@ const directBodySchema = z.object({
   candidates: z
     .array(
       z.object({
-        source: z.enum(['animasu', 'otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
+        source: z.enum(['animasu', 'nontonanimeid', 'otakudesu', 'samehadaku', 'oploverz', 'kusonime']),
         quality: z.enum(['1080p', '720p', '480p', '360p']),
         hoster: z.string().trim().min(1).max(40),
         direct_url: z.string().max(2048),
@@ -296,20 +331,27 @@ playRoutes.post('/direct', rateLimit(20, 60), requireVerifiedUserMiddleware(user
         if (Array.isArray(parsed)) prev = parsed;
       } catch {}
       const prevQualities = new Set(prev.map((d) => d.quality));
-      const hasNewQuality = clean.some((d) => !prevQualities.has(d.quality));
-      if (!hasNewQuality && now - existing.updated_at < DIRECT_REFRESH_AFTER_SEC) {
+      const prevSources = new Set(prev.map((d) => d.source));
+      const prevContainers = new Set(prev.map((d) => `${d.quality}:${d.container}`));
+      const addsCoverage = clean.some(
+        (d) =>
+          !prevQualities.has(d.quality) ||
+          !prevSources.has(d.source) ||
+          !prevContainers.has(`${d.quality}:${d.container}`)
+      );
+      if (!addsCoverage && now - existing.updated_at < DIRECT_REFRESH_AFTER_SEC) {
         return c.json({ status: 'ok', stored: false, fresh: true });
       }
       const perQuality = new Map<string, StoredDirect[]>();
       for (const item of [...clean, ...prev]) {
         if (!item || !isAcceptableDirect({ hoster: item.hoster || '', direct_url: item.direct_url })) continue;
         const bucket = perQuality.get(item.quality) ?? [];
-        if (bucket.length < 2 && !bucket.some((x) => x.direct_url === item.direct_url)) {
+        if (bucket.length < 3 && !bucket.some((x) => x.direct_url === item.direct_url)) {
           bucket.push(item);
           perQuality.set(item.quality, bucket);
         }
       }
-      merged = Array.from(perQuality.values()).flat().slice(0, 8);
+      merged = Array.from(perQuality.values()).flat().slice(0, 12);
     }
     await c.env.DB.prepare(
       `INSERT INTO play_direct (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)

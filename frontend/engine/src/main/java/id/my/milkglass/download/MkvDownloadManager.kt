@@ -1,6 +1,11 @@
 package id.my.milkglass.download
 
+import android.content.ContentValues
 import android.content.Context
+import android.media.MediaScannerConnection
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.content.SharedPreferences
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
@@ -48,6 +53,7 @@ enum class DownloadDrainOutcome {
     SUCCESS,
     RETRY_NETWORK,
     BLOCKED_CHALLENGE,
+    UNAVAILABLE_MP4,
     FAILED_PERMANENT
 }
 
@@ -253,11 +259,53 @@ class MkvDownloadManager(
     fun getDownloadedFile(animeSlug: String, episodeNumber: Int, quality: MkvQuality): File {
         val safeSlug = sanitizeDownloadSlug(animeSlug).ifBlank { "anime" }
         val dir = resolveDownloadDir(safeSlug)
-        for (ext in listOf("mkv", "mp4")) {
+        for (ext in listOf("mp4", "mkv")) {
             val candidate = File(dir, "${safeSlug}_ep${episodeNumber}_${quality.label}.$ext")
             if (candidate.exists() && candidate.length() > 1024L) return candidate
         }
-        return File(dir, "${safeSlug}_ep${episodeNumber}_${quality.label}.mkv")
+        return File(dir, "${safeSlug}_ep${episodeNumber}_${quality.label}.mp4")
+    }
+
+    /**
+     * Ekspor opsional video unduhan (MP4) ke Galeri publik (Movies/Milkglass) via MediaStore.
+     */
+    fun exportToGallery(sourceFile: File, displayTitle: String): Result<String> = runCatching {
+        require(sourceFile.exists() && sourceFile.length() > 1024L) { "File unduhan tidak ditemukan" }
+        val safeBase = displayTitle.replace(Regex("[^a-zA-Z0-9._\\- ]+"), "_").trim().take(80).ifBlank { "milkglass_video" }
+        val ext = sourceFile.extension.lowercase().ifBlank { "mp4" }
+        val displayName = "$safeBase.$ext"
+        val mimeType = if (ext == "mp4") "video/mp4" else "video/x-matroska"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = appContext.contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
+                put(MediaStore.Video.Media.MIME_TYPE, mimeType)
+                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/Milkglass")
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("Gagal membuat entri Galeri")
+            try {
+                resolver.openOutputStream(uri)?.use { out ->
+                    sourceFile.inputStream().use { inp -> inp.copyTo(out, 64 * 1024) }
+                } ?: throw IllegalStateException("Gagal membuka stream Galeri")
+                val done = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+                resolver.update(uri, done, null, null)
+            } catch (e: Throwable) {
+                runCatching { resolver.delete(uri, null, null) }
+                throw e
+            }
+            displayName
+        } else {
+            @Suppress("DEPRECATION")
+            val moviesDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "Milkglass")
+            if (!moviesDir.exists()) moviesDir.mkdirs()
+            val dest = File(moviesDir, displayName)
+            sourceFile.copyTo(dest, overwrite = true)
+            MediaScannerConnection.scanFile(appContext, arrayOf(dest.absolutePath), arrayOf(mimeType), null)
+            displayName
+        }
     }
 
     fun findAnyDownloadedFile(
@@ -271,7 +319,7 @@ class MkvDownloadManager(
         if (!dir.exists()) return null
         val order = listOf(preferredQuality) + MkvQuality.ALL_DESC.filterNot { it == preferredQuality }
         for (q in order) {
-            for (ext in listOf("mkv", "mp4")) {
+            for (ext in listOf("mp4", "mkv")) {
                 val f = File(dir, "${safeSlug}_ep${episodeNumber}_${q.label}.$ext")
                 if (f.exists() && f.length() > 1024L) {
                     return f to q
@@ -414,7 +462,6 @@ class MkvDownloadWorker(
         val quality = runCatching {
             MkvQuality.valueOf(inputData.getString(KEY_QUALITY) ?: MkvQuality.P1080.name)
         }.getOrDefault(MkvQuality.P1080)
-        val allowBatch = inputData.getBoolean(KEY_ALLOW_BATCH, true)
 
         if (slug.isBlank() || title.isBlank()) {
             return@withContext Result.failure(
@@ -428,26 +475,30 @@ class MkvDownloadWorker(
             val cascade = runtime.cascadeResolver
 
             val episodeSlug = "${slug}-ep-${episode}"
-            val cachedCandidates = runtime.streamResolver.cachedCandidatesFor(episodeSlug, quality)
-                .filterNot { it.isHls || it.container == MediaContainer.HLS }
+            fun isMp4Candidate(c: id.my.milkglass.source.ResolvedMkvMedia): Boolean =
+                !c.isBatchArchive && !c.isHls &&
+                    (c.container == MediaContainer.MP4 || c.directUrl.contains(".mp4", ignoreCase = true))
 
-            val candidates = if (cachedCandidates.isNotEmpty()) {
-                cachedCandidates.sortedByDescending { EndpointHealthScorer.score(it.hoster) }
+            val cachedMp4 = (
+                runtime.streamResolver.cachedCandidatesFor(episodeSlug, quality) +
+                    runtime.streamResolver.resolveConsolidatedMp4Candidates(title, episode, quality)
+                ).filter(::isMp4Candidate).distinctBy { it.directUrl }
+
+            val candidates = if (cachedMp4.isNotEmpty()) {
+                cachedMp4.sortedByDescending { EndpointHealthScorer.score(it.hoster) }
             } else {
-                when (val res = cascade.resolve(title, episode, quality, allowBatch)) {
+                when (val res = cascade.resolve(title, episode, quality, allowBatchFallback = false, preferCompatibleContainer = true)) {
                     is CascadeResult.Success -> (listOf(res.selected) + res.alternatives)
-                        .filterNot { it.isHls || it.container == MediaContainer.HLS }
+                        .filter(::isMp4Candidate)
                         .sortedByDescending { EndpointHealthScorer.score(it.hoster) }
                     is CascadeResult.Failure -> {
                         val outcome = if (res.diagnostics.cloudflareBlockedHosts.isNotEmpty()) {
                             DownloadDrainOutcome.BLOCKED_CHALLENGE
                         } else {
-                            DownloadDrainOutcome.FAILED_PERMANENT
+                            DownloadDrainOutcome.UNAVAILABLE_MP4
                         }
-                        if (outcome == DownloadDrainOutcome.FAILED_PERMANENT) {
-                            val baseDir = applicationContext.getExternalFilesDir("downloads") ?: applicationContext.filesDir
-                            cleanupEpisodePartFiles(File(baseDir, slug), slug, episode)
-                        }
+                        val baseDir = applicationContext.getExternalFilesDir("downloads") ?: applicationContext.filesDir
+                        cleanupEpisodePartFiles(File(baseDir, slug), slug, episode)
                         return@withPermit Result.failure(
                             Data.Builder()
                                 .putString(KEY_OUTCOME, outcome.name)
@@ -461,7 +512,7 @@ class MkvDownloadWorker(
                 val baseDir = applicationContext.getExternalFilesDir("downloads") ?: applicationContext.filesDir
                 cleanupEpisodePartFiles(File(baseDir, slug), slug, episode)
                 return@withPermit Result.failure(
-                    Data.Builder().putString(KEY_OUTCOME, DownloadDrainOutcome.FAILED_PERMANENT.name).build()
+                    Data.Builder().putString(KEY_OUTCOME, DownloadDrainOutcome.UNAVAILABLE_MP4.name).build()
                 )
             }
 
