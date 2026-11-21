@@ -2,6 +2,9 @@ package id.my.milkglass.source
 
 import id.my.milkglass.download.EndpointHealthScorer
 import id.my.milkglass.extractor.HosterFilter
+import id.my.milkglass.net.IsolatedHttpClients
+import okhttp3.Request
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.util.Locale
 
@@ -65,6 +68,38 @@ internal object StreamingFirstGuards {
             }
         }
         return out
+    }
+
+    /**
+     * Jika embed desustream/odstream membungkus nested iframe (mis. blogger.com / ondesu / googlevideo),
+     * telusuri langsung lewat HTTP ringan agar tidak perlu menunggu cold-boot WebView.
+     */
+    fun unwrapNestedEmbedUrl(clients: IsolatedHttpClients, url: String, referer: String?): String? {
+        val low = url.lowercase(Locale.ROOT)
+        if (!low.contains("desustream.") && !low.contains("odstream.xyz")) return null
+        return runCatching {
+            val req = Request.Builder()
+                .url(url)
+                .apply { if (!referer.isNullOrBlank()) header("Referer", referer) }
+                .build()
+            clients.sourceClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                val html = resp.body?.string().orEmpty()
+                if (html.isBlank()) return@use null
+                val doc = Jsoup.parse(html, url)
+                doc.select("iframe[src]").firstNotNullOfOrNull { el ->
+                    val src = el.absUrl("src").trim()
+                    val sLow = src.lowercase(Locale.ROOT)
+                    src.takeIf {
+                        it.startsWith("http") &&
+                            it != url &&
+                            (sLow.contains("blogger.com") || sLow.contains("ondesu") ||
+                                sLow.contains("googlevideo.com") || sLow.contains("desustream") ||
+                                sLow.contains("vidhide") || sLow.contains("filemoon") || sLow.contains("yourupload"))
+                    }
+                }
+            }
+        }.getOrNull()
     }
 
     fun rankForPlayback(
