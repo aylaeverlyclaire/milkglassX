@@ -24,14 +24,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Headless Android WebView media URL sniffer untuk mengekstrak direct stream (.m3u8 / .mp4)
+ * Headless Android WebView media URL sniffer untuk mengekstrak direct stream (.m3u8 / .mp4 / Blogger / GoogleVideo)
  * dari player embed berbasis JavaScript/AJAX yang gagal diekstrak lewat OkHttp/Regex polos.
- *
- * Prinsip operasi:
- * - Tidak pernah menampilkan UI atau pop-up iklan ke pengguna (`setSupportMultipleWindows(false)`).
- * - Memblokir domain iklan/tracker serta aset gambar/font/CSS agar muat cepat dan hemat bandwidth.
- * - Begitu URL media valid tertangkap di `shouldInterceptRequest`, langsung menyalin header
- *   (`Referer`, `Origin`, `User-Agent`, `Cookie`) dan menghancurkan instans WebView di `finally`.
  */
 object EmbedMediaSniffer {
     private const val DEFAULT_TIMEOUT_MS = 6_500L
@@ -85,7 +79,13 @@ object EmbedMediaSniffer {
         if (low.contains(".m3u8?") || low.contains(".mp4?") || low.contains(".mkv?")) {
             return true
         }
-        if (low.contains("googlevideo.com/videoplayback")) {
+        if (low.contains("googlevideo.com/videoplayback") ||
+            low.contains("blogger.googleusercontent.com") ||
+            low.contains("video-downloads.googleusercontent.com") ||
+            low.contains("drive.usercontent.google.com") ||
+            low.contains("pixeldrain.com/api/file/") ||
+            low.contains("pixeldrain.lu/api/file/")
+        ) {
             return true
         }
         if (low.contains("mime=video") || low.contains("type=video")) {
@@ -158,6 +158,8 @@ object EmbedMediaSniffer {
                     cm.setAcceptCookie(true)
                     val wv = WebView(appContext)
                     webViewRef.set(wv)
+                    wv.layout(0, 0, 640, 360)
+                    wv.onResume()
                     cm.setAcceptThirdPartyCookies(wv, true)
                     wv.settings.apply {
                         javaScriptEnabled = true
@@ -330,6 +332,7 @@ object EmbedMediaSniffer {
                 runCatching { handler.removeCallbacksAndMessages(null) }
                 val wv = webViewRef.getAndSet(null)
                 if (wv != null) {
+                    runCatching { wv.onPause() }
                     runCatching { wv.stopLoading() }
                     runCatching { wv.webViewClient = WebViewClient() }
                     runCatching { wv.loadUrl("about:blank") }
