@@ -1489,17 +1489,18 @@ class MkvCascadeResolver(
     private val clients: IsolatedHttpClients,
     private val slugCache: SourceSlugCache? = null,
     private val baseUrlProvider: (SourcePriority) -> String = { it.defaultBaseUrl },
+    private val sourceOrderProvider: () -> List<SourcePriority> = { SourcePriority.entries },
     private val indexLookup: ((SourcePriority, String) -> String?)? = null,
     private val remoteHtmlFetcher: ((String) -> String?)? = null,
     private val onAllSourcesFailed: (() -> Unit)? = null,
     private val rawStore: RawCandidateStore? = null,
     private val onEpisodeResolved: ((String, List<RawMkvCandidate>) -> Unit)? = null,
     private val providers: List<MkvSourceProvider> = listOf(
-        AnimasuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.ANIMASU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         SamehadakuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.SAMEHADAKU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
-        NontonAnimeIdSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.NONTONANIMEID) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         OploverzSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OPLOVERZ) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
+        NontonAnimeIdSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.NONTONANIMEID) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
+        AnimasuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.ANIMASU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
         KusonimeSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.KUSONIME) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher)
     )
 ) {
@@ -1551,9 +1552,10 @@ class MkvCascadeResolver(
     )
 
     private fun adaptiveProviderOrder(): List<MkvSourceProvider> {
+        val dynamicOrder = sourceOrderProvider()
         return providers.sortedWith(
             compareByDescending<MkvSourceProvider> { EndpointHealthScorer.sourceScore(it.priority.id) }
-                .thenBy { it.priority.rank }
+                .thenBy { p -> dynamicOrder.indexOf(p.priority).takeIf { it >= 0 } ?: p.priority.rank }
         )
     }
 

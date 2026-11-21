@@ -62,8 +62,36 @@ export const SOURCE_ID_SCHEMA = z.enum([
 export const QUALITY_SCHEMA = z.enum(['1080p', '720p', '480p', '360p']);
 export const TARGET_RESOLUTIONS = ['1080p', '720p', '480p'] as const;
 
-export function buildSourceCatalogList(urls: SourceBaseUrls) {
-  return SOURCE_CASCADE_ORDER.map((id, idx) => ({
+export function parseSourceCascadeOrder(raw: string | null | undefined): SourceId[] {
+  if (!raw || !raw.trim()) return [...SOURCE_CASCADE_ORDER];
+  let tokens: string[] = [];
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) tokens = parsed.map((v) => String(v).trim().toLowerCase());
+    } catch {}
+  } else {
+    tokens = trimmed.split(',').map((v) => v.trim().toLowerCase());
+  }
+  const validSet = new Set<string>(SOURCE_CASCADE_ORDER);
+  const ordered: SourceId[] = [];
+  for (const t of tokens) {
+    if (validSet.has(t) && !ordered.includes(t as SourceId)) {
+      ordered.push(t as SourceId);
+    }
+  }
+  for (const fallback of SOURCE_CASCADE_ORDER) {
+    if (!ordered.includes(fallback)) ordered.push(fallback);
+  }
+  return ordered;
+}
+
+export function buildSourceCatalogList(
+  urls: SourceBaseUrls,
+  order: readonly SourceId[] = SOURCE_CASCADE_ORDER
+) {
+  return order.map((id, idx) => ({
     rank: idx + 1,
     id,
     base_url: urls[id],
