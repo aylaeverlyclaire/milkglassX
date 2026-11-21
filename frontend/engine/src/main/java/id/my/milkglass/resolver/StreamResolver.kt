@@ -253,14 +253,6 @@ class StreamResolver(
     private val telemetryReportedAt = ConcurrentHashMap<String, Long>()
 
     fun reportPlaybackTelemetry(report: PlaybackTelemetryReport) {
-        if (!hasAuthSession()) return
-        val now = System.currentTimeMillis()
-        if (now < serverResolverDisabledUntilMs) return
-        val dedupKey = "${report.title.lowercase().trim()}#${report.ep}#${report.status}#${report.errorCode}"
-        val last = telemetryReportedAt[dedupKey]
-        if (last != null && now - last < 30_000L) return
-        if (telemetryReportedAt.size > 96) telemetryReportedAt.clear()
-        telemetryReportedAt[dedupKey] = now
         hintExecutor.execute {
             runCatching {
                 val body = report.toJson().toString()

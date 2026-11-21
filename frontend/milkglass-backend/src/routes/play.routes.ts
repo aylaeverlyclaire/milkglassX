@@ -760,8 +760,6 @@ playRoutes.post(
 );
 
 // Wave 3: Episode-level Playback Failure & TTFF Telemetry + Automated GitHub Issue Alerting (Option B)
-const userPlaybackReportBuckets = new Map<string, RateBucket>();
-const GITHUB_ISSUE_DEDUP_SEC = 6 * 3600;
 const SLOW_ALERT_THRESHOLD_MS = 1500;
 const DEFAULT_TELEMETRY_REPO = 'aylaeverlyclaire/milkglassX';
 
@@ -845,8 +843,6 @@ async function dispatchGitHubTelemetryIssue(
 
 playRoutes.post(
   '/playback-report',
-  rateLimit(25, 60),
-  requireVerifiedUserMiddleware(userPlaybackReportBuckets, 25),
   zValidator('json', playbackReportSchema),
   async (c) => {
     const report = c.req.valid('json');
@@ -922,24 +918,12 @@ playRoutes.post(
       return c.json({ status: 'ok', stored: false, degraded: true });
     }
 
-    // 3) Option B: Auto-open GitHub Issue on failure or slow playback (>1.5s) with 6h per-episode dedup
+    // 3) Option B: Auto-open GitHub Issue on every failure or slow playback (>1.5s) without dedup/rate-limit (tester mode)
     const shouldAlert = report.status === 'failed' || report.ttff_ms > SLOW_ALERT_THRESHOLD_MS;
     let issueScheduled = false;
     if (shouldAlert && c.env.GITHUB_TELEMETRY_TOKEN?.trim()) {
-      try {
-        const recentIssue = await c.env.DB.prepare(
-          `SELECT id FROM playback_reports
-           WHERE title_key = ?1 AND ep = ?2 AND status = ?3
-             AND github_issue_url != '' AND created_at >= ?4
-           LIMIT 1`
-        )
-          .bind(tKey, report.ep, report.status, nowSec - GITHUB_ISSUE_DEDUP_SEC)
-          .first<{ id: number }>();
-        if (!recentIssue) {
-          issueScheduled = true;
-          c.executionCtx?.waitUntil?.(dispatchGitHubTelemetryIssue(c.env, report, asn, reportId));
-        }
-      } catch {}
+      issueScheduled = true;
+      c.executionCtx?.waitUntil?.(dispatchGitHubTelemetryIssue(c.env, report, asn, reportId));
     }
 
     return c.json({ status: 'ok', stored: true, report_id: reportId, issue_scheduled: issueScheduled });
