@@ -44,7 +44,7 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import id.my.milkglass.EngineRuntime
-import PlayerManager
+import id.my.milkglass.player.PlayerManager
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.flow.first
 import com.milkglass.app.ui.common.ArtBackdrop
