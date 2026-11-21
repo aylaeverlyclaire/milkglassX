@@ -118,6 +118,7 @@ class RawCandidateStore(context: Context?) {
                         .put("s", c.source.id).put("q", c.quality.label).put("h", c.hosterLabel)
                         .put("u", c.rawUrl).put("r", c.pageReferer).put("z", c.sizeLabel ?: JSONObject.NULL)
                         .put("b", c.isBatchArchive).put("c", c.container.name)
+                        .apply { if (c.isStreamEmbed) put("e", true) }
                 )
             }
             return arr
@@ -137,7 +138,8 @@ class RawCandidateStore(context: Context?) {
                         source = src, quality = q, hosterLabel = o.optString("h").ifBlank { "Hoster" },
                         rawUrl = url, pageReferer = o.optString("r"),
                         sizeLabel = if (o.isNull("z")) null else o.optString("z").ifBlank { null },
-                        isBatchArchive = o.optBoolean("b", false), container = cont
+                        isBatchArchive = o.optBoolean("b", false), container = cont,
+                        isStreamEmbed = o.optBoolean("e", false)
                     )
                 )
             }
