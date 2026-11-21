@@ -390,7 +390,8 @@ class EngineRuntime private constructor(private val appContext: Context) {
         episode: Int,
         preferredRes: String = "1080p",
         maxAgeMs: Long = Long.MAX_VALUE,
-        prebuffer: Boolean = false
+        prebuffer: Boolean = false,
+        prebufferHeadBytes: Long = PlayerManager.PREBUFFER_HEAD_BYTES
     ) {
         if (episode <= 0) return
         val searchTitle = romajiTitle.ifBlank { title }.trim()
@@ -414,7 +415,7 @@ class EngineRuntime private constructor(private val appContext: Context) {
                 if (ok && prebuffer && latestPrefetchKey == key) {
                     val cachedSession = streamResolver.getCachedSession(slug, preferredRes)
                     if (cachedSession != null) {
-                        PlayerManager.prebufferEpisode(appContext, cachedSession, slug)
+                        PlayerManager.prebufferEpisode(appContext, cachedSession, slug, headBytes = prebufferHeadBytes)
                     }
                 }
             } catch (ce: CancellationException) {

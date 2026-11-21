@@ -20,6 +20,8 @@ export interface AppBindings {
   CF_REQUIRE_AUTH?: string;
   CATALOG_R2?: R2Bucket;
   ENVIRONMENT?: string;
+  GITHUB_TELEMETRY_TOKEN?: string;
+  GITHUB_TELEMETRY_REPO?: string;
 }
 
 const MAX_PUBLIC_BODY_BYTES = 64 * 1024;

@@ -117,9 +117,15 @@ fun DetailScreen(ctl: AppController, id: Int) {
         if (targetEp != null && ctl.online && ctl.episodeAccess(a, targetEp) == Access.Ok) {
             val rt = EngineRuntime.get(detailCtx)
             rt.seedSourceUrls(a.title, a.romaji, a.sourceUrls)
+            val metered = com.milkglass.app.core.poster.isMeteredNetwork(detailCtx)
             rt.prefetchEpisode(
                 a.title, a.romaji, targetEp, ctl.persisted.settings.quality,
-                prebuffer = !com.milkglass.app.core.poster.isMeteredNetwork(detailCtx),
+                prebuffer = true,
+                prebufferHeadBytes = if (metered) {
+                    id.my.milkglass.player.PlayerManager.PREBUFFER_METERED_HEAD_BYTES
+                } else {
+                    id.my.milkglass.player.PlayerManager.PREBUFFER_HEAD_BYTES
+                },
             )
         }
     }

@@ -163,6 +163,23 @@ object EndpointHealthScorer {
         persistAsync()
     }
 
+    /**
+     * Terapkan skor hoster ASN dari backend (`/v1/play/resolve` -> `hoster_scores`, rentang 0.0..1.0)
+     * ke scorer lokal tanpa menimpa observasi lokal yang sudah kuat.
+     */
+    fun applyServerHosterScores(serverScores: Map<String, Double>) {
+        if (serverScores.isEmpty()) return
+        for ((rawKey, rawScore) in serverScores) {
+            val key = rawKey.trim().lowercase()
+            if (key.isEmpty() || !rawScore.isFinite()) continue
+            val mapped = ((rawScore.coerceIn(0.0, 1.0) - 0.5) * 16.0).toInt().coerceIn(-8, 8)
+            scores.compute(key) { _, cur ->
+                if (cur == null || cur == 0) mapped else ((cur * 2 + mapped) / 3).coerceIn(-20, 20)
+            }
+        }
+        persistAsync()
+    }
+
     fun reset() {
         scores.clear()
         sourceScores.clear()
