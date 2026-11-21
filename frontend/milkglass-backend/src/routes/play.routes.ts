@@ -1,4 +1,4 @@
-import { QUALITY_SCHEMA, SOURCE_ID_SCHEMA } from '../utils/sources';
+import { parseSourceCascadeOrder, QUALITY_SCHEMA, SOURCE_ID_SCHEMA } from '../utils/sources';
 import { buildCfHandlerHeaders, getCfHandlerBaseUrl } from '../utils/cfHandler';
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
@@ -40,6 +40,7 @@ const IP_AGNOSTIC_HOSTER_DOMAINS = [
 const IP_LOCKED_HOSTER_DOMAINS = [
   'gofile.io', 'desustream.info', 'desustream.com', 'ondesu.com', 'mp4upload.com',
   'blogger.com', 'yourupload.com', 'vidhidepre.com', 'vidhide.com', 'berkasdrive.com', 'mitedrive.com', 'short.ink',
+  'icefile.web.id',
 ];
 const ALL_HOSTER_DOMAINS = [...IP_AGNOSTIC_HOSTER_DOMAINS, ...IP_LOCKED_HOSTER_DOMAINS];
 
@@ -489,11 +490,19 @@ playRoutes.get(
       return c.json({ status: 'ok', data: { direct_candidates: [], client_extract_candidates: [] } });
     }
 
-    const sourceMap = await getSourceBaseUrls(rdb);
+    const [sourceMap, orderRow] = await Promise.all([
+      getSourceBaseUrls(rdb),
+      rdb
+        .prepare("SELECT value FROM app_config WHERE key = 'source_cascade_order' LIMIT 1")
+        .first<{ value?: string }>()
+        .catch(() => null),
+    ]);
+    const cascadeOrder = parseSourceCascadeOrder(orderRow?.value);
     const params = new URLSearchParams({
       title,
       ep: String(ep),
       quality: q,
+      order: cascadeOrder.join(','),
     });
     if (sourceMap.samehadaku) params.set('samehadaku', sourceMap.samehadaku);
     if (sourceMap.oploverz) params.set('oploverz', sourceMap.oploverz);
@@ -679,6 +688,7 @@ function normalizeHosterKey(raw: string): string {
   if (s.includes('gofile')) return 'gofile';
   if (s.includes('acefile')) return 'acefile';
   if (s.includes('desustream') || s.includes('ondesu')) return 'desustream';
+  if (s.includes('icefile')) return 'icefile';
   return s.replace(/[^a-z0-9]+/g, '').slice(0, 32) || 'unknown';
 }
 
