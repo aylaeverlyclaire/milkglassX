@@ -605,10 +605,6 @@ class MkvCascadeResolver(
         return raceExtractByQualityOrder(usable, qualityOrder, maxResults = 3, preferStreamingEmbeds = preferStreamingEmbeds)
     }
 
-    /**
-     * End-to-end First-Playable-Wins: fetch + ekstraksi dijalankan penuh di dalam worker masing-masing provider,
-     * sehingga provider dengan daftar hoster mati tidak pernah memblokir provider yang punya embed hidup.
-     */
     private fun fetchAndResolveProvider(
         provider: MkvSourceProvider,
         animeTitle: String,
@@ -769,7 +765,7 @@ class MkvCascadeResolver(
                             }
                         )
                     }
-                    val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(9L)
+                    val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(14L)
                     repeat(fanOutCount) {
                         val remainingNs = deadlineNs - System.nanoTime()
                         if (remainingNs <= 0L) return@repeat
@@ -854,28 +850,41 @@ class MkvCascadeResolver(
         preferStreamingEmbeds = preferStreamingEmbeds
     )
 
+    /**
+     * Balapkan stream embed DAN direct hoster (Pixeldrain/GoFile/Icefile/dll.) SECARA BERSAMAAN
+     * agar hoster HTTP cepat pada anime baru tidak pernah kelaparan menunggu sniffer WebView.
+     */
     private fun raceExtractByQualityOrder(
         candidates: List<RawMkvCandidate>,
         qualityOrder: List<MkvQuality>,
         maxResults: Int = 3,
         preferStreamingEmbeds: Boolean = true
     ): List<ResolvedMkvMedia> {
-        val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(9L)
+        val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(12L)
         if (preferStreamingEmbeds) {
+            // Tahap 1: balapkan batch gabungan (embed utama + direct hoster teratas di kualitas pilihan) secara paralel
+            val preferredTier = candidates.filter { it.quality == qualityOrder.first() }
             val embeds = candidates.filter { it.isStreamEmbed }
-            if (embeds.isNotEmpty()) {
-                val extractedEmbeds = raceExtractCandidates(embeds, maxResults = maxResults, timeoutMs = 6_500L)
-                if (extractedEmbeds.isNotEmpty()) return extractedEmbeds
+            val combinedFirst = (embeds.take(3) + preferredTier.filterNot { it.isStreamEmbed }.take(5)).distinctBy { it.rawUrl }
+            if (combinedFirst.isNotEmpty()) {
+                val fastWin = raceExtractCandidates(combinedFirst, maxResults = maxResults, timeoutMs = 6_500L)
+                if (fastWin.isNotEmpty()) return fastWin
             }
         }
-        val nonEmbeds = if (preferStreamingEmbeds) candidates.filterNot { it.isStreamEmbed } else candidates
+        val tried = if (preferStreamingEmbeds) {
+            val preferredTier = candidates.filter { it.quality == qualityOrder.first() }
+            (candidates.filter { it.isStreamEmbed }.take(3) + preferredTier.filterNot { it.isStreamEmbed }.take(5))
+                .mapTo(HashSet()) { it.rawUrl }
+        } else {
+            emptySet()
+        }
         for (quality in qualityOrder) {
             if (Thread.currentThread().isInterrupted) break
             val remainingMs = TimeUnit.NANOSECONDS.toMillis(totalDeadlineNs - System.nanoTime())
             if (remainingMs <= 500L) break
-            val tier = nonEmbeds.filter { it.quality == quality }
+            val tier = candidates.filter { it.quality == quality && it.rawUrl !in tried }
             if (tier.isEmpty()) continue
-            val tierBudgetMs = remainingMs.coerceAtMost(3_500L)
+            val tierBudgetMs = remainingMs.coerceAtMost(4_000L)
             val extracted = raceExtractCandidates(tier, maxResults = maxResults, timeoutMs = tierBudgetMs)
             if (extracted.isNotEmpty()) return extracted
         }
@@ -926,6 +935,10 @@ class MkvCascadeResolver(
                         runCatching {
                             if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
                             val sniffed = sniffer.invoke(topEmbed.rawUrl, topEmbed.pageReferer) ?: return@runCatching null
+                            // Wajib verifikasi agar halaman HTML/error tidak pernah lolos ke ExoPlayer (ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED)
+                            if (!sniffed.isArchive && !extractorRegistry.verifyPlayableMedia(sniffed)) {
+                                return@runCatching null
+                            }
                             EndpointHealthScorer.recordSuccess(sniffed.hoster)
                             toResolvedMedia(topEmbed, sniffed)
                         }.getOrNull()
