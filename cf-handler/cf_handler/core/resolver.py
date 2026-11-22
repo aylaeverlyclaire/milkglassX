@@ -6,44 +6,25 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, urljoin, urlparse
 
 from curl_cffi.requests import AsyncSession
-from cf_handler.core.animasu import (
-    parse_animasu_detail,
-    parse_animasu_episode_mirrors,
-    parse_animasu_search,
-)
 
 IP_AGNOSTIC_HOSTS = (
     "pixeldrain.com",
     "pixeldrain.net",
-    "krakenfiles.com",
     "buzzheavier.com",
     "filedon.co",
-    "mediafire.com",
-    "qiwi.gg",
-    "drive.google.com",
-    "drive.usercontent.google.com",
 )
 
 IP_LOCKED_HOSTS = (
     "gofile.io",
-    "acefile.co",
+    "odfiles.",
     "desustream.",
     "ondesu.",
     "desudrive.",
-    "odfiles.",
     "mp4upload.",
     "filemoon.",
     "vidhide.",
     "streamwish.",
-    "dood.",
-    "doodstream.",
-    "streamtape.",
     "blogger.com",
-    "yourupload.com",
-    "vidhidepre.com",
-    "berkasdrive.com",
-    "mitedrive.com",
-    "short.ink",
 )
 
 BLACKLIST_HOSTS = (
@@ -63,9 +44,6 @@ BLACKLIST_HOSTS = (
 DEFAULT_SOURCE_ORDER: Tuple[str, ...] = (
     "samehadaku",
     "otakudesu",
-    "nontonanimeid",
-    "oploverz",
-    "animasu",
 )
 
 _RESOLVE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -276,23 +254,6 @@ async def _extract_ip_agnostic(
             except Exception:
                 return None
 
-    if "mediafire.com" in host:
-        try:
-            r = await session.get(raw_url, headers={"Referer": referer}, timeout=10)
-            if r.status_code == 200:
-                m = re.search(r'href="(https://download\d+\.mediafire\.com/[^"]+)"', r.text)
-                if m:
-                    u = m.group(1)
-                    cid = "MP4" if ".mp4" in u.lower() else "MKV"
-                    return ("MediaFire", u, cid, False)
-        except Exception:
-            return None
-
-    if "qiwi.gg" in host:
-        m = re.search(r"qiwi\.gg/file/([A-Za-z0-9_-]+)", raw_url)
-        if m:
-            return ("Qiwi", f"https://spyderrock.com/{m.group(1)}.mkv", "MKV", False)
-
     if "filedon.co" in host:
         try:
             r = await session.get(raw_url, headers={"Referer": referer}, timeout=10)
@@ -308,88 +269,6 @@ async def _extract_ip_agnostic(
     return None
 
 
-async def _resolve_animasu(
-    session: AsyncSession,
-    base_url: str,
-    title: str,
-    ep: int,
-    cf_handler: Any,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    root = base_url.rstrip("/")
-    search_url = f"{root}/?s={quote_plus(title)}"
-    search_html = await _fetch_html(session, search_url, f"{root}/", cf_handler)
-    if not search_html:
-        return ([], [])
-
-    items = parse_animasu_search(search_html, root)
-    best_series: Optional[str] = None
-    best_score = 0.0
-    for item in items:
-        sc = score_title(title, item.get("title", ""))
-        if sc > best_score and sc >= 0.35:
-            best_score = sc
-            best_series = item["url"]
-    if not best_series:
-        return ([], [])
-
-    series_html = await _fetch_html(session, best_series, search_url, cf_handler)
-    if not series_html:
-        return ([], [])
-
-    detail = parse_animasu_detail(series_html, best_series)
-    ep_url: Optional[str] = None
-    for row in detail.get("episodes", []):
-        if row.get("episode") == ep or _matches_episode(row.get("label", ""), row.get("url", ""), ep):
-            ep_url = row["url"]
-            break
-    if not ep_url:
-        return ([], [])
-
-    ep_html = await _fetch_html(session, ep_url, best_series, cf_handler)
-    if not ep_html:
-        return ([], [])
-
-    directs: List[Dict[str, Any]] = []
-    ip_locked_list: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for m in parse_animasu_episode_mirrors(ep_html, ep_url):
-        raw_url = m.get("raw_url", "")
-        if not raw_url or raw_url in seen:
-            continue
-        host = (urlparse(raw_url).hostname or "").lower()
-        if any(b in host for b in BLACKLIST_HOSTS) or "terabox." in host:
-            continue
-        seen.add(raw_url)
-        ip_locked_list.append(
-            {
-                "source": "animasu",
-                "quality": m.get("quality") or "720p",
-                "hoster": m.get("hoster") or m.get("label") or host or "Embed",
-                "raw_url": raw_url,
-                "referer": ep_url,
-                "container": "MP4",
-                "ip_locked": True,
-            }
-        )
-        unwrapped = m.get("unwrapped_url")
-        if unwrapped and unwrapped not in seen:
-            seen.add(unwrapped)
-            ip_locked_list.append(
-                {
-                    "source": "animasu",
-                    "quality": m.get("quality") or "720p",
-                    "hoster": (urlparse(unwrapped).hostname or "MiteDrive"),
-                    "raw_url": unwrapped,
-                    "referer": raw_url,
-                    "container": "MP4",
-                    "ip_locked": True,
-                }
-            )
-
-    return (directs, ip_locked_list)
-
-
 async def _resolve_from_source(
     session: AsyncSession,
     source_id: str,
@@ -398,8 +277,6 @@ async def _resolve_from_source(
     ep: int,
     cf_handler: Any,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    if source_id == "animasu":
-        return await _resolve_animasu(session, base_url, title, ep, cf_handler)
     root = base_url.rstrip("/")
     search_url = f"{root}/?s={quote_plus(title)}&post_type=anime" if source_id in ("otakudesu", "samehadaku") else f"{root}/?s={quote_plus(title)}"
     search_html = await _fetch_html(session, search_url, f"{root}/", cf_handler)
