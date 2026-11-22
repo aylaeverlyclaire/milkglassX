@@ -79,6 +79,8 @@ class PlayerEngine(
     var hasLocalDownload by mutableStateOf(false)
 
     var faded by mutableStateOf(false)
+    // true = kontrol disembunyikan lewat tap pengguna; updateUi() tidak boleh memunculkannya lagi.
+    var manualHidden = false
     var left = false
         private set
 
@@ -123,11 +125,22 @@ class PlayerEngine(
     }
 
     fun setControls(on: Boolean) {
+        manualHidden = false
         faded = !on
         if (on) controlsTimer = 3.0
     }
 
+    /** Jalur tap/gestur: tampil <-> sembunyi seperti video player umumnya, dan bertahan (tidak di-override updateUi). */
+    fun setControlsManual(on: Boolean) {
+        setControls(on)
+        if (!on) { controlsTimer = 0.0; manualHidden = true }
+    }
+
     fun updateUi() {
+        if (manualHidden) {
+            if (adSecondsLeft <= 0 && !isOffline) { faded = true; return }
+            manualHidden = false
+        }
         val hh = controlsTimer <= 0 && isPlaying && adSecondsLeft <= 0 && !isOffline
         faded = hh
     }
@@ -314,6 +327,7 @@ class PlayerEngine(
         save()
         val n = ctl.nextPlayableEpisode(anime, episode)
         if (n != null && ctl.persisted.settings.autoplayNext != 0) noticeTimer = 5.0
+        manualHidden = false
         updateUi()
     }
 }

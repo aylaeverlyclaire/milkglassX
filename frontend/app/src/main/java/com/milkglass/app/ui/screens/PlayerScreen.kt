@@ -313,7 +313,7 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
     fun seekWithFx(dir: Int, keepControls: Boolean) {
         val visible = !e.faded
         e.seekBy(10.0 * dir)
-        if (keepControls) e.setControls(visible)
+        if (keepControls) e.setControlsManual(visible)
         fx = SeekFx(dir, if (fxOn && fx.dir == dir) fx.total + 10 else 10, fx.token + 1)
         fxOn = true
     }
@@ -347,10 +347,10 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
                     if (t < seekModeUntil) {
                         seekWithFx(dir, true); seekModeUntil = t + SEEK_MODE_MS; lastTapAt = 0L
                     } else if (lastTapAt != 0L && t - lastTapAt <= DOUBLE_TAP_MS) {
-                        e.setControls(visibleBeforeTap)
+                        e.setControlsManual(visibleBeforeTap)
                         seekWithFx(dir, true); seekModeUntil = t + SEEK_MODE_MS; lastTapAt = 0L
                     } else {
-                        lastTapAt = t; visibleBeforeTap = !e.faded; e.setControls(e.faded)
+                        lastTapAt = t; visibleBeforeTap = !e.faded; e.setControlsManual(e.faded)
                     }
                 }
             },
