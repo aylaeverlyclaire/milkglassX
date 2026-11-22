@@ -15,6 +15,7 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.widthIn
@@ -63,6 +65,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
 import com.milkglass.app.BuildConfig
 import com.milkglass.app.core.app.AppController
@@ -104,6 +107,9 @@ import id.my.milkglass.download.MkvDownloadStatus
 import id.my.milkglass.resolver.StreamResolver
 import id.my.milkglass.source.MkvQuality
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import androidx.compose.foundation.Canvas
@@ -248,13 +254,26 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         }
     }
 
+    val levels = rememberSystemLevels()
+    val sessionFlow = remember(playerManager) { playerManager.snapshot.map { it.sessionId }.distinctUntilChanged() }
+    val sessionId by sessionFlow.collectAsState(initial = playerManager.snapshot.value.sessionId)
+    // Terapkan ulang kecepatan pilihan pengguna setiap sesi pemutaran baru (ganti episode/kualitas).
+    LaunchedEffect(ctl.playerSpeed, sessionId, playerManager) { playerManager.setPlaybackSpeed(ctl.playerSpeed) }
+    // Aplikasi masuk background -> jeda. Sebelumnya audio terus berbunyi setelah pengguna keluar dari app.
+    DisposableEffect(owner, e) {
+        val obs = LifecycleEventObserver { _, ev ->
+            if (ev == Lifecycle.Event.ON_STOP && e.isPlaying) e.togglePlayPause()
+        }
+        owner.lifecycle.addObserver(obs)
+        onDispose { owner.lifecycle.removeObserver(obs) }
+    }
     PlayerOrientationEffect(e.isFullscreen) { e.isFullscreen = it }
     KeepScreenOnEffect(e.isPlaying || e.nativeBuffering)
     BoxWithConstraints(Modifier.fillMaxSize().background(c.surface)) {
         val vh = maxHeight
         if (e.isFullscreen) {
             Box(Modifier.fillMaxSize()) {
-                VideoArea(ctl, e, playerManager, Modifier.fillMaxSize(), fullscreen = true)
+                VideoArea(ctl, e, playerManager, levels, Modifier.fillMaxSize(), fullscreen = true)
                 // Sebelumnya error pemutar tidak terlihat sama sekali di fullscreen.
                 Box(
                     Modifier.align(Alignment.TopCenter)
@@ -266,7 +285,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
             Column(Modifier.fillMaxSize()) {
 
                 Box(Modifier.fillMaxWidth().background(Color.Black).windowInsetsPadding(WindowInsets.statusBars))
-                VideoArea(ctl, e, playerManager, Modifier.fillMaxWidth().aspectRatio(16f / 9f).heightIn(max = vh * .56f), fullscreen = false)
+                VideoArea(ctl, e, playerManager, levels, Modifier.fillMaxWidth().aspectRatio(16f / 9f).heightIn(max = vh * .56f), fullscreen = false)
                 PlayerErrorBanner(playerManager)
                 PlayerInfo(ctl, entry, Modifier.weight(1f))
             }
@@ -299,7 +318,7 @@ private fun VideoButton(icon: Int, size: Int, onClick: () -> Unit, modifier: Mod
 }
 
 @Composable
-private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: PlayerManager, modifier: Modifier, fullscreen: Boolean) {
+private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: PlayerManager, levels: SystemLevels, modifier: Modifier, fullscreen: Boolean) {
     val c = Milk.colors
     val ty = Milk.type
     val tr = ctl.tr
@@ -308,6 +327,9 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
     val to = parseCssColor(a.colorTo) ?: Color.Black
     var fx by remember(e.anime.id, e.episode) { mutableStateOf(SeekFx(0, 0, 0)) }
     var fxOn by remember(e.anime.id, e.episode) { mutableStateOf(false) }
+    var hud by remember(e.anime.id, e.episode) { mutableStateOf<GestureHud?>(null) }
+    var showSpeed by remember(e.anime.id, e.episode) { mutableStateOf(false) }
+    LaunchedEffect(e.faded) { if (e.faded) showSpeed = false }
     LaunchedEffect(fx.token) { if (fx.token > 0) { delay(SEEK_FX_MS); fxOn = false } }
 
     fun seekWithFx(dir: Int, keepControls: Boolean) {
@@ -341,7 +363,20 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
                 var lastTapAt = 0L
                 var visibleBeforeTap = true
                 var seekModeUntil = 0L
-                detectTapGestures { off ->
+                detectTapGestures(
+                    // Tahan layar = 2x selama jari menempel (seperti YouTube), kembali normal saat dilepas.
+                    onPress = {
+                        val held = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) { tryAwaitRelease() } == null
+                        if (held && e.isPlaying && e.nativeStreamActive) {
+                            playerManager.setPlaybackSpeed(HOLD_BOOST_SPEED)
+                            e.setControls(false)
+                            hud = GestureHud(formatSpeed(HOLD_BOOST_SPEED) + "×")
+                            tryAwaitRelease()
+                            playerManager.setPlaybackSpeed(ctl.playerSpeed)
+                            hud = null
+                        }
+                    },
+                ) { off ->
                     val t = SystemClock.uptimeMillis()
                     val dir = if (off.x < size.width / 2f) -1 else 1
                     if (t < seekModeUntil) {
@@ -353,10 +388,65 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
                         lastTapAt = t; visibleBeforeTap = !e.faded; e.setControls(e.faded)
                     }
                 }
+            }
+            // Swipe horizontal = seek; swipe vertikal (fullscreen): kiri = kecerahan, kanan = volume.
+            .pointerInput(e, fullscreen, levels) {
+                var mode = DRAG_NONE
+                var accX = 0f
+                var accY = 0f
+                var startX = 0f
+                var startPos = 0.0
+                var startLevel = 0f
+                var target = 0.0
+                detectDragGestures(
+                    onDragStart = { off ->
+                        mode = DRAG_NONE; accX = 0f; accY = 0f; startX = off.x
+                        startPos = e.position; target = e.position
+                    },
+                    onDragEnd = {
+                        if (mode == DRAG_SEEK) e.seekTo(target)
+                        mode = DRAG_NONE; hud = null
+                    },
+                    onDragCancel = { mode = DRAG_NONE; hud = null },
+                ) { _, drag ->
+                    accX += drag.x; accY += drag.y
+                    if (mode == DRAG_NONE) {
+                        mode = when {
+                            !e.nativeStreamActive -> DRAG_IGNORE
+                            abs(accX) > abs(accY) -> if (e.duration > 0) DRAG_SEEK else DRAG_IGNORE
+                            !fullscreen -> DRAG_IGNORE
+                            startX < size.width / 2f -> DRAG_BRIGHTNESS
+                            else -> DRAG_VOLUME
+                        }
+                        if (mode == DRAG_BRIGHTNESS) startLevel = levels.brightness()
+                        if (mode == DRAG_VOLUME) startLevel = levels.volume()
+                        if (mode != DRAG_IGNORE) e.setControls(false)
+                    }
+                    when (mode) {
+                        DRAG_SEEK -> {
+                            val dur = e.duration.toDouble()
+                            target = (startPos + accX / size.width * SEEK_SWIPE_SPAN_SEC).coerceIn(0.0, dur)
+                            val delta = target - startPos
+                            hud = GestureHud(
+                                (if (delta >= 0) "+" else "-") + ctl.time.formatDuration(abs(delta)),
+                                ctl.time.formatDuration(target) + " / " + ctl.time.formatDuration(dur),
+                            )
+                        }
+                        DRAG_BRIGHTNESS, DRAG_VOLUME -> {
+                            val level = (startLevel - accY / (size.height * .8f)).coerceIn(0f, 1f)
+                            if (mode == DRAG_BRIGHTNESS) levels.setBrightness(level) else levels.setVolume(level)
+                            hud = GestureHud(
+                                if (mode == DRAG_BRIGHTNESS) "Kecerahan" else "Volume",
+                                (level * 100f).roundToInt().toString() + "%",
+                            )
+                        }
+                        else -> Unit
+                    }
+                }
             },
     ) {
 
-        PlayerVideoSurface(playerManager)
+        PlayerVideoSurface(playerManager, fill = ctl.playerFill)
         PlayerSubtitleOverlay(
             playerManager = playerManager,
             active = e.nativeStreamActive,
@@ -397,6 +487,16 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
                 } else {
                     Spacer(Modifier.weight(1f))
                 }
+                PlayerChip(
+                    label = formatSpeed(ctl.playerSpeed) + "×", enabled = !e.faded, selected = showSpeed,
+                    modifier = Modifier.padding(end = 4.dp),
+                ) { showSpeed = !showSpeed; e.setControls(true) }
+                if (fullscreen) {
+                    PlayerChip(
+                        label = if (ctl.playerFill) "Penuh" else "Pas", enabled = !e.faded,
+                        modifier = Modifier.padding(end = 4.dp),
+                    ) { ctl.playerFill = !ctl.playerFill; e.setControls(true) }
+                }
             }
         }
 
@@ -409,6 +509,22 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
                     Color.White,
                 )
             }
+        }
+
+        if (showSpeed && !e.faded) {
+            SpeedPicker(
+                current = ctl.playerSpeed,
+                onPick = { picked ->
+                    ctl.playerSpeed = picked
+                    playerManager.setPlaybackSpeed(picked)
+                    showSpeed = false
+                    e.setControls(true)
+                },
+                modifier = Modifier.align(Alignment.TopEnd).then(cutout).padding(top = 48.dp, end = 8.dp),
+            )
+        }
+        hud?.let { h ->
+            GestureHudPill(h, Modifier.align(Alignment.TopCenter).then(cutout).padding(top = if (fullscreen) 24.dp else 12.dp))
         }
 
         AnimatedVisibility(
@@ -450,9 +566,15 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
 }
 
 @Composable
-private fun PlayerVideoSurface(playerManager: PlayerManager) {
+private fun PlayerVideoSurface(playerManager: PlayerManager, fill: Boolean) {
     val videoAspect by playerManager.videoAspectRatio.collectAsState()
-    Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+        // Pas: seluruh video terlihat (bar hitam). Penuh: menutupi layar, sisi yang lebih panjang terpotong
+        // (VideoArea memakai clipToBounds()).
+        val containerWider = maxWidth / maxHeight > videoAspect
+        val heightBound = if (fill) !containerWider else containerWider
+        val w = if (heightBound) maxHeight * videoAspect else maxWidth
+        val h = if (heightBound) maxHeight else maxWidth / videoAspect
         AndroidView(
             factory = { ctx ->
                 TextureView(ctx).also { tv ->
@@ -463,7 +585,7 @@ private fun PlayerVideoSurface(playerManager: PlayerManager) {
                 playerManager.attachTextureView(tv)
             },
             onRelease = { tv -> playerManager.detachTextureView(tv) },
-            modifier = Modifier.fillMaxHeight().aspectRatio(videoAspect, matchHeightConstraintsFirst = true)
+            modifier = Modifier.requiredSize(w, h)
         )
     }
 }
@@ -623,6 +745,7 @@ private fun PlayerBottomControls(
     modifier: Modifier = Modifier
 ) {
     var scrubSec by remember(e) { mutableStateOf<Double?>(null) }
+    val progress = playerManager.progress.collectAsState()
     val edge = if (fullscreen) 24.dp else 12.dp  // fullscreen: jauhi zona gestur back di tepi layar
     Box(
         modifier.fillMaxWidth().height(if (fullscreen) BAR_HEIGHT_FULLSCREEN else BAR_HEIGHT)
@@ -645,6 +768,10 @@ private fun PlayerBottomControls(
             fullscreen = fullscreen,
             onSeek = { e.seekTo(it) },
             modifier = Modifier.then(cutout).padding(horizontal = edge - 4.dp).offset(y = 60.dp).fillMaxWidth(),
+            bufferedProvider = {
+                val pr = progress.value
+                if (pr.durationMs > 0L) pr.bufferedPositionMs.toFloat() / pr.durationMs else 0f
+            },
             onScrub = { sec ->
                 scrubSec = sec
                 // Selama digeser, kontrol tidak boleh memudar.
@@ -890,6 +1017,12 @@ private fun PlayerDownloadSection(
         }
     }
 }
+
+private const val DRAG_NONE = 0
+private const val DRAG_IGNORE = 1
+private const val DRAG_SEEK = 2
+private const val DRAG_BRIGHTNESS = 3
+private const val DRAG_VOLUME = 4
 
 private const val DOUBLE_TAP_MS = 280L
 private const val SEEK_MODE_MS = 700L
