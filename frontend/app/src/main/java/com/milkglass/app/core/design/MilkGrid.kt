@@ -5,6 +5,7 @@ import androidx.compose.runtime.key
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,7 +16,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
@@ -102,19 +102,23 @@ fun <T> MilkColumnGrid(
     itemKey: ((T) -> Any)? = null,
     cell: @Composable (T) -> Unit,
 ) {
-    val cols = MilkGrid.columnsFor(LocalConfiguration.current.screenWidthDp.toFloat())
-    val perRow = MilkGrid.perRow(cols, span)
-    val rows = androidx.compose.runtime.remember(items, perRow) { items.chunked(perRow) }
-    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(rowGap)) {
-        rows.forEachIndexed { rowIdx, rowItems ->
-            key(rowIdx) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(MilkGrid.Gutter)) {
-                    rowItems.forEachIndexed { colIdx, item ->
-                        key(itemKey?.invoke(item) ?: colIdx) {
-                            Box(Modifier.weight(1f)) { cell(item) }
+    // Kolom dihitung dari lebar kontainer sebenarnya (AppRoot membatasi 460dp), bukan lebar layar fisik;
+    // kalau tidak, di landscape grid mengira ada 8-12 kolom dan poster terjepit di kontainer sempit.
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        val cols = MilkGrid.columnsFor(maxWidth.value)
+        val perRow = MilkGrid.perRow(cols, span)
+        val rows = androidx.compose.runtime.remember(items, perRow) { items.chunked(perRow) }
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(rowGap)) {
+            rows.forEachIndexed { rowIdx, rowItems ->
+                key(rowIdx) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(MilkGrid.Gutter)) {
+                        rowItems.forEachIndexed { colIdx, item ->
+                            key(itemKey?.invoke(item) ?: colIdx) {
+                                Box(Modifier.weight(1f)) { cell(item) }
+                            }
                         }
+                        repeat(perRow - rowItems.size) { Spacer(Modifier.weight(1f)) }
                     }
-                    repeat(perRow - rowItems.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
         }

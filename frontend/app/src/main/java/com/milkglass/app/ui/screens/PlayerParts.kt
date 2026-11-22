@@ -13,6 +13,9 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.provider.Settings
+import android.view.OrientationEventListener
 import android.os.Build
 import android.view.WindowManager
 import androidx.compose.animation.core.LinearEasing
@@ -44,6 +47,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -90,32 +96,56 @@ fun BufferSpinner() {
 }
 
 @Composable
-fun SeekBar(positionProvider: () -> Double, max: Int, fullscreen: Boolean, onSeek: (Double) -> Unit, modifier: Modifier = Modifier) {
-    val primary = com.milkglass.app.core.design.Milk.colors.primary
-    val fill = primary
+fun SeekBar(
+    positionProvider: () -> Double,
+    max: Int,
+    fullscreen: Boolean,
+    onSeek: (Double) -> Unit,
+    modifier: Modifier = Modifier,
+    onScrub: (Double?) -> Unit = {},
+) {
+    val fill = com.milkglass.app.core.design.Milk.colors.primary
     val rest = Color.White.copy(alpha = if (fullscreen) .3f else .35f)
+    // Geser = pratinjau lokal; seek ke pemutar hanya sekali saat jari diangkat (tidak membanjiri decoder).
+    var scrubFrac by remember { mutableFloatStateOf(-1f) }
+    val currentOnSeek by rememberUpdatedState(onSeek)
+    val currentOnScrub by rememberUpdatedState(onScrub)
     Canvas(
         modifier.height(32.dp).pointerInput(max) {
             awaitEachGesture {
                 val down = awaitFirstDown()
-                fun upd(x: Float) {
-                    val w = size.width
-                    if (max <= 0) return
-                    val frac = ((x - 8.dp.toPx()) / (w - 16.dp.toPx())).coerceIn(0f, 1f)
-                    onSeek((frac * max).roundToInt().toDouble())
+                if (max <= 0) return@awaitEachGesture
+                fun fracAt(x: Float): Float {
+                    val inset = 8.dp.toPx()
+                    return ((x - inset) / (size.width - 2f * inset)).coerceIn(0f, 1f)
                 }
-                upd(down.position.x)
-                drag(down.id) { upd(it.position.x); it.consume() }
+                var frac = fracAt(down.position.x)
+                scrubFrac = frac
+                currentOnScrub(frac.toDouble() * max)
+                drag(down.id) {
+                    frac = fracAt(it.position.x)
+                    scrubFrac = frac
+                    currentOnScrub(frac.toDouble() * max)
+                    it.consume()
+                }
+                currentOnSeek((frac.toDouble() * max).roundToInt().toDouble())
+                scrubFrac = -1f
+                currentOnScrub(null)
             }
         },
     ) {
-        val p = if (max > 0) (positionProvider() / max).toFloat().coerceIn(0f, 1f) else 0f
+        val scrubbing = scrubFrac >= 0f
+        val p = when {
+            scrubbing -> scrubFrac
+            max > 0 -> (positionProvider() / max).toFloat().coerceIn(0f, 1f)
+            else -> 0f
+        }
         val cy = size.height / 2f
         val th = 4.dp.toPx()
         drawRect(rest, Offset(0f, cy - th / 2f), Size(size.width, th))
         val thumbX = 8.dp.toPx() + p * (size.width - 16.dp.toPx())
         drawRect(fill, Offset(0f, cy - th / 2f), Size(thumbX, th))
-        drawCircle(fill, 8.dp.toPx(), Offset(thumbX, cy))
+        drawCircle(fill, (if (scrubbing) 12.dp else 8.dp).toPx(), Offset(thumbX, cy))
     }
 }
 
@@ -161,16 +191,95 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
+private enum class OrientationLock { Free, Landscape, Portrait }
+
+private const val PORTRAIT_TOLERANCE_DEG = 25
+private const val LANDSCAPE_TOLERANCE_DEG = 35
+private const val TABLET_MIN_SMALLEST_WIDTH_DP = 600
+
+private fun Context.autoRotateEnabled(): Boolean =
+    runCatching { Settings.System.getInt(contentResolver, Settings.System.ACCELEROMETER_ROTATION, 0) == 1 }
+        .getOrDefault(false)
+
+/**
+ * Orientasi + UI sistem pemutar:
+ *  - Ponsel diputar ke landscape -> masuk fullscreen otomatis; (saat masuk pemutar dalam landscape juga).
+ *  - Tombol fullscreen mengunci landscape (sensor, boleh balik 180°).
+ *  - Keluar fullscreen (tombol / back / ponsel kembali tegak) mengunci portrait sementara agar tidak
+ *    langsung loncat fullscreen lagi, lalu dilepas begitu ponsel benar-benar tegak.
+ *  - Tablet tidak dipaksa fullscreen oleh rotasi.
+ */
 @Composable
-fun FullscreenOrientationEffect(active: Boolean) {
+fun PlayerOrientationEffect(fullscreen: Boolean, onFullscreenChange: (Boolean) -> Unit) {
     val view = LocalView.current
-    DisposableEffect(active) {
-        val activity = view.context.findActivity()
+    val activity = remember(view) { view.context.findActivity() }
+    val config = LocalConfiguration.current
+    val isLandscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val isPhone = config.smallestScreenWidthDp < TABLET_MIN_SMALLEST_WIDTH_DP
+    val currentFullscreen by rememberUpdatedState(fullscreen)
+    val currentOnChange by rememberUpdatedState(onFullscreenChange)
+    var lock by remember { mutableStateOf(OrientationLock.Free) }
+    val original = remember(activity) {
+        activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+
+    LaunchedEffect(isLandscape, isPhone) {
+        if (isPhone && isLandscape != currentFullscreen) currentOnChange(isLandscape)
+    }
+
+    LaunchedEffect(fullscreen) {
+        lock = when {
+            fullscreen -> OrientationLock.Landscape
+            lock == OrientationLock.Landscape -> OrientationLock.Portrait
+            else -> lock
+        }
+    }
+
+    LaunchedEffect(lock, activity) {
+        val a = activity ?: return@LaunchedEffect
+        val wanted = when (lock) {
+            OrientationLock.Free -> original
+            OrientationLock.Landscape -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            OrientationLock.Portrait -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        }
+        if (a.requestedOrientation != wanted) a.requestedOrientation = wanted
+    }
+
+    DisposableEffect(activity) {
+        onDispose { if (activity != null) activity.requestedOrientation = original }
+    }
+
+    DisposableEffect(activity, lock) {
+        val a = activity
+        val mode = lock
+        if (a == null || mode == OrientationLock.Free) return@DisposableEffect onDispose { }
+        var sawLandscape = false
+        val listener = object : OrientationEventListener(a) {
+            override fun onOrientationChanged(degrees: Int) {
+                if (degrees == ORIENTATION_UNKNOWN) return
+                val portrait = degrees <= PORTRAIT_TOLERANCE_DEG || degrees >= 360 - PORTRAIT_TOLERANCE_DEG
+                val landscape = abs(degrees - 90) <= LANDSCAPE_TOLERANCE_DEG || abs(degrees - 270) <= LANDSCAPE_TOLERANCE_DEG
+                when (mode) {
+                    OrientationLock.Landscape -> when {
+                        landscape -> sawLandscape = true
+                        portrait && sawLandscape && a.autoRotateEnabled() -> {
+                            sawLandscape = false
+                            currentOnChange(false)
+                        }
+                    }
+                    OrientationLock.Portrait -> if (portrait) lock = OrientationLock.Free
+                    OrientationLock.Free -> Unit
+                }
+            }
+        }
+        if (listener.canDetectOrientation()) listener.enable()
+        onDispose { listener.disable() }
+    }
+
+    DisposableEffect(fullscreen) {
         val window = activity?.window
-        if (!active || activity == null || window == null) return@DisposableEffect onDispose { }
-        val prevOrientation = activity.requestedOrientation
+        if (!fullscreen || activity == null || window == null) return@DisposableEffect onDispose { }
         val prevCutout = if (Build.VERSION.SDK_INT >= 28) window.attributes.layoutInDisplayCutoutMode else 0
-        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         val controller = WindowCompat.getInsetsController(window, view)
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller.hide(WindowInsetsCompat.Type.systemBars())
@@ -184,8 +293,17 @@ fun FullscreenOrientationEffect(active: Boolean) {
             if (Build.VERSION.SDK_INT >= 28) {
                 window.attributes = window.attributes.also { it.layoutInDisplayCutoutMode = prevCutout }
             }
-            activity.requestedOrientation = prevOrientation
         }
+    }
+}
+
+/** Layar tetap menyala selama video diputar / buffering; dilepas saat jeda supaya hemat baterai. */
+@Composable
+fun KeepScreenOnEffect(active: Boolean) {
+    val view = LocalView.current
+    DisposableEffect(view, active) {
+        view.keepScreenOn = active
+        onDispose { view.keepScreenOn = false }
     }
 }
 
