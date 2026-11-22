@@ -181,11 +181,32 @@ object PosterBitmaps {
     }
 }
 
+private const val POSTER_MAX_RETRIES = 3
+
 @Composable
 fun PosterArt(spec: PosterSpec, modifier: Modifier = Modifier) {
     if (spec.url != null) {
-
-        coil.compose.AsyncImage(model = spec.url, contentDescription = null, modifier = modifier, contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+        // Gagal muat (jaringan goyah / CDN timeout) tidak di-cache oleh Coil: coba lagi beberapa kali dengan jeda bertahap.
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        val attempt = remember(spec.url) { androidx.compose.runtime.mutableIntStateOf(0) }
+        val failed = remember(spec.url) { androidx.compose.runtime.mutableStateOf(false) }
+        androidx.compose.runtime.LaunchedEffect(failed.value) {
+            if (failed.value && attempt.intValue < POSTER_MAX_RETRIES) {
+                kotlinx.coroutines.delay(1_500L * (attempt.intValue + 1))
+                attempt.intValue++
+                failed.value = false
+            }
+        }
+        val request = remember(spec.url, attempt.intValue) {
+            coil.request.ImageRequest.Builder(ctx).data(spec.url)
+                .setParameter("retry", attempt.intValue, memoryCacheKey = null)
+                .build()
+        }
+        coil.compose.AsyncImage(
+            model = request, contentDescription = null, modifier = modifier,
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            onError = { failed.value = true },
+        )
         return
     }
     val version = remember { androidx.compose.runtime.mutableIntStateOf(0) }

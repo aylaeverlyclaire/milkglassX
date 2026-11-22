@@ -190,23 +190,31 @@ const UPSERT_ANIME_SQL = `
   ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
   ON CONFLICT(id) DO UPDATE SET
     mal_id = COALESCE(excluded.mal_id, animes.mal_id),
-    title = excluded.title,
-    title_alt = excluded.title_alt,
-    synopsis = excluded.synopsis,
-    score = excluded.score,
+    title = CASE WHEN excluded.title = 'Untitled' THEN animes.title ELSE excluded.title END,
+    title_alt = CASE WHEN excluded.title_alt = '' THEN animes.title_alt ELSE excluded.title_alt END,
+    synopsis = CASE WHEN excluded.synopsis = '' THEN animes.synopsis ELSE excluded.synopsis END,
+    score = CASE WHEN excluded.score > 0 THEN excluded.score ELSE animes.score END,
     type = excluded.type,
     status = excluded.status,
     schedule_day = CASE WHEN excluded.schedule_day > 0 THEN excluded.schedule_day ELSE animes.schedule_day END,
     duration = excluded.duration,
     studio = excluded.studio,
     release_season = excluded.release_season,
-    poster_url = excluded.poster_url,
+    poster_url = COALESCE(NULLIF(excluded.poster_url, ''), animes.poster_url),
     genres_json = excluded.genres_json,
     popularity = excluded.popularity,
     updated_at = excluded.updated_at,
     episodes_total = CASE WHEN excluded.episodes_total > 0 THEN excluded.episodes_total ELSE animes.episodes_total END,
-    next_airing_at = excluded.next_airing_at,
-    next_airing_ep = excluded.next_airing_ep,
+    -- AniList kadang tak mengirim nextAiringEpisode (jeda antar-tayang / data parsial). Untuk serial RELEASING,
+    -- pertahankan jadwal terakhir yang diketahui (maks. 14 hari lalu); klien memproyeksikannya mingguan.
+    next_airing_at = CASE
+      WHEN excluded.next_airing_at > 0 THEN excluded.next_airing_at
+      WHEN excluded.status = 1 AND animes.next_airing_at > CAST(strftime('%s','now') AS INTEGER) - 1209600 THEN animes.next_airing_at
+      ELSE 0 END,
+    next_airing_ep = CASE
+      WHEN excluded.next_airing_at > 0 THEN excluded.next_airing_ep
+      WHEN excluded.status = 1 AND animes.next_airing_at > CAST(strftime('%s','now') AS INTEGER) - 1209600 THEN animes.next_airing_ep
+      ELSE 0 END,
     title_native = COALESCE(excluded.title_native, animes.title_native),
     synonyms_json = COALESCE(excluded.synonyms_json, animes.synonyms_json),
     norm_compact = excluded.norm_compact
@@ -456,6 +464,21 @@ export async function enrichSingleAnimeFromAniListAsync(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * Placeholder hasil ingest (poster kosong / judul generik) hanya di-enrich satu kali dengan timeout 3,5 dtk;
+ * bila AniList gagal/429 barisnya tertinggal tanpa poster, skor, dan jadwal. Cron memanggil ini untuk
+ * mencoba lagi sejumlah kecil baris tak lengkap (acak agar baris yang terus gagal tidak memblokir antrean).
+ */
+export async function backfillIncompleteAnime(db: D1Database, limit = 5): Promise<number> {
+  const rows = await db
+    .prepare(`SELECT id FROM animes WHERE poster_url IS NULL OR poster_url = '' ORDER BY RANDOM() LIMIT ?1`)
+    .bind(limit)
+    .all<{ id: number }>();
+  const ids = (rows.results ?? []).map((r) => r.id);
+  for (const id of ids) await enrichSingleAnimeFromAniListAsync(db, id);
+  return ids.length;
 }
 
 let cachedSourceUrls: { expiresAt: number; value: SourceBaseUrls } | null = null;

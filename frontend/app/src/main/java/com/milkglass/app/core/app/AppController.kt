@@ -274,7 +274,18 @@ class AppController(
 
     private fun mergeRemote(entries: List<CatalogEntry>) {
         if (entries.isNotEmpty()) {
-            remoteEntries = remoteEntries + entries.associateBy { it.anime.id }
+            // Jangan timpa poster/skor/MAL id yang sudah ada dengan data parsial (null/0) dari respons yang lebih miskin.
+            val merged = remoteEntries.toMutableMap()
+            for (n in entries) {
+                val old = merged[n.anime.id]
+                merged[n.anime.id] = if (old == null) n else n.copy(
+                    anime = if (n.anime.rating > 0.0 || old.anime.rating <= 0.0) n.anime
+                    else n.anime.copy(rating = old.anime.rating, voteCount = maxOf(n.anime.voteCount, old.anime.voteCount)),
+                    posterUrl = n.posterUrl ?: old.posterUrl,
+                    malId = n.malId ?: old.malId,
+                )
+            }
+            remoteEntries = merged
             requestAvailability()
         }
     }
@@ -577,7 +588,7 @@ class AppController(
             val ts = air + n * WEEK_MS
             if (ts < ds || ts >= de) return@forEach
             val ep = (a.releasedEpisodes + 1 + n).toInt()
-            if (ep < 1 || ep > a.totalEpisodes) return@forEach
+            if (ep < 1 || (a.totalKnown && ep > a.totalEpisodes)) return@forEach
             out += ScheduleEntry(a, ts, ep)
         }
         return out.sortedBy { it.ts }

@@ -29,9 +29,12 @@ data class Anime(
 
     val nextAirAt: Long? = null,
     val sourceUrls: Map<String, String> = emptyMap(),
+
+    /** false = jumlah episode belum diketahui (serial ongoing); totalEpisodes hanya perkiraan dan bukan batas atas. */
+    val totalKnown: Boolean = true,
 ) {
 
-    val romaji: String get() = altTitle.substringBefore(" · ")
+    val romaji: String get() = altTitle.substringBefore(" · ").ifBlank { title }
 }
 
 @Serializable

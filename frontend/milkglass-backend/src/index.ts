@@ -7,7 +7,7 @@ import { authRoutes } from './routes/auth.routes';
 import { cfRoutes } from './routes/cf.routes';
 import { playRoutes } from './routes/play.routes';
 import { aggregateSourceHealthCron } from './services/health.service';
-import { syncAniListCatalog } from './services/anilist.service';
+import { backfillIncompleteAnime, syncAniListCatalog } from './services/anilist.service';
 
 export interface AppBindings {
   DB: D1Database;
@@ -99,6 +99,11 @@ export default {
         const minutes = new Date(event.scheduledTime).getUTCMinutes();
         if (minutes === 0) {
           await syncAniListCatalog(env.DB, 1, 50, 3);
+        }
+        try {
+          await backfillIncompleteAnime(env.DB, 5);
+        } catch (err: unknown) {
+          console.error('[cron] backfillIncompleteAnime failed', err instanceof Error ? err.message : String(err));
         }
       })()
     );

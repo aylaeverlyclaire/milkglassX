@@ -157,7 +157,7 @@ private fun ScheduleRow(ctl: AppController, e: ScheduleEntry, last: Boolean) {
                         Column(Modifier.weight(1f)) {
                             Clamp1(a.romaji, ty.subtitle, c.onSurface, Modifier.fillMaxWidth())
                             MilkText(
-                                "${tr.t("common.episodeAbbr")} ${e.ep}${if (e.ep == a.totalEpisodes) tr.t("common.finalSuffix") else ""}",
+                                "${tr.t("common.episodeAbbr")} ${e.ep}${if (a.totalKnown && e.ep == a.totalEpisodes) tr.t("common.finalSuffix") else ""}",
                                 ty.caption, c.onSurfaceVariant,
                             )
                             CountdownText(ctl, e.ts, hideWhenAired = true)
