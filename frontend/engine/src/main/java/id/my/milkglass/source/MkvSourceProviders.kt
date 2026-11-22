@@ -902,7 +902,9 @@ class KusonimeSourceProvider(
                 val quality = MkvQuality.fromText(strongText) ?: return@forEach
                 if (quality !in targetQualities) return@forEach
                 val container = MediaContainer.detect(header, strongText)
-                val isBatch = header.contains("batch", ignoreCase = true)
+                val isMoviePost = bestPostUrl.contains("movie", ignoreCase = true) ||
+                    animeTitle.contains("movie", ignoreCase = true)
+                val isBatchHeader = header.contains("batch", ignoreCase = true) && !isMoviePost && episodeNumber > 1
 
                 row.select("a[href]").forEach { a ->
                     val href = a.absUrl("href").trim()
@@ -915,7 +917,7 @@ class KusonimeSourceProvider(
                                 hosterLabel = label.ifBlank { "Hoster" },
                                 rawUrl = href,
                                 pageReferer = bestPostUrl,
-                                isBatchArchive = isBatch,
+                                isBatchArchive = isBatchHeader,
                                 container = container
                             )
                         )
