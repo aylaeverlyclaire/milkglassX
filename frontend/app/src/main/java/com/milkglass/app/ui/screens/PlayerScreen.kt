@@ -647,7 +647,7 @@ private fun PlayerErrorBanner(playerManager: PlayerManager) {
     val errFlow = remember(playerManager) {
         playerManager.snapshot.map { if (it.phase == PlaybackPhase.ERROR) it.error else null }.distinctUntilChanged()
     }
-    val errObj by errFlow.collectAsState(initial = null)
+    val errObj = errFlow.collectAsState(initial = null).value
     if (errObj != null) {
         Row(
             modifier = Modifier
