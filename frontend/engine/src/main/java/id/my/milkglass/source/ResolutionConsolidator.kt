@@ -20,8 +20,7 @@ class ResolutionConsolidator(
 
     private val cache = ConcurrentHashMap<String, ConsolidatedEntry>()
 
-    // Urutan prioritas berbasis verifikasi browser: situs dengan embed streaming web langsung lebih dulu
-    // (Samehadaku ICEFILE 480p-1080p -> Oploverz HD-1/HD-2 -> NontonAnimeID -> Otakudesu -> Animasu via CF Handler).
+    // Hanya Samehadaku dan Otakudesu.
     private val providers: List<MkvSourceProvider> by lazy {
         listOf(
             SamehadakuSourceProvider(
@@ -29,24 +28,9 @@ class ResolutionConsolidator(
                 sourceBaseUrls[SourcePriority.SAMEHADAKU] ?: SourcePriority.SAMEHADAKU.defaultBaseUrl,
                 slugCache = slugCache
             ),
-            OploverzSourceProvider(
-                clients,
-                sourceBaseUrls[SourcePriority.OPLOVERZ] ?: SourcePriority.OPLOVERZ.defaultBaseUrl,
-                slugCache = slugCache
-            ),
-            NontonAnimeIdSourceProvider(
-                clients,
-                sourceBaseUrls[SourcePriority.NONTONANIMEID] ?: SourcePriority.NONTONANIMEID.defaultBaseUrl,
-                slugCache = slugCache
-            ),
             OtakudesuSourceProvider(
                 clients,
                 sourceBaseUrls[SourcePriority.OTAKUDESU] ?: SourcePriority.OTAKUDESU.defaultBaseUrl,
-                slugCache = slugCache
-            ),
-            AnimasuSourceProvider(
-                clients,
-                sourceBaseUrls[SourcePriority.ANIMASU] ?: SourcePriority.ANIMASU.defaultBaseUrl,
                 slugCache = slugCache
             )
         )

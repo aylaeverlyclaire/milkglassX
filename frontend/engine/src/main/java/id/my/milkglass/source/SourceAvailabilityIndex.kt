@@ -89,10 +89,8 @@ class SourceAvailabilityIndex(
         val fetchedBySource = linkedMapOf<SourcePriority, List<IndexedAnimeEntry>>()
         try {
             val tasks = listOf(
-                SourcePriority.OTAKUDESU to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchOtakudesuIndex() }.getOrDefault(emptyList()) },
                 SourcePriority.SAMEHADAKU to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchSamehadakuIndex() }.getOrDefault(emptyList()) },
-                SourcePriority.OPLOVERZ to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchOploverzIndex() }.getOrDefault(emptyList()) },
-                SourcePriority.KUSONIME to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchKusonimeIndex() }.getOrDefault(emptyList()) }
+                SourcePriority.OTAKUDESU to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchOtakudesuIndex() }.getOrDefault(emptyList()) }
             )
             for ((src, fut) in tasks) {
                 val list = runCatching { fut.get(20, TimeUnit.SECONDS) }.getOrNull().orEmpty()
@@ -226,50 +224,11 @@ class SourceAvailabilityIndex(
         }
     }
 
-    private fun fetchOploverzIndex(): List<IndexedAnimeEntry> {
-        val base = baseUrlProvider(SourcePriority.OPLOVERZ).trimEnd('/')
-        val pagePool = Executors.newFixedThreadPool(4) { r ->
-            Thread(r, "milkglass-oplo-idx").apply { isDaemon = true }
-        }
-        val out = mutableListOf<IndexedAnimeEntry>()
-        try {
-            val futs = (1..4).map { page ->
-                pagePool.submit<String?> {
-                    fetchHtml("https://backapi.oploverz.ac/api/series?page=$page&pageSize=250", null)
-                }
-            }
-            for (fut in futs) {
-                val apiJson = runCatching { fut.get(12, TimeUnit.SECONDS) }.getOrNull() ?: continue
-                val arr = runCatching { JSONObject(apiJson).optJSONArray("data") }.getOrNull() ?: continue
-                for (i in 0 until arr.length()) {
-                    val obj = arr.optJSONObject(i) ?: continue
-                    val title = obj.optString("title")
-                    val slug = obj.optString("slug")
-                    if (title.isNotBlank() && slug.isNotBlank()) {
-                        buildEntry(SourcePriority.OPLOVERZ, title, "$base/series/$slug")?.let { out.add(it) }
-                    }
-                }
-            }
-        } finally {
-            pagePool.shutdownNow()
-        }
-        return out
-    }
-
-    private fun fetchKusonimeIndex(): List<IndexedAnimeEntry> {
-        val base = baseUrlProvider(SourcePriority.KUSONIME).trimEnd('/')
-        val html = fetchHtml("$base/list-anime-batch-sub-indo/", "$base/") ?: return emptyList()
-        val doc = Jsoup.parse(html, base)
-        return doc.select("#abtext a[href], .jdlbar a[href]").mapNotNull { a ->
-            buildEntry(SourcePriority.KUSONIME, a.text(), a.absUrl("href"))
-        }
-    }
-
     private fun fetchHtml(url: String, referer: String?): String? {
         val req = Request.Builder().url(url).apply {
             if (!referer.isNullOrBlank()) header("Referer", referer)
         }.build()
-        val client = if (url.contains("backapi.oploverz.ac")) clients.mediaAndApiClient else clients.sourceClient
+        val client = clients.sourceClient
         return runCatching {
             client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return@use null
