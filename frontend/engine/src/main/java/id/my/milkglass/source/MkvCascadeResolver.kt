@@ -608,8 +608,9 @@ class MkvCascadeResolver(
     fun verifyDirect(list: List<ResolvedMkvMedia>): List<ResolvedMkvMedia> {
         if (list.isEmpty()) return emptyList()
         val batch = list.take(4)
+        val cs = ExecutorCompletionService<ResolvedMkvMedia?>(sharedExtractionPool)
         val futures = batch.map { m ->
-            sharedExtractionPool.submit<ResolvedMkvMedia?> {
+            cs.submit {
                 val ok = runCatching {
                     extractorRegistry.verifyPlayableMedia(
                         ExtractedDirectMedia(
@@ -626,17 +627,31 @@ class MkvCascadeResolver(
                 if (ok) m else null
             }
         }
-        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(3L)
+        val verified = mutableListOf<ResolvedMkvMedia>()
+        var deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1_800L)
+        val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(120L)
         try {
-            return futures.mapNotNull { f ->
-                try {
-                    f.get((deadlineNs - System.nanoTime()).coerceAtLeast(0L), TimeUnit.NANOSECONDS)
-                } catch (e: InterruptedException) {
-                    throw e
-                } catch (_: Exception) {
+            repeat(futures.size) {
+                if (Thread.currentThread().isInterrupted) return@repeat
+                val rem = deadlineNs - System.nanoTime()
+                if (rem <= 0L) return@repeat
+                val fut = try {
+                    cs.poll(rem, TimeUnit.NANOSECONDS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
                     null
+                } ?: return@repeat
+                val hit = runCatching { fut.get() }.getOrNull()
+                if (hit != null) {
+                    verified.add(hit)
+                    if (verified.size == 1) {
+                        val grace = System.nanoTime() + firstWinGraceNs
+                        if (grace < deadlineNs) deadlineNs = grace
+                    }
+                    if (verified.size >= 2) return@repeat
                 }
             }
+            return verified
         } finally {
             futures.forEach { if (!it.isDone) it.cancel(true) }
         }
@@ -911,19 +926,22 @@ class MkvCascadeResolver(
         preferStreamingEmbeds: Boolean = true
     ): List<ResolvedMkvMedia> {
         val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(12L)
+        val bestDirectQuality = qualityOrder.firstOrNull { q ->
+            candidates.any { !it.isStreamEmbed && it.quality == q }
+        } ?: qualityOrder.first()
         if (preferStreamingEmbeds) {
-            // Tahap 1: balapkan batch gabungan (embed utama + direct hoster teratas di kualitas pilihan) secara paralel
-            val preferredTier = candidates.filter { it.quality == qualityOrder.first() }
+            // Tahap 1: balapkan batch gabungan (embed utama + direct hoster teratas di kualitas terbaik yang tersedia) secara paralel
+            val preferredTier = candidates.filter { !it.isStreamEmbed && it.quality == bestDirectQuality }
             val embeds = candidates.filter { it.isStreamEmbed }
-            val combinedFirst = (embeds.take(3) + preferredTier.filterNot { it.isStreamEmbed }.take(5)).distinctBy { it.rawUrl }
+            val combinedFirst = (embeds.take(4) + preferredTier.take(6)).distinctBy { it.rawUrl }
             if (combinedFirst.isNotEmpty()) {
                 val fastWin = raceExtractCandidates(combinedFirst, maxResults = maxResults, timeoutMs = 6_500L)
                 if (fastWin.isNotEmpty()) return fastWin
             }
         }
         val tried = if (preferStreamingEmbeds) {
-            val preferredTier = candidates.filter { it.quality == qualityOrder.first() }
-            (candidates.filter { it.isStreamEmbed }.take(3) + preferredTier.filterNot { it.isStreamEmbed }.take(5))
+            val preferredTier = candidates.filter { !it.isStreamEmbed && it.quality == bestDirectQuality }
+            (candidates.filter { it.isStreamEmbed }.take(4) + preferredTier.take(6))
                 .mapTo(HashSet()) { it.rawUrl }
         } else {
             emptySet()
@@ -985,8 +1003,12 @@ class MkvCascadeResolver(
                         runCatching {
                             if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
                             val sniffed = sniffer.invoke(topEmbed.rawUrl, topEmbed.pageReferer) ?: return@runCatching null
-                            // Wajib verifikasi agar halaman HTML/error tidak pernah lolos ke ExoPlayer (ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED)
-                            if (!sniffed.isArchive && !extractorRegistry.verifyPlayableMedia(sniffed)) {
+                            // Wajib verifikasi untuk URL non-CDN agar halaman HTML/error tidak pernah lolos ke ExoPlayer,
+                            // tetapi lewati TCP probe kedua untuk endpoint stream biner CDN terpercaya (googlevideo/blogger/odcloud/pixeldrain API)
+                            if (!sniffed.isArchive &&
+                                !id.my.milkglass.extractor.EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(sniffed.directUrl) &&
+                                !extractorRegistry.verifyPlayableMedia(sniffed)
+                            ) {
                                 return@runCatching null
                             }
                             EndpointHealthScorer.recordSuccess(sniffed.hoster)
