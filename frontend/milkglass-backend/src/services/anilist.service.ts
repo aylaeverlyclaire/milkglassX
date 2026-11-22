@@ -112,6 +112,7 @@ const ENRICH_MEDIA_FIELDS = `
   }
   averageScore
   episodes
+  genres
   coverImage {
     extraLarge
     large
@@ -179,11 +180,14 @@ const ENRICH_ANIME_SQL = `
   UPDATE animes
   SET
     mal_id = COALESCE(?1, mal_id),
-    score = CASE WHEN ?2 > 0 THEN ?2 ELSE score END,
-    poster_url = COALESCE(NULLIF(?3, ''), poster_url),
-    episodes_total = CASE WHEN ?4 > 0 THEN ?4 ELSE episodes_total END,
-    updated_at = ?5
-  WHERE id = ?6
+    title = COALESCE(NULLIF(?2, ''), title),
+    title_alt = COALESCE(NULLIF(?3, ''), title_alt),
+    score = CASE WHEN ?4 > 0 THEN ?4 ELSE score END,
+    poster_url = COALESCE(NULLIF(?5, ''), poster_url),
+    episodes_total = CASE WHEN ?6 > 0 THEN ?6 ELSE episodes_total END,
+    genres_json = CASE WHEN ?7 != '[]' THEN ?7 ELSE genres_json END,
+    updated_at = ?8
+  WHERE id = ?9
     AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
 `;
 
@@ -193,12 +197,27 @@ export function bindAnimeEnrichOnly(
   item: AniListRawMedia,
   nowSec: number
 ): D1PreparedStatement {
+  const titleMain = (item.title?.romaji || item.title?.english || '').trim();
+  const titleAlt = (item.title?.english || item.title?.native || '').trim();
   const scoreTenScale = item.averageScore ? Number((item.averageScore / 10).toFixed(2)) : 0;
   const posterUrl = item.coverImage?.extraLarge || item.coverImage?.large || '';
   const episodesTotal = item.episodes && item.episodes > 0 ? item.episodes : 0;
+  const genres = Array.isArray(item.genres)
+    ? item.genres.filter((g): g is string => typeof g === 'string' && g.trim().length > 0)
+    : [];
   return db
     .prepare(ENRICH_ANIME_SQL)
-    .bind(item.idMal ?? null, scoreTenScale, posterUrl, episodesTotal, nowSec, targetAnimeId);
+    .bind(
+      item.idMal ?? null,
+      titleMain,
+      titleAlt,
+      scoreTenScale,
+      posterUrl,
+      episodesTotal,
+      JSON.stringify(genres),
+      nowSec,
+      targetAnimeId
+    );
 }
 
 const META_LAST_IMPORT_AT = 'last_import_at';
@@ -228,30 +247,26 @@ export async function ensureAnimeExistsFastInD1(
   db: D1Database,
   animeId: number,
   malId?: number,
-  fallbackTitle = 'Anime'
-): Promise<{ malId: number | null; wasCreatedPlaceholder: boolean }> {
+  _fallbackTitle = 'Anime'
+): Promise<{ exists: boolean; malId: number | null; needsEnrichment: boolean }> {
   const existing = await db
-    .prepare(`SELECT id, mal_id, poster_url FROM animes WHERE id = ?1`)
-    .bind(animeId)
-    .first<{ id: number; mal_id: number | null; poster_url: string | null }>();
-  if (existing) {
-    return {
-      malId: existing.mal_id ?? malId ?? null,
-      wasCreatedPlaceholder: !existing.poster_url,
-    };
-  }
-  const nowSec = Math.floor(Date.now() / 1000);
-  await db
     .prepare(
-      `INSERT OR IGNORE INTO animes (
-         id, mal_id, title, title_alt, synopsis, score, type, status,
-         schedule_day, duration, studio, release_season, poster_url,
-         genres_json, popularity, updated_at, has_live_source
-       ) VALUES (?1, ?2, ?3, '', '', 0, 'TV', 1, 0, '24 min', '-', '-', '', '[]', 0, ?4, 0)`
+      `SELECT id, mal_id, poster_url, score, genres_json FROM animes
+       WHERE id = ?1
+         AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')`
     )
-    .bind(animeId, malId ?? null, fallbackTitle, nowSec)
-    .run();
-  return { malId: malId ?? null, wasCreatedPlaceholder: true };
+    .bind(animeId)
+    .first<{ id: number; mal_id: number | null; poster_url: string | null; score: number | null; genres_json: string | null }>();
+  if (!existing) {
+    return { exists: false, malId: null, needsEnrichment: false };
+  }
+  const needsEnrichment =
+    !existing.poster_url || !existing.score || !existing.genres_json || existing.genres_json === '[]';
+  return {
+    exists: true,
+    malId: existing.mal_id ?? malId ?? null,
+    needsEnrichment,
+  };
 }
 
 export async function enrichSingleAnimeFromAniListAsync(
@@ -337,7 +352,7 @@ export async function backfillIncompleteAnime(db: D1Database, limit = 50): Promi
     .prepare(
       `SELECT id, title FROM animes
        WHERE (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
-         AND (poster_url IS NULL OR poster_url = '' OR score = 0 OR episodes_total = 0)
+         AND (poster_url IS NULL OR poster_url = '' OR score = 0 OR episodes_total = 0 OR genres_json IS NULL OR genres_json = '' OR genres_json = '[]')
        ORDER BY RANDOM()
        LIMIT ?1`
     )
@@ -424,19 +439,15 @@ export async function getSourceBaseUrls(db: D1ReadClient): Promise<SourceBaseUrl
     const { results } = await db
       .prepare(
         `SELECT key, value FROM catalog_meta
-         WHERE key IN ('animasu_base_url', 'otakudesu_base_url', 'samehadaku_base_url', 'nontonanimeid_base_url', 'oploverz_base_url', 'kusonime_base_url')`
+         WHERE key IN ('otakudesu_base_url', 'samehadaku_base_url')`
       )
       .all<{ key: string; value: string }>();
 
     for (const row of results ?? []) {
       const clean = (row.value || '').trim().replace(/\/+$/, '');
       if (!clean.startsWith('https://')) continue;
-      if (row.key === 'animasu_base_url') resolved.animasu = clean;
-      else if (row.key === 'otakudesu_base_url') resolved.otakudesu = clean;
+      if (row.key === 'otakudesu_base_url') resolved.otakudesu = clean;
       else if (row.key === 'samehadaku_base_url') resolved.samehadaku = clean;
-      else if (row.key === 'nontonanimeid_base_url') resolved.nontonanimeid = clean;
-      else if (row.key === 'oploverz_base_url') resolved.oploverz = clean;
-      else if (row.key === 'kusonime_base_url') resolved.kusonime = clean;
     }
     cachedSourceUrls = { expiresAt: now + SOURCE_URLS_CACHE_TTL_MS, value: { ...resolved } };
   } catch (err: unknown) {

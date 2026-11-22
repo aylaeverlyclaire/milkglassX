@@ -1,63 +1,32 @@
 import { z } from 'zod';
 
-export type SourceId =
-  | 'samehadaku'
-  | 'oploverz'
-  | 'nontonanimeid'
-  | 'otakudesu'
-  | 'animasu'
-  | 'kusonime';
+export type SourceId = 'samehadaku' | 'otakudesu';
 
 export interface SourceBaseUrls {
   samehadaku: string;
-  oploverz: string;
-  nontonanimeid: string;
   otakudesu: string;
-  animasu: string;
-  kusonime: string;
 }
 
 /**
- * Prioritas kanonik embed-first lintas Backend, Indexer, dan Android Engine:
- * penyedia yang menyediakan embed streaming langsung (Samehadaku, Oploverz,
- * NontonAnimeID, Otakudesu) didahulukan sebelum Animasu (sering diblokir) dan
- * Kusonime (batch/hoster).
+ * Prioritas kanonik lintas Backend, Indexer, dan Android Engine:
+ * Hanya Samehadaku dan Otakudesu yang aktif.
  */
 export const SOURCE_CASCADE_ORDER: readonly SourceId[] = [
   'samehadaku',
   'otakudesu',
-  'nontonanimeid',
-  'kusonime',
-  'oploverz',
-  'animasu',
 ] as const;
 
 export const DEFAULT_SOURCE_URLS: Readonly<SourceBaseUrls> = {
   samehadaku: 'https://v2.samehadaku.how',
-  oploverz: 'https://oploverz.ch',
-  nontonanimeid: 'https://nontonanimeid.stream',
   otakudesu: 'https://otakudesu.blog',
-  animasu: 'https://animasu.love',
-  kusonime: 'https://kusonime.com',
 };
 
 export const SOURCE_WATERMARK_TIER: Readonly<Record<SourceId, number>> = {
   samehadaku: 0,
-  oploverz: 1,
-  nontonanimeid: 0,
   otakudesu: 2,
-  animasu: 0,
-  kusonime: 2,
 };
 
-export const SOURCE_ID_SCHEMA = z.enum([
-  'samehadaku',
-  'oploverz',
-  'nontonanimeid',
-  'otakudesu',
-  'animasu',
-  'kusonime',
-]);
+export const SOURCE_ID_SCHEMA = z.enum(['samehadaku', 'otakudesu']);
 
 export const QUALITY_SCHEMA = z.enum(['1080p', '720p', '480p', '360p']);
 export const TARGET_RESOLUTIONS = ['1080p', '720p', '480p'] as const;
