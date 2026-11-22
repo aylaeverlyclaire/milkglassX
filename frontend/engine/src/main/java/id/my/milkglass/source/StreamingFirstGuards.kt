@@ -134,7 +134,7 @@ internal object StreamingFirstGuards {
 
     fun selectExtractionBatch(pool: List<RawMkvCandidate>): List<RawMkvCandidate> {
         val prioritizedEmbeds = pool.filter { it.isStreamEmbed }.take(4)
-        val remainingSlots = (8 - prioritizedEmbeds.size).coerceAtLeast(0)
+        val remainingSlots = (10 - prioritizedEmbeds.size).coerceAtLeast(0)
         return (prioritizedEmbeds + pool.filterNot { it.isStreamEmbed }.take(remainingSlots)).distinctBy { it.rawUrl }
     }
 }

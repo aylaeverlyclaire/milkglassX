@@ -88,12 +88,28 @@ object EmbedMediaSniffer {
             low.contains("blogger.googleusercontent.com") ||
             low.contains("video-downloads.googleusercontent.com") ||
             low.contains("drive.usercontent.google.com") ||
+            low.contains("odcloud.net/") ||
             low.contains("pixeldrain.com/api/file/") ||
             low.contains("pixeldrain.lu/api/file/")
         ) {
             return true
         }
         return false
+    }
+
+    /**
+     * Endpoint stream biner CDN yang hanya dipanggil oleh elemen <video> di dalam WebView
+     * dan bukan halaman HTML/PHP. Lewati TCP probe kedua agar tidak memicu throttling token.
+     */
+    internal fun isTrustedBinaryStreamEndpoint(url: String): Boolean {
+        if (!isPlayableMediaUrl(url)) return false
+        val low = url.lowercase(Locale.ROOT)
+        return low.contains("googlevideo.com/videoplayback") ||
+            low.contains("blogger.googleusercontent.com") ||
+            low.contains("video-downloads.googleusercontent.com") ||
+            low.contains("cdn.odcloud.net/") ||
+            low.contains("pixeldrain.com/api/file/") ||
+            low.contains("pixeldrain.lu/api/file/")
     }
 
     internal fun isHlsUrl(url: String): Boolean {
