@@ -210,10 +210,8 @@ internal fun SeekIndicator(dir: Int, total: Int, modifier: Modifier = Modifier) 
 @Composable
 private fun SeekChevron(dir: Int, alphaProvider: () -> Float) {
     Box(
-        Modifier.graphicsLayer {
-            scaleX = if (dir < 0) -1f else 1f
-            alpha = alphaProvider()
-        }
+        Modifier.scale(scaleX = if (dir < 0) -1f else 1f, scaleY = 1f)
+            .graphicsLayer { alpha = alphaProvider() }
     ) {
         MilkIcon(MilkIcons.Chev, size = 24.dp, tint = Color.White)
     }
