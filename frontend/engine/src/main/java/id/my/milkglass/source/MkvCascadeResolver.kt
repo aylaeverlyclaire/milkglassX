@@ -169,6 +169,7 @@ internal object TitleMatcher {
     private val sideStoryRegex = Regex("""\b(?:side\s*story|gaiden|spin[\s-]*off)\b""", RegexOption.IGNORE_CASE)
     private val specialRegex = Regex("""\b(?:special|recap|sp)\b""", RegexOption.IGNORE_CASE)
     private val romanSeasonRegex = Regex("""\b(II|III|IV|V)\b""")
+    private val symbolSeason2Regex = Regex("""(?:∬|²)""")
     private val whitespaceRegex = Regex("\\s+")
     private val ordinalSeasonRegex = Regex("""\b(\d+)(?:nd|rd|th)\s+season\b""", RegexOption.IGNORE_CASE)
     private val shortSeasonRegex = Regex("""\bs(\d+)\b""", RegexOption.IGNORE_CASE)
@@ -176,6 +177,16 @@ internal object TitleMatcher {
     private val roman2Regex = Regex("""\bII\b""", RegexOption.IGNORE_CASE)
     private val roman4Regex = Regex("""\bIV\b""", RegexOption.IGNORE_CASE)
     private val roman5Regex = Regex("""\bV\b""", RegexOption.IGNORE_CASE)
+
+    private val synonymAliases = mapOf(
+        "5 toubun no hanayome" to "Gotoubun no Hanayome",
+        "go toubun no hanayome" to "Gotoubun no Hanayome",
+        "kanojo okarishimasu" to "Rent a Girlfriend",
+        "youkoso jitsuryoku shijou shugi no kyoushitsu e" to "Classroom of the Elite",
+        "shingeki no kyojin" to "Attack on Titan",
+        "tensei shitara slime datta ken" to "Tensura",
+        "dungeon ni deai wo motomeru no wa machigatteiru darou ka" to "Danmachi"
+    )
 
     private val parseCache = ConcurrentHashMap<String, ParsedTitle>()
 
@@ -198,13 +209,17 @@ internal object TitleMatcher {
             }
         }
         if (season == null) {
-            val rm = romanSeasonRegex.find(noBrackets)
-            season = when (rm?.groupValues?.getOrNull(1)) {
-                "II" -> 2
-                "III" -> 3
-                "IV" -> 4
-                "V" -> 5
-                else -> null
+            if (symbolSeason2Regex.containsMatchIn(noBrackets)) {
+                season = 2
+            } else {
+                val rm = romanSeasonRegex.find(noBrackets)
+                season = when (rm?.groupValues?.getOrNull(1)) {
+                    "II" -> 2
+                    "III" -> 3
+                    "IV" -> 4
+                    "V" -> 5
+                    else -> null
+                }
             }
         }
         var part: Int? = null
@@ -241,6 +256,7 @@ internal object TitleMatcher {
 
     fun tokenize(input: String): Set<String> {
         val normalized = brackets.replace(input.replace('\u00D7', 'x'), " ")
+            .replace(symbolSeason2Regex, " season 2 ")
             .replace(ordinalSeasonRegex, "season $1")
             .replace(shortSeasonRegex, "season $1")
             .replace(roman3Regex, "season 3")
@@ -298,24 +314,58 @@ internal object TitleMatcher {
     }
 
     fun searchQueries(animeTitle: String): List<String> {
-        val p = parse(animeTitle)
-        val cleanFull = nonWord.replace(brackets.replace(animeTitle, " "), " ")
+        val withoutParen = animeTitle.replace(Regex("""\([^)]*\)"""), " ")
+        val parenInner = Regex("""\(([^)]+)\)""").find(animeTitle)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+        val p = parse(withoutParen)
+        val cleanFull = nonWord.replace(brackets.replace(withoutParen, " "), " ")
             .replace(whitespaceRegex, " ")
             .trim()
-        val beforeColon = nonWord.replace(brackets.replace(animeTitle.substringBefore(":"), " "), " ")
+        val beforeColon = nonWord.replace(brackets.replace(withoutParen.substringBefore(":"), " "), " ")
             .replace(whitespaceRegex, " ")
             .trim()
+        val afterColon = if (withoutParen.contains(":")) {
+            nonWord.replace(brackets.replace(withoutParen.substringAfter(":"), " "), " ")
+                .replace(whitespaceRegex, " ")
+                .trim()
+        } else ""
+        val beforeDash = if (withoutParen.contains(" - ")) {
+            nonWord.replace(brackets.replace(withoutParen.substringBefore(" - "), " "), " ")
+                .replace(whitespaceRegex, " ")
+                .trim()
+        } else ""
+        val afterDash = if (withoutParen.contains(" - ")) {
+            nonWord.replace(brackets.replace(withoutParen.substringAfter(" - "), " "), " ")
+                .replace(whitespaceRegex, " ")
+                .trim()
+        } else ""
         val base = p.canonicalBase
         val out = mutableListOf<String>()
         if (p.season != null && base.isNotBlank()) {
             out.add("$base Season ${p.season}")
+            out.add("$base S${p.season}")
             out.add("$base ${p.season}")
+        }
+        for ((prefix, alias) in synonymAliases) {
+            if (base.startsWith(prefix)) {
+                if (p.season != null) {
+                    out.add("$alias Season ${p.season}")
+                    out.add("$alias S${p.season}")
+                }
+                out.add(alias)
+            }
         }
         val noYear = cleanFull.replace(Regex("""\b(?:19|20)\d{2}\b"""), " ").replace(whitespaceRegex, " ").trim()
         if (noYear.isNotBlank() && noYear != cleanFull) out.add(noYear)
         if (cleanFull.isNotBlank()) out.add(cleanFull)
+        if (parenInner.length >= 3 && !parenInner.all { it.isDigit() }) out.add(parenInner)
         if (beforeColon.isNotBlank()) out.add(beforeColon)
+        if (afterColon.length >= 4) out.add(afterColon)
+        if (beforeDash.isNotBlank()) out.add(beforeDash)
+        if (afterDash.length >= 4) out.add(afterDash)
         if (base.isNotBlank()) out.add(base)
+        val noMovieNum = beforeColon.replace(Regex("""\bmovie\s*\d+\b""", RegexOption.IGNORE_CASE), "Movie")
+            .replace(whitespaceRegex, " ").trim()
+        if (noMovieNum.isNotBlank() && noMovieNum != beforeColon) out.add(noMovieNum)
         return out
             .filter { it.length >= 2 }
             .distinctBy { it.lowercase(Locale.ROOT) }
