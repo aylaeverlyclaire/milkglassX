@@ -7,7 +7,7 @@ import { authRoutes } from './routes/auth.routes';
 import { cfRoutes } from './routes/cf.routes';
 import { playRoutes } from './routes/play.routes';
 import { aggregateSourceHealthCron } from './services/health.service';
-import { backfillIncompleteAnime, syncAniListCatalog } from './services/anilist.service';
+import { backfillIncompleteAnime } from './services/anilist.service';
 
 export interface AppBindings {
   DB: D1Database;
@@ -91,15 +91,13 @@ app.route('/v1', authRoutes);
 export default {
   fetch: app.fetch,
 
-  async scheduled(event: ScheduledEvent, env: AppBindings, ctx: ExecutionContext): Promise<void> {
+  async scheduled(_event: ScheduledEvent, env: AppBindings, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       (async () => {
         await aggregateSourceHealthCron(env.DB);
 
-        const minutes = new Date(event.scheduledTime).getUTCMinutes();
-        if (minutes === 0) {
-          await syncAniListCatalog(env.DB, 1, 50, 3);
-        }
+        // Katalog bersumber eksklusif dari Samehadaku & Otakudesu;
+        // AniList hanya bertugas melengkapi metadata (total eps, rating, poster).
         try {
           await backfillIncompleteAnime(env.DB, 50);
         } catch (err: unknown) {

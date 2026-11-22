@@ -102,7 +102,7 @@ async function fetchAniListGraphQL(
   return response;
 }
 
-const MEDIA_FIELDS = `
+const ENRICH_MEDIA_FIELDS = `
   id
   idMal
   title {
@@ -110,49 +110,38 @@ const MEDIA_FIELDS = `
     english
     native
   }
-  description(asHtml: false)
   averageScore
-  format
-  status
-  duration
-  season
-  seasonYear
-  popularity
   episodes
-  genres
-  synonyms
   coverImage {
     extraLarge
     large
   }
-  studios(isMain: true) {
-    nodes {
-      name
-    }
-  }
-  nextAiringEpisode {
-    airingAt
-    episode
-  }
-`;
-
-const CATALOG_PAGE_QUERY = `
-query ($page: Int, $perPage: Int, $status: MediaStatus) {
-  Page(page: $page, perPage: $perPage) {
-    pageInfo {
-      hasNextPage
-    }
-    media(type: ANIME, status: $status, sort: [POPULARITY_DESC], isAdult: false) {
-      ${MEDIA_FIELDS}
-    }
-  }
-}
 `;
 
 const SINGLE_MEDIA_QUERY = `
 query ($id: Int) {
   Media(id: $id, type: ANIME, isAdult: false) {
-    ${MEDIA_FIELDS}
+    ${ENRICH_MEDIA_FIELDS}
+  }
+}
+`;
+
+const BACKFILL_QUERY = `
+query ($ids: [Int], $perPage: Int) {
+  Page(page: 1, perPage: $perPage) {
+    media(id_in: $ids, type: ANIME) {
+      ${ENRICH_MEDIA_FIELDS}
+    }
+  }
+}
+`;
+
+const ENRICH_SEARCH_QUERY = `
+query ($search: String) {
+  Page(page: 1, perPage: 5) {
+    media(search: $search, type: ANIME, isAdult: false) {
+      ${ENRICH_MEDIA_FIELDS}
+    }
   }
 }
 `;
@@ -181,229 +170,58 @@ export function computeScheduleDayWib(airingAtEpochSec: number | null | undefine
   return utcDay === 0 ? 7 : utcDay;
 }
 
-const UPSERT_ANIME_SQL = `
-  INSERT INTO animes (
-    id, mal_id, title, title_alt, synopsis, score, type, status,
-    schedule_day, duration, studio, release_season, poster_url,
-    genres_json, popularity, updated_at, episodes_total, next_airing_at, next_airing_ep,
-    title_native, synonyms_json, norm_compact
-  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
-  ON CONFLICT(id) DO UPDATE SET
-    mal_id = COALESCE(excluded.mal_id, animes.mal_id),
-    title = CASE WHEN excluded.title = 'Untitled' THEN animes.title ELSE excluded.title END,
-    title_alt = CASE WHEN excluded.title_alt = '' THEN animes.title_alt ELSE excluded.title_alt END,
-    synopsis = CASE WHEN excluded.synopsis = '' THEN animes.synopsis ELSE excluded.synopsis END,
-    score = CASE WHEN excluded.score > 0 THEN excluded.score ELSE animes.score END,
-    type = excluded.type,
-    status = excluded.status,
-    schedule_day = CASE WHEN excluded.schedule_day > 0 THEN excluded.schedule_day ELSE animes.schedule_day END,
-    duration = excluded.duration,
-    studio = excluded.studio,
-    release_season = excluded.release_season,
-    poster_url = COALESCE(NULLIF(excluded.poster_url, ''), animes.poster_url),
-    genres_json = excluded.genres_json,
-    popularity = excluded.popularity,
-    updated_at = excluded.updated_at,
-    episodes_total = CASE WHEN excluded.episodes_total > 0 THEN excluded.episodes_total ELSE animes.episodes_total END,
-    -- AniList kadang tak mengirim nextAiringEpisode (jeda antar-tayang / data parsial). Untuk serial RELEASING,
-    -- pertahankan jadwal terakhir yang diketahui (maks. 14 hari lalu); klien memproyeksikannya mingguan.
-    next_airing_at = CASE
-      WHEN excluded.next_airing_at > 0 THEN excluded.next_airing_at
-      WHEN excluded.status = 1 AND animes.next_airing_at > CAST(strftime('%s','now') AS INTEGER) - 1209600 THEN animes.next_airing_at
-      ELSE 0 END,
-    next_airing_ep = CASE
-      WHEN excluded.next_airing_at > 0 THEN excluded.next_airing_ep
-      WHEN excluded.status = 1 AND animes.next_airing_at > CAST(strftime('%s','now') AS INTEGER) - 1209600 THEN animes.next_airing_ep
-      ELSE 0 END,
-    title_native = COALESCE(excluded.title_native, animes.title_native),
-    synonyms_json = COALESCE(excluded.synonyms_json, animes.synonyms_json),
-    norm_compact = excluded.norm_compact
+/**
+ * AniList HANYA melengkapi metadata (total episode, rating/score, poster, mal_id)
+ * pada entri katalog yang sudah berasal dari Samehadaku atau Otakudesu.
+ * Tidak pernah meng-insert entri katalog baru dari AniList.
+ */
+const ENRICH_ANIME_SQL = `
+  UPDATE animes
+  SET
+    mal_id = COALESCE(?1, mal_id),
+    score = CASE WHEN ?2 > 0 THEN ?2 ELSE score END,
+    poster_url = COALESCE(NULLIF(?3, ''), poster_url),
+    episodes_total = CASE WHEN ?4 > 0 THEN ?4 ELSE episodes_total END,
+    updated_at = ?5
+  WHERE id = ?6
+    AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
 `;
 
-export function bindAnimeUpsert(
+export function bindAnimeEnrichOnly(
   db: D1Database,
+  targetAnimeId: number,
   item: AniListRawMedia,
   nowSec: number
 ): D1PreparedStatement {
-  const cleanSynopsis = (item.description ?? '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .trim();
   const scoreTenScale = item.averageScore ? Number((item.averageScore / 10).toFixed(2)) : 0;
-  const statusInt = mapAniListStatus(item.status);
-  const scheduleDay = computeScheduleDayWib(item.nextAiringEpisode?.airingAt);
-  const durationText = item.duration ? `${item.duration} min` : '24 min';
-  const studioName = item.studios?.nodes?.[0]?.name ?? '-';
-  const releaseSeason = [item.season, item.seasonYear].filter(Boolean).join(' ') || '-';
   const posterUrl = item.coverImage?.extraLarge || item.coverImage?.large || '';
-
+  const episodesTotal = item.episodes && item.episodes > 0 ? item.episodes : 0;
   return db
-    .prepare(UPSERT_ANIME_SQL)
-    .bind(
-      item.id,
-      item.idMal ?? null,
-      item.title?.romaji || item.title?.english || 'Untitled',
-      item.title?.english || item.title?.native || '',
-      cleanSynopsis,
-      scoreTenScale,
-      item.format || 'TV',
-      statusInt,
-      scheduleDay,
-      durationText,
-      studioName,
-      releaseSeason,
-      posterUrl,
-      JSON.stringify(item.genres ?? []),
-      item.popularity ?? 0,
-      nowSec,
-      item.episodes && item.episodes > 0 ? item.episodes : 0,
-      item.nextAiringEpisode?.airingAt ?? 0,
-      item.nextAiringEpisode?.episode ?? 0,
-      item.title?.native || null,
-      JSON.stringify((item.synonyms ?? []).filter((s) => typeof s === 'string' && s.trim().length > 0).slice(0, 12)),
-      [item.title?.romaji, item.title?.english, item.title?.native]
-        .filter(Boolean)
-        .join(' ')
-        .normalize('NFKD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .toLowerCase()
-        .replace(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+/g, '')
-        .slice(0, 200)
-    );
+    .prepare(ENRICH_ANIME_SQL)
+    .bind(item.idMal ?? null, scoreTenScale, posterUrl, episodesTotal, nowSec, targetAnimeId);
 }
 
 const META_LAST_IMPORT_AT = 'last_import_at';
-const META_LAST_FULL_IMPORT_AT = 'last_full_import_at';
-const META_LAST_IMPORT_COUNT = 'last_import_count';
 
 const UPSERT_META_SQL = `
   INSERT INTO catalog_meta (key, value, updated_at) VALUES (?1, ?2, ?3)
   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
 `;
 
-function metaStatements(
-  db: D1Database,
-  scope: 'ongoing' | 'full' | undefined,
-  count: number,
-  nowSec: number
-): D1PreparedStatement[] {
-  const stmts = [
-    db.prepare(UPSERT_META_SQL).bind(META_LAST_IMPORT_AT, String(nowSec), nowSec),
-    db.prepare(UPSERT_META_SQL).bind(META_LAST_IMPORT_COUNT, String(count), nowSec),
-  ];
-  if (scope === 'full') {
-    stmts.push(db.prepare(UPSERT_META_SQL).bind(META_LAST_FULL_IMPORT_AT, String(nowSec), nowSec));
-  }
-  return stmts;
-}
-
+/**
+ * Memperkaya (UPDATE-only) total episode, rating, dan poster pada entri katalog
+ * Samehadaku/Otakudesu yang sudah ada di D1. Tidak pernah menambah katalog baru dari AniList.
+ */
 export async function importAniListMedia(
   db: D1Database,
   items: AniListRawMedia[],
-  scope?: 'ongoing' | 'full'
+  _scope?: 'ongoing' | 'full'
 ): Promise<number> {
   const nowSec = Math.floor(Date.now() / 1000);
-  const valid = items.filter(
-    (m) =>
-      m &&
-      Number.isInteger(m.id) &&
-      m.id > 0 &&
-      m.title &&
-      typeof m.title.romaji === 'string'
-  );
+  const valid = items.filter((m) => m && Number.isInteger(m.id) && m.id > 0);
   if (valid.length === 0) return 0;
-  await db.batch([
-    ...valid.map((m) => bindAnimeUpsert(db, m, nowSec)),
-    ...metaStatements(db, scope, valid.length, nowSec),
-  ]);
+  await db.batch(valid.map((m) => bindAnimeEnrichOnly(db, m.id, m, nowSec)));
   return valid.length;
-}
-
-export interface SyncPageLog {
-  page: number;
-  status: string;
-  http?: number;
-  media?: number;
-  error?: string;
-}
-
-export async function syncAniListCatalogDetailed(
-  db: D1Database,
-  startPage = 1,
-  perPage = 50,
-  maxPages = 3
-): Promise<{ synced: number; log: SyncPageLog[] }> {
-  let totalSynced = 0;
-  const log: SyncPageLog[] = [];
-  const nowSec = Math.floor(Date.now() / 1000);
-  const syncPlans: Array<{ page: number; status: string | undefined }> = [
-    { page: 1, status: 'RELEASING' },
-    { page: 2, status: 'RELEASING' },
-  ];
-  for (let p = startPage; p <= Math.max(1, maxPages - 2); p++) {
-    syncPlans.push({ page: p, status: undefined });
-  }
-
-  for (const plan of syncPlans) {
-    const entry: SyncPageLog = { page: plan.page, status: plan.status ?? 'ALL' };
-    log.push(entry);
-    try {
-      const response = await fetchAniListGraphQL(
-        JSON.stringify({
-          query: CATALOG_PAGE_QUERY,
-          variables: { page: plan.page, perPage, status: plan.status },
-        }),
-        8000,
-        'MilkglassCatalogSync/2.0',
-        `sync:page=${plan.page}:status=${plan.status ?? 'ALL'}`
-      );
-      entry.http = response.status;
-      if (response.status === 429) {
-        entry.error = 'rate_limited (429)';
-        break;
-      }
-      if (!response.ok) {
-        entry.error = (await response.text().catch(() => '')).slice(0, 200);
-        continue;
-      }
-      const payload = (await response.json()) as {
-        errors?: Array<{ message?: string }>;
-        data?: { Page?: { media?: AniListRawMedia[] } };
-      };
-      if (payload.errors?.length) {
-        entry.error = `graphql: ${payload.errors[0]?.message ?? 'unknown'}`.slice(0, 200);
-      }
-      const mediaList = payload.data?.Page?.media ?? [];
-      entry.media = mediaList.length;
-      if (mediaList.length === 0) continue;
-      const statements = mediaList.map((item) => bindAnimeUpsert(db, item, nowSec));
-      await db.batch(statements);
-      totalSynced += statements.length;
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      entry.error = msg.slice(0, 200);
-      console.error('[AniList] syncAniListCatalogDetailed page failed', {
-        page: plan.page,
-        status: plan.status ?? 'ALL',
-        error: msg,
-      });
-    }
-  }
-  if (totalSynced > 0) {
-    try {
-      await db.batch(metaStatements(db, 'ongoing', totalSynced, nowSec));
-    } catch {}
-  }
-  return { synced: totalSynced, log };
-}
-
-export async function syncAniListCatalog(
-  db: D1Database,
-  startPage = 1,
-  perPage = 50,
-  maxPages = 3
-): Promise<number> {
-  return (await syncAniListCatalogDetailed(db, startPage, perPage, maxPages)).synced;
 }
 
 export async function ensureAnimeExistsFastInD1(
@@ -428,8 +246,8 @@ export async function ensureAnimeExistsFastInD1(
       `INSERT OR IGNORE INTO animes (
          id, mal_id, title, title_alt, synopsis, score, type, status,
          schedule_day, duration, studio, release_season, poster_url,
-         genres_json, popularity, updated_at
-       ) VALUES (?1, ?2, ?3, '', '', 0, 'TV', 1, 0, '24 min', '-', '-', '', '[]', 0, ?4)`
+         genres_json, popularity, updated_at, has_live_source
+       ) VALUES (?1, ?2, ?3, '', '', 0, 'TV', 1, 0, '24 min', '-', '-', '', '[]', 0, ?4, 0)`
     )
     .bind(animeId, malId ?? null, fallbackTitle, nowSec)
     .run();
@@ -440,6 +258,7 @@ export async function enrichSingleAnimeFromAniListAsync(
   db: D1Database,
   animeId: number
 ): Promise<void> {
+  if (animeId >= 900_000_000) return;
   try {
     const response = await fetchAniListGraphQL(
       JSON.stringify({
@@ -455,7 +274,7 @@ export async function enrichSingleAnimeFromAniListAsync(
       const media = payload.data?.Media;
       if (media) {
         const nowSec = Math.floor(Date.now() / 1000);
-        await bindAnimeUpsert(db, media, nowSec).run();
+        await bindAnimeEnrichOnly(db, animeId, media, nowSec).run();
       }
     }
   } catch (err: unknown) {
@@ -466,53 +285,126 @@ export async function enrichSingleAnimeFromAniListAsync(
   }
 }
 
-const BACKFILL_QUERY = `
-query ($ids: [Int], $perPage: Int) {
-  Page(page: 1, perPage: $perPage) {
-    media(id_in: $ids, type: ANIME) {
-      ${MEDIA_FIELDS}
-    }
-  }
+function normalizeIdentityTitle(raw: string): string {
+  return raw
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\b(?:subtitle indonesia|sub indo|batch|bd)\b/gi, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
 }
-`;
+
+function extractSeasonTag(norm: string): number {
+  const m =
+    norm.match(/\bseason\s*(\d+)\b/) ||
+    norm.match(/\bs(\d+)\b/) ||
+    norm.match(/\b(\d+)(?:nd|rd|th)\s+season\b/);
+  return m ? Number.parseInt(m[1], 10) : 1;
+}
+
+function extractPartTag(norm: string): number {
+  const m = norm.match(/\b(?:part|cour)\s*(\d+)\b/);
+  return m ? Number.parseInt(m[1], 10) : 0;
+}
+
+function isStrictTitleMatch(sourceTitle: string, candidateTitle: string): boolean {
+  const a = normalizeIdentityTitle(sourceTitle);
+  const b = normalizeIdentityTitle(candidateTitle);
+  if (!a || !b) return false;
+  if (extractSeasonTag(a) !== extractSeasonTag(b)) return false;
+  if (extractPartTag(a) !== extractPartTag(b)) return false;
+  const isMovieA = /\bmovie\b|\bgekijouban\b/.test(a);
+  const isMovieB = /\bmovie\b|\bgekijouban\b/.test(b);
+  if (isMovieA !== isMovieB) return false;
+  if (a === b) return true;
+  const tokA = new Set(a.split(' ').filter((t) => t.length >= 2));
+  const tokB = new Set(b.split(' ').filter((t) => t.length >= 2));
+  if (tokA.size === 0 || tokB.size === 0) return false;
+  let overlap = 0;
+  for (const t of tokA) if (tokB.has(t)) overlap++;
+  const jaccard = overlap / (tokA.size + tokB.size - overlap);
+  return jaccard >= 0.72;
+}
 
 /**
- * Placeholder hasil ingest (poster kosong / judul generik) hanya di-enrich satu kali dengan timeout 3,5 dtk;
- * bila AniList gagal/429 barisnya tertinggal tanpa poster, skor, dan jadwal. Cron memanggil ini untuk
- * melengkapi baris tak lengkap secara massal: SATU request AniList (id_in) + SATU batch D1 untuk hingga
- * `limit` baris. Pemilihan acak agar id yang tak dikenal AniList tidak memblokir antrean.
- * `last_import_at` dinaikkan bila ada yang berubah supaya snapshot katalog klien ikut ter-refresh.
+ * Melengkapi metadata (total eps, rating, poster) dari AniList HANYA untuk entri katalog
+ * yang berasal dari Samehadaku atau Otakudesu.
  */
 export async function backfillIncompleteAnime(db: D1Database, limit = 50): Promise<number> {
   const rows = await db
-    .prepare(`SELECT id FROM animes WHERE poster_url IS NULL OR poster_url = '' ORDER BY RANDOM() LIMIT ?1`)
+    .prepare(
+      `SELECT id, title FROM animes
+       WHERE (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
+         AND (poster_url IS NULL OR poster_url = '' OR score = 0 OR episodes_total = 0)
+       ORDER BY RANDOM()
+       LIMIT ?1`
+    )
     .bind(limit)
-    .all<{ id: number }>();
-  const ids = (rows.results ?? []).map((r) => r.id).filter((id) => Number.isInteger(id) && id > 0);
-  if (ids.length === 0) return 0;
+    .all<{ id: number; title: string }>();
 
-  const response = await fetchAniListGraphQL(
-    JSON.stringify({ query: BACKFILL_QUERY, variables: { ids, perPage: ids.length } }),
-    8000,
-    'MilkglassCatalogSync/2.0',
-    `backfill:n=${ids.length}`
-  );
-  if (!response.ok) {
-    console.error('[AniList] backfill http error', { status: response.status, ids: ids.length });
-    return 0;
-  }
-  const payload = (await response.json()) as { data?: { Page?: { media?: AniListRawMedia[] } } };
-  const valid = (payload.data?.Page?.media ?? []).filter(
-    (m) => m && Number.isInteger(m.id) && m.id > 0 && m.title && typeof m.title.romaji === 'string'
-  );
-  if (valid.length === 0) return 0;
+  const allRows = rows.results ?? [];
+  if (allRows.length === 0) return 0;
+
+  const anilistIdRows = allRows.filter((r) => Number.isInteger(r.id) && r.id > 0 && r.id < 900_000_000);
+  const syntheticRows = allRows.filter((r) => Number.isInteger(r.id) && r.id >= 900_000_000).slice(0, 6);
 
   const nowSec = Math.floor(Date.now() / 1000);
+  const stmts: D1PreparedStatement[] = [];
+
+  if (anilistIdRows.length > 0) {
+    const ids = anilistIdRows.map((r) => r.id);
+    const response = await fetchAniListGraphQL(
+      JSON.stringify({ query: BACKFILL_QUERY, variables: { ids, perPage: ids.length } }),
+      8000,
+      'MilkglassCatalogSync/2.0',
+      `backfill:n=${ids.length}`
+    );
+    if (response.ok) {
+      const payload = (await response.json()) as { data?: { Page?: { media?: AniListRawMedia[] } } };
+      for (const m of payload.data?.Page?.media ?? []) {
+        if (m && Number.isInteger(m.id) && m.id > 0) {
+          stmts.push(bindAnimeEnrichOnly(db, m.id, m, nowSec));
+        }
+      }
+    } else {
+      console.error('[AniList] backfill http error', { status: response.status, ids: ids.length });
+    }
+  }
+
+  for (const row of syntheticRows) {
+    if (!row.title || row.title.trim().length < 2) continue;
+    try {
+      const res = await fetchAniListGraphQL(
+        JSON.stringify({ query: ENRICH_SEARCH_QUERY, variables: { search: row.title.trim() } }),
+        4000,
+        'MilkglassCatalogSync/2.0',
+        `backfill-title:${row.id}`
+      );
+      if (!res.ok) continue;
+      const payload = (await res.json()) as { data?: { Page?: { media?: AniListRawMedia[] } } };
+      const candidates = payload.data?.Page?.media ?? [];
+      const match = candidates.find((m) =>
+        [m.title?.romaji, m.title?.english]
+          .filter((t): t is string => typeof t === 'string' && t.length > 0)
+          .some((t) => isStrictTitleMatch(row.title, t))
+      );
+      if (match) {
+        stmts.push(bindAnimeEnrichOnly(db, row.id, match, nowSec));
+      }
+    } catch {
+      // Lewati baris yang gagal di-enrich agar tidak memblokir antrean lain
+    }
+  }
+
+  if (stmts.length === 0) return 0;
+
   await db.batch([
-    ...valid.map((m) => bindAnimeUpsert(db, m, nowSec)),
+    ...stmts,
     db.prepare(UPSERT_META_SQL).bind(META_LAST_IMPORT_AT, String(nowSec), nowSec),
   ]);
-  return valid.length;
+  return stmts.length;
 }
 
 let cachedSourceUrls: { expiresAt: number; value: SourceBaseUrls } | null = null;
@@ -557,131 +449,4 @@ export async function getSourceBaseUrls(db: D1ReadClient): Promise<SourceBaseUrl
 
 export async function getOtakudesuBaseUrl(db: D1ReadClient): Promise<string> {
   return (await getSourceBaseUrls(db)).otakudesu;
-}
-
-export async function searchAniListMetadata(searchQuery: string): Promise<AniListSearchMetadata[]> {
-  const graphqlQuery = `
-    query ($search: String) {
-      Page(page: 1, perPage: 12) {
-        media(search: $search, type: ANIME, isAdult: false, sort: [POPULARITY_DESC]) {
-          id
-          title { romaji english }
-          coverImage { extraLarge large }
-          bannerImage
-          description(asHtml: false)
-          episodes
-          averageScore
-          status
-        }
-      }
-    }
-  `;
-
-  try {
-    const res = await fetchAniListGraphQL(
-      JSON.stringify({ query: graphqlQuery, variables: { search: searchQuery } }),
-      5000,
-      'MilkglassCatalogSync/2.0',
-      'search'
-    );
-    if (!res.ok) return [];
-    const json = (await res.json()) as {
-      data?: {
-        Page?: {
-          media?: Array<{
-            id: number;
-            title?: { romaji?: string; english?: string };
-            coverImage?: { extraLarge?: string; large?: string };
-            bannerImage?: string | null;
-            description?: string | null;
-            episodes?: number | null;
-            averageScore?: number | null;
-            status?: string | null;
-          }>;
-        };
-      };
-    };
-    const list = json?.data?.Page?.media || [];
-
-    return list.map((m) => ({
-      id: m.id,
-      titleEnglish: m.title?.english || m.title?.romaji || 'Unknown',
-      titleRomaji: m.title?.romaji || m.title?.english || 'Unknown',
-      posterUrl: m.coverImage?.extraLarge || m.coverImage?.large || '',
-      bannerUrl: m.bannerImage || null,
-      synopsis: (m.description || '').replace(/<[^>]+>/g, ''),
-      episodes: m.episodes || null,
-      averageScore: m.averageScore || null,
-      status: m.status || 'FINISHED',
-    }));
-  } catch (err: unknown) {
-    console.error('[AniList] searchAniListMetadata failed', {
-      queryLength: searchQuery.length,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return [];
-  }
-}
-
-export async function fetchTrendingAniList(): Promise<AniListSearchMetadata[]> {
-  const graphqlQuery = `
-    query {
-      Page(page: 1, perPage: 20) {
-        media(type: ANIME, isAdult: false, sort: [TRENDING_DESC, POPULARITY_DESC]) {
-          id
-          title { romaji english }
-          coverImage { extraLarge large }
-          bannerImage
-          description(asHtml: false)
-          episodes
-          averageScore
-          status
-        }
-      }
-    }
-  `;
-
-  try {
-    const res = await fetchAniListGraphQL(
-      JSON.stringify({ query: graphqlQuery }),
-      5000,
-      'MilkglassCatalogSync/2.0',
-      'trending'
-    );
-    if (!res.ok) return [];
-    const json = (await res.json()) as {
-      data?: {
-        Page?: {
-          media?: Array<{
-            id: number;
-            title?: { romaji?: string; english?: string };
-            coverImage?: { extraLarge?: string; large?: string };
-            bannerImage?: string | null;
-            description?: string | null;
-            episodes?: number | null;
-            averageScore?: number | null;
-            status?: string | null;
-          }>;
-        };
-      };
-    };
-    const list = json?.data?.Page?.media || [];
-
-    return list.map((m) => ({
-      id: m.id,
-      titleEnglish: m.title?.english || m.title?.romaji || 'Unknown',
-      titleRomaji: m.title?.romaji || m.title?.english || 'Unknown',
-      posterUrl: m.coverImage?.extraLarge || m.coverImage?.large || '',
-      bannerUrl: m.bannerImage || null,
-      synopsis: (m.description || '').replace(/<[^>]+>/g, ''),
-      episodes: m.episodes || null,
-      averageScore: m.averageScore || null,
-      status: m.status || 'RELEASING',
-    }));
-  } catch (err: unknown) {
-    console.error('[AniList] fetchTrendingAniList failed', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return [];
-  }
 }

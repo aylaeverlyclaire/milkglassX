@@ -3,10 +3,10 @@ import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { fetchAniSkipTimes } from '../services/aniskip.service';
 import {
+  backfillIncompleteAnime,
   enrichSingleAnimeFromAniListAsync,
   importAniListMedia,
   ensureAnimeExistsFastInD1,
-  syncAniListCatalogDetailed,
 } from '../services/anilist.service';
 import {
   purgeEdgeCacheForIngest,
@@ -17,6 +17,8 @@ import { AppBindings } from '../index';
 import { SOURCE_ID_SCHEMA } from '../utils/sources';
 
 export const ingestRoutes = new Hono<{ Bindings: AppBindings }>();
+
+const ALLOWED_CATALOG_PROVIDERS = new Set(['samehadaku', 'otakudesu']);
 
 const FORBIDDEN_DEFAULT_SECRETS = new Set([
   'dev-secret-key-min-16-chars',
@@ -262,9 +264,12 @@ ingestRoutes.post('/ingest', zValidator('json', ingestEpisodeBodySchema), async 
   });
 });
 
+// AniList tidak lagi menemukan/menambah katalog; endpoint ini hanya melakukan enrich metadata
+// (total eps, rating, poster) untuk entri katalog Samehadaku & Otakudesu yang sudah ada.
 ingestRoutes.post('/sync-anilist', async (c) => {
-  const { synced, log } = await syncAniListCatalogDetailed(c.env.DB, 1, 50, 3);
-  return c.json({ status: 'ok', synced_count: synced, pages: log });
+  const enriched = await backfillIncompleteAnime(c.env.DB, 50);
+  await purgeHomeCache(c.req.url);
+  return c.json({ status: 'ok', enriched_count: enriched, mode: 'enrichment_only' });
 });
 
 ingestRoutes.post('/catalog-import', async (c) => {
@@ -278,17 +283,17 @@ ingestRoutes.post('/catalog-import', async (c) => {
   if (body.scope !== undefined && body.scope !== 'ongoing' && body.scope !== 'full') {
     return c.json({ status: 'error', message: "scope harus 'ongoing' atau 'full'." }, 400);
   }
-  const imported = await importAniListMedia(
+  const enriched = await importAniListMedia(
     c.env.DB,
     body.media as Parameters<typeof importAniListMedia>[1],
     body.scope
   );
   await purgeHomeCache(c.req.url);
-  return c.json({ status: 'ok', imported });
+  return c.json({ status: 'ok', imported: enriched, mode: 'enrichment_only' });
 });
 
 const sourceDomainSchema = z.object({
-  source: SOURCE_ID_SCHEMA.default('animasu'),
+  source: SOURCE_ID_SCHEMA.default('samehadaku'),
   base_url: z.string().url().refine((u) => u.startsWith('https://'), {
     message: 'Harus HTTPS',
   }),
@@ -310,15 +315,16 @@ ingestRoutes.post('/source-domain', zValidator('json', sourceDomainSchema), asyn
   return c.json({ status: 'ok', source, key, base_url: cleanUrl });
 });
 
-
 function normalizeHosterTitleKey(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ').slice(0, 120);
 }
 
 ingestRoutes.get('/catalog-list', async (c) => {
   const { results } = await c.env.DB.prepare(
-    `SELECT id, title, title_alt, synonyms_json, status, popularity, episodes_total, has_live_source
+    `SELECT id, title, title_alt, synonyms_json, status, popularity, episodes_total, score, poster_url, has_live_source, source_urls_json
      FROM animes
+     WHERE has_live_source = 1
+       AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
      ORDER BY popularity DESC
      LIMIT 5000`
   ).all<Record<string, unknown>>();
@@ -415,7 +421,12 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
 
   if (touchedAnimeIds.size > 0) {
     const flagStmts = Array.from(touchedAnimeIds).map((aid) =>
-      c.env.DB.prepare(`UPDATE animes SET has_live_source = 1 WHERE id = ?1`).bind(aid)
+      c.env.DB.prepare(
+        `UPDATE animes
+         SET has_live_source = 1
+         WHERE id = ?1
+           AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')`
+      ).bind(aid)
     );
     await c.env.DB.batch(flagStmts);
   }
@@ -423,9 +434,10 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
   if (reconcile) {
     await c.env.DB.prepare(
       `UPDATE animes
-       SET has_live_source = CASE WHEN EXISTS (
-         SELECT 1 FROM episode_hosters eh WHERE eh.anime_id = animes.id AND eh.is_live = 1
-       ) THEN 1 ELSE 0 END`
+       SET has_live_source = CASE
+         WHEN source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%' THEN 1
+         ELSE 0
+       END`
     ).run();
     await purgeHomeCache(c.req.url);
   }
@@ -443,12 +455,19 @@ const syncSourceCatalogSchema = z.object({
     .array(
       z.object({
         anime_id: z.number().int().positive().optional(),
+        mal_id: z.number().int().positive().nullable().optional(),
         title: z.string().trim().min(1).max(200),
+        poster_url: z.string().trim().max(1024).optional(),
+        score: z.number().min(0).max(10).optional(),
+        episodes_total: z.number().int().min(0).max(5000).optional(),
+        status: z.number().int().min(1).max(5).optional(),
         source_urls: z.record(z.string(), z.string().url().max(1024)),
       })
     )
-    .min(1)
-    .max(200),
+    .max(200)
+    .default([]),
+  scope: z.enum(['ongoing', 'full']).optional(),
+  prune: z.boolean().optional().default(false),
 });
 
 function sourceCatalogStableId(title: string): number {
@@ -461,47 +480,105 @@ function sourceCatalogStableId(title: string): number {
   return 900_000_000 + ((hash >>> 0) % 999_999_999);
 }
 
+const UPSERT_META_SQL = `
+  INSERT INTO catalog_meta (key, value, updated_at) VALUES (?1, ?2, ?3)
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+`;
+
 ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSchema), async (c) => {
-  const { items } = c.req.valid('json');
+  const { items, scope, prune } = c.req.valid('json');
   const now = Math.floor(Date.now() / 1000);
   const stmts: D1PreparedStatement[] = [];
   let updated = 0;
   let inserted = 0;
+  let skipped = 0;
 
   for (const item of items) {
+    // Kontrak katalog eksklusif: HANYA Samehadaku dan Otakudesu yang boleh masuk katalog.
     const cleanUrls: Record<string, string> = {};
     for (const [k, v] of Object.entries(item.source_urls)) {
+      const key = k.trim().toLowerCase();
+      if (!ALLOWED_CATALOG_PROVIDERS.has(key)) continue;
       if (typeof v === 'string' && v.startsWith('https://')) {
-        cleanUrls[k.trim().toLowerCase()] = v.trim();
+        cleanUrls[key] = v.trim();
       }
     }
-    if (Object.keys(cleanUrls).length === 0) continue;
+    if (Object.keys(cleanUrls).length === 0) {
+      skipped++;
+      continue;
+    }
+
     const urlsJson = JSON.stringify(cleanUrls);
+    const posterUrl = item.poster_url?.trim() || '';
+    const score = typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : 0;
+    const episodesTotal =
+      typeof item.episodes_total === 'number' && Number.isInteger(item.episodes_total) && item.episodes_total > 0
+        ? item.episodes_total
+        : 0;
+    const statusVal = item.status ?? 1;
+    const compact = item.title.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 120);
+
     if (item.anime_id) {
       stmts.push(
         c.env.DB.prepare(
-          `UPDATE animes
-           SET source_urls_json = ?1, has_live_source = 1, updated_at = ?2
-           WHERE id = ?3`
-        ).bind(urlsJson, now, item.anime_id)
+          `INSERT INTO animes (
+             id, mal_id, title, title_alt, synopsis, score, type, status, schedule_day,
+             duration, studio, release_season, poster_url, genres_json, popularity,
+             updated_at, episodes_total, next_airing_at, next_airing_ep,
+             has_live_source, norm_compact, source_urls_json
+           ) VALUES (?1, ?2, ?3, ?3, '', ?4, 'TV', ?5, 0, '24 min', '-', '-', ?6, '[]', 100, ?7, ?8, 0, 0, 1, ?9, ?10)
+           ON CONFLICT(id) DO UPDATE SET
+             mal_id = COALESCE(excluded.mal_id, animes.mal_id),
+             score = CASE WHEN excluded.score > 0 THEN excluded.score ELSE animes.score END,
+             poster_url = COALESCE(NULLIF(excluded.poster_url, ''), animes.poster_url),
+             episodes_total = CASE WHEN excluded.episodes_total > 0 THEN excluded.episodes_total ELSE animes.episodes_total END,
+             source_urls_json = excluded.source_urls_json,
+             has_live_source = 1,
+             updated_at = excluded.updated_at`
+        ).bind(
+          item.anime_id,
+          item.mal_id ?? null,
+          item.title,
+          score,
+          statusVal,
+          posterUrl,
+          now,
+          episodesTotal,
+          compact,
+          urlsJson
+        )
       );
       updated++;
     } else {
       const sid = sourceCatalogStableId(item.title);
-      const compact = item.title.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 120);
       stmts.push(
         c.env.DB.prepare(
           `INSERT INTO animes (
-             id, title, title_alt, synopsis, score, type, status, schedule_day,
+             id, mal_id, title, title_alt, synopsis, score, type, status, schedule_day,
              duration, studio, release_season, poster_url, genres_json, popularity,
              updated_at, episodes_total, next_airing_at, next_airing_ep,
              has_live_source, norm_compact, source_urls_json
-           ) VALUES (?1, ?2, ?2, '', 0, 'TV', 1, 0, '24 min', '-', '-', '', '[]', 100, ?3, 12, 0, 0, 1, ?4, ?5)
+           ) VALUES (?1, ?2, ?3, ?3, '', ?4, 'TV', ?5, 0, '24 min', '-', '-', ?6, '[]', 100, ?7, ?8, 0, 0, 1, ?9, ?10)
            ON CONFLICT(id) DO UPDATE SET
+             mal_id = COALESCE(excluded.mal_id, animes.mal_id),
+             score = CASE WHEN excluded.score > 0 THEN excluded.score ELSE animes.score END,
+             poster_url = COALESCE(NULLIF(excluded.poster_url, ''), animes.poster_url),
+             episodes_total = CASE WHEN excluded.episodes_total > 0 THEN excluded.episodes_total ELSE animes.episodes_total END,
              source_urls_json = excluded.source_urls_json,
              has_live_source = 1,
              updated_at = excluded.updated_at`
-        ).bind(sid, item.title, now, compact, urlsJson)
+        ).bind(
+          sid,
+          item.mal_id ?? null,
+          item.title,
+          score,
+          statusVal,
+          posterUrl,
+          now,
+          episodesTotal,
+          compact,
+          urlsJson
+        )
       );
       inserted++;
     }
@@ -510,6 +587,28 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
   for (let i = 0; i < stmts.length; i += 80) {
     await c.env.DB.batch(stmts.slice(i, i + 80));
   }
+
+  if (prune) {
+    await c.env.DB.prepare(
+      `UPDATE animes
+       SET has_live_source = 0
+       WHERE source_urls_json IS NULL
+          OR (source_urls_json NOT LIKE '%"samehadaku"%' AND source_urls_json NOT LIKE '%"otakudesu"%')`
+    ).run();
+  }
+
+  const totalProcessed = updated + inserted;
+  if (totalProcessed > 0 || prune) {
+    const metaStmts: D1PreparedStatement[] = [
+      c.env.DB.prepare(UPSERT_META_SQL).bind('last_import_at', String(now), now),
+      c.env.DB.prepare(UPSERT_META_SQL).bind('last_import_count', String(totalProcessed), now),
+    ];
+    if (scope === 'full') {
+      metaStmts.push(c.env.DB.prepare(UPSERT_META_SQL).bind('last_full_import_at', String(now), now));
+    }
+    await c.env.DB.batch(metaStmts);
+  }
+
   await purgeHomeCache(c.req.url);
-  return c.json({ status: 'ok', updated, inserted });
+  return c.json({ status: 'ok', updated, inserted, skipped, pruned: prune });
 });

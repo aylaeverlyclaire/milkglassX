@@ -6,17 +6,17 @@ import { edgeCache } from '../middleware/edgeCache';
 import { rateLimit } from '../middleware/rateLimit';
 import { zValidatorParam, zValidatorQuery } from '../middleware/validator';
 import { recheckAfterSec } from '../services/sync-schedule';
-import {
-  getSourceBaseUrls,
-  searchAniListMetadata,
-  fetchTrendingAniList,
-} from '../services/anilist.service';
+import { getSourceBaseUrls } from '../services/anilist.service';
 import { AppBindings } from '../index';
 import { readDb } from '../utils/db';
 
 const R2_KEY_HOME = 'catalog/v1/home.json';
 const R2_KEY_STATUS = 'catalog/v1/status.json';
 const R2_KEY_SNAPSHOT = 'catalog/v1/snapshot.json';
+
+const ALLOWED_CATALOG_PROVIDERS = new Set(['samehadaku', 'otakudesu']);
+const CATALOG_SOURCE_FILTER = `(has_live_source = 1 AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%'))`;
+const CATALOG_SOURCE_FILTER_A = `(a.has_live_source = 1 AND (a.source_urls_json LIKE '%"samehadaku"%' OR a.source_urls_json LIKE '%"otakudesu"%'))`;
 
 const DEFAULT_ENGINE_RULES = {
   animasu: { search_path: '/?s={q}', selectors: { search_item: '.listupd .bs .bsx > a[href]', search_title: '.tt', episode_list: '#daftarepisode li a[href]', mirror_select: 'select.mirror option[value]', player_iframe: '#tonton iframe[src]', download_block: '.soraddlx', download_row: '.soraurlx', quality_text: 'strong', hoster_link: 'a[href]' } },
@@ -26,7 +26,6 @@ const DEFAULT_ENGINE_RULES = {
   oploverz: { back_api_url: 'https://backapi.oploverz.ac', search_path: '/?s={q}', selectors: { search_item: 'div.bsx, article.bs', search_title: 'div.tt h4, h4, .tt', series_link: "div.nvs.nvsc a[href], a[aria-label='All Episodes'], a[href*='/series/'], .year a[href*='/anime/']", episode_row: 'div.eplister ul li, ul#episodelist li', episode_badge: 'div.epl-num', download_block: 'div.soraddlx, div.mctnx, div.download-box', download_header: '.sorattlx, h3, h4', download_row: '.soraurlx, li', quality_text: 'strong', hoster_link: 'a[href]' } },
   kusonime: { search_path: '/?s={q}', selectors: { search_item: 'div.kover a[href], h2.episodeye a[href]', download_block: 'div.smokeddlrh, div.dlbodz', download_header: '.smokettlrh, h3', download_row: 'div.smokeurlrh', quality_text: 'strong', hoster_link: 'a[href]' } },
 };
-
 
 export const catalogRoutes = new Hono<{ Bindings: AppBindings }>();
 
@@ -56,8 +55,9 @@ function shapeAnimeRow(
       const parsed = JSON.parse(source_urls_json) as Record<string, unknown>;
       if (parsed && typeof parsed === 'object') {
         for (const [k, v] of Object.entries(parsed)) {
-          if (typeof v === 'string' && v.startsWith('https://')) {
-            source_urls[k] = v;
+          const key = k.trim().toLowerCase();
+          if (ALLOWED_CATALOG_PROVIDERS.has(key) && typeof v === 'string' && v.startsWith('https://')) {
+            source_urls[key] = v;
           }
         }
       }
@@ -108,22 +108,22 @@ catalogRoutes.get('/home', edgeCache(300, 600, false), async (c) => {
     db.prepare(
       `SELECT ${LIST_COLUMNS}
          FROM animes
-         WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1)) AND status = 1
-         ORDER BY popularity DESC
+         WHERE ${CATALOG_SOURCE_FILTER} AND status = 1
+         ORDER BY popularity DESC, updated_at DESC
          LIMIT 20`
     ),
     db.prepare(
       `SELECT ${LIST_COLUMNS}
          FROM animes
-         WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))
-         ORDER BY popularity DESC
+         WHERE ${CATALOG_SOURCE_FILTER}
+         ORDER BY popularity DESC, updated_at DESC
          LIMIT 20`
     ),
     db.prepare(
       `SELECT ${LIST_COLUMNS}
          FROM animes
-         WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1)) AND status = 2
-         ORDER BY popularity DESC
+         WHERE ${CATALOG_SOURCE_FILTER} AND status = 2
+         ORDER BY popularity DESC, updated_at DESC
          LIMIT 20`
     ),
     db.prepare(META_QUERY),
@@ -177,7 +177,7 @@ catalogRoutes.get('/status', edgeCache(60, 120, false), async (c) => {
   const db = readDb(c.env);
   const [metaRes, countRes, totalAllRes, hosterRes] = await db.batch([
     db.prepare(META_QUERY),
-    db.prepare(`SELECT COUNT(*) AS total FROM animes WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))`),
+    db.prepare(`SELECT COUNT(*) AS total FROM animes WHERE ${CATALOG_SOURCE_FILTER}`),
     db.prepare(`SELECT COUNT(*) AS total_all FROM animes`),
     db.prepare(`SELECT COUNT(*) AS live_hosters FROM episode_hosters WHERE is_live = 1`),
   ]);
@@ -254,11 +254,11 @@ catalogRoutes.get(
     }
     const statements: D1PreparedStatement[] = [
       db.prepare(META_QUERY),
-      db.prepare(`SELECT COUNT(*) AS total FROM animes WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))`),
+      db.prepare(`SELECT COUNT(*) AS total FROM animes WHERE ${CATALOG_SOURCE_FILTER}`),
     ];
     if (v) {
       statements.push(
-        db.prepare(`SELECT ${LIST_COLUMNS} FROM animes WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1)) ORDER BY popularity DESC LIMIT 5000`)
+        db.prepare(`SELECT ${LIST_COLUMNS} FROM animes WHERE ${CATALOG_SOURCE_FILTER} ORDER BY popularity DESC, updated_at DESC LIMIT 5000`)
       );
     }
     const batchRes = await db.batch(statements);
@@ -346,7 +346,7 @@ catalogRoutes.get(
     const { q, genre, status, schedule_day, page } = c.req.valid('query');
     const limit = 24;
     const offset = (page - 1) * limit;
-    const conditions = ['(has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))'];
+    const conditions = [CATALOG_SOURCE_FILTER];
     const params: Array<string | number> = [];
 
     if (q && q.length > 0) {
@@ -381,7 +381,7 @@ catalogRoutes.get(
       SELECT ${LIST_COLUMNS}
       FROM animes
       WHERE ${conditions.join(' AND ')}
-      ORDER BY popularity DESC
+      ORDER BY popularity DESC, updated_at DESC
       LIMIT ?${params.length - 1} OFFSET ?${params.length}
     `;
     const { results } = await readDb(c.env).prepare(sql).bind(...params).all<Record<string, unknown>>();
@@ -405,7 +405,7 @@ catalogRoutes.get(
     const { id } = c.req.valid('param');
     const db = readDb(c.env);
     const [animeRes, episodesRes] = await db.batch([
-      db.prepare(`SELECT * FROM animes WHERE id = ?1`).bind(id),
+      db.prepare(`SELECT * FROM animes WHERE id = ?1 AND ${CATALOG_SOURCE_FILTER}`).bind(id),
       db
         .prepare(
           `SELECT id, anime_id, episode_number, name, op_start, op_end, ed_start, ed_end, created_at, updated_at
@@ -503,12 +503,7 @@ catalogRoutes.get('/', edgeCache(300), async (c) => {
     'SELECT slug, anilist_id, title, romaji_title, episode, poster_url, banner_url, synopsis, updated_at FROM catalog_episodes ORDER BY updated_at DESC LIMIT 60'
   ).all();
 
-  if (rows.results && rows.results.length > 0) {
-    return c.json({ status: 'ok', items: rows.results });
-  }
-
-  const trending = await fetchTrendingAniList();
-  return c.json({ status: 'ok', items: trending });
+  return c.json({ status: 'ok', items: rows.results ?? [] });
 });
 
 catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
@@ -531,13 +526,12 @@ catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
   });
 });
 
-
 const CJK_CHAR_RE = /[\u3040-\u30FF\u4E00-\u9FFF]/;
 
 function normalizeSearchSpaced(raw: string): string {
   return raw
     .normalize('NFKD')
-    .replace(/[\u0300-\u306f]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[\u00d7\u2715\u2716\u2717]/g, 'x')
     .replace(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+/g, ' ')
@@ -652,7 +646,7 @@ catalogRoutes.get(
             `SELECT ${LIST_COLUMNS.split(',').map((col) => 'a.' + col.trim()).join(', ')}
              FROM animes_fts
              JOIN animes a ON a.id = animes_fts.rowid
-             WHERE animes_fts MATCH ?1 AND (a.has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1))
+             WHERE animes_fts MATCH ?1 AND ${CATALOG_SOURCE_FILTER_A}
              ORDER BY (bm25(animes_fts, 2.0, 1.0) - (2.0 * CAST(a.popularity AS REAL) / (CAST(a.popularity AS REAL) + 50000.0))) ASC, a.popularity DESC
              LIMIT 24`
           )
@@ -664,14 +658,14 @@ catalogRoutes.get(
       return readDb(c.env).prepare(
         `SELECT ${LIST_COLUMNS}
          FROM animes
-         WHERE (has_live_source = 1 OR NOT EXISTS (SELECT 1 FROM animes WHERE has_live_source = 1 LIMIT 1)) AND (title LIKE ?1 ESCAPE '\\' OR title_alt LIKE ?1 ESCAPE '\\')
-         ORDER BY popularity DESC
+         WHERE ${CATALOG_SOURCE_FILTER} AND (title LIKE ?1 ESCAPE '\\' OR title_alt LIKE ?1 ESCAPE '\\')
+         ORDER BY popularity DESC, updated_at DESC
          LIMIT 24`
       )
         .bind(pattern)
         .all<Record<string, unknown>>();
     };
-    // D1-first instant search (<50ms): hindari memblokir pencarian pada scraping situs eksternal.
+
     const scrapeSourceSearch = async (
       sourceId: 'samehadaku' | 'otakudesu',
       baseUrl: string
@@ -759,7 +753,8 @@ catalogRoutes.get(
         .prepare(
           `SELECT ${LIST_COLUMNS}, title_native, synonyms_json
            FROM animes
-           ORDER BY has_live_source DESC, popularity DESC
+           WHERE ${CATALOG_SOURCE_FILTER}
+           ORDER BY popularity DESC, updated_at DESC
            LIMIT 1000`
         )
         .all<Record<string, unknown>>();
@@ -797,16 +792,13 @@ catalogRoutes.get(
       if (merged.length >= 30) break;
     }
 
-    const anilistFallback =
-      merged.length < 4 ? await searchAniListMetadata(q).catch(() => []) : [];
-
     return c.json({
       status: 'ok',
       query: q,
-      search_source: liveRows.length > 0 ? 'd1_and_live_sources' : merged.length > 0 ? 'd1_primary' : 'anilist_fallback',
+      search_source: liveRows.length > 0 ? 'd1_and_live_sources' : 'd1_primary',
       resolution_mode: 'CLIENT_CASCADE_MKV',
       data: merged,
-      metadata: anilistFallback,
+      metadata: [],
     });
   }
 );
@@ -868,7 +860,7 @@ catalogRoutes.get('/rules', edgeCache(1800, 3600, false), async (c) => {
       otakudesu: merge('otakudesu', DEFAULT_ENGINE_RULES.otakudesu),
       samehadaku: merge('samehadaku', DEFAULT_ENGINE_RULES.samehadaku),
       nontonanimeid: merge('nontonanimeid', DEFAULT_ENGINE_RULES.nontonanimeid),
-    oploverz: merge('oploverz', DEFAULT_ENGINE_RULES.oploverz),
+      oploverz: merge('oploverz', DEFAULT_ENGINE_RULES.oploverz),
       kusonime: merge('kusonime', DEFAULT_ENGINE_RULES.kusonime),
     },
   });

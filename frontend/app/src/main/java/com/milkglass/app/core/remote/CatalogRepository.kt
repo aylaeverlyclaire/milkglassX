@@ -8,9 +8,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.AtomicMoveNotSupportedException
@@ -304,33 +301,8 @@ class CatalogRepository(
                     out += RemoteMapper.toEntry(r)
                 }
             }
-            (root["metadata"] as? JsonArray)?.forEach { el ->
-                val obj = el as? JsonObject ?: return@forEach
-                val id = (obj["id"] as? JsonPrimitive)?.intOrNull ?: return@forEach
-                if (out.any { it.anime.id == id }) return@forEach
-                val romaji = (obj["titleRomaji"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
-                val english = (obj["titleEnglish"] as? JsonPrimitive)?.contentOrNull ?: romaji
-                val poster = (obj["posterUrl"] as? JsonPrimitive)?.contentOrNull
-                val synopsis = (obj["synopsis"] as? JsonPrimitive)?.contentOrNull
-                val eps = (obj["episodes"] as? JsonPrimitive)?.intOrNull ?: 12
-                val scoreRaw = (obj["averageScore"] as? JsonPrimitive)?.intOrNull
-                val statusStr = (obj["status"] as? JsonPrimitive)?.contentOrNull ?: "FINISHED"
-                val statusInt = if (statusStr == "RELEASING") 1 else 2
-                val malId = (obj["malId"] as? JsonPrimitive)?.intOrNull
-                    ?: (obj["mal_id"] as? JsonPrimitive)?.intOrNull
-                val mapped = RemoteAnime(
-                    id = id,
-                    malId = malId,
-                    title = romaji,
-                    titleAlt = english,
-                    score = scoreRaw?.let { it / 10.0 },
-                    status = statusInt,
-                    posterUrl = poster,
-                    episodesTotal = if (eps > 0) eps else 12,
-                    synopsis = synopsis,
-                )
-                out += RemoteMapper.toEntry(mapped)
-            }
+            // Katalog & hasil pencarian hanya berasal dari Samehadaku & Otakudesu (`data`),
+            // tidak pernah mengambil item katalog fallback dari AniList (`metadata`).
             out
         } catch (e: Exception) {
             emptyList()
