@@ -254,7 +254,8 @@ fun TopBar(title: String, bare: Boolean, modifier: Modifier = Modifier, leading:
 @Composable
 fun PosterView(spec: PosterSpec, anime: Anime, ratingText: String, modifier: Modifier = Modifier, small: Boolean = false, progressPct: Float? = null) {
     val shape = RoundedCornerShape(16.dp)
-    Box(modifier.aspectRatio(3f / 4f).clip(shape).background(gradientOf(anime))) {
+    val bgBrush = remember(anime.colorFrom, anime.colorTo) { gradientOf(anime) }
+    Box(modifier.aspectRatio(3f / 4f).clip(shape).background(bgBrush)) {
         PosterArt(spec, Modifier.fillMaxSize())
         if (!small) {
             Box(Modifier.align(Alignment.BottomStart).padding(8.dp)) {

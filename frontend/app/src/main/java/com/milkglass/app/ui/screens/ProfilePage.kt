@@ -51,7 +51,6 @@ fun ProfilePage(ctl: AppController, scroll: ScrollState) {
     val c = Milk.colors
     val ty = Milk.type
     val tr = ctl.tr
-    val st = ctl.persisted.settings
     val meColor = ctl.users["me"]?.color?.let { parseCssColor(it) } ?: c.primary
     PageColumn(scroll) {
 

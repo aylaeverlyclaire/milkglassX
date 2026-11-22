@@ -101,7 +101,10 @@ import id.my.milkglass.download.MkvDownloadStatus
 import id.my.milkglass.resolver.StreamResolver
 import id.my.milkglass.source.MkvQuality
 import kotlinx.coroutines.delay
-import kotlin.math.ceil
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Size as ComposeSize
 
 private val TOP_SCRIM_GRADIENT = cssLinearGradient(180f, listOf(Color.Black.copy(alpha = .4f), CssTransparent))
 private val BOTTOM_SCRIM_GRADIENT = cssLinearGradient(180f, listOf(CssTransparent, Color.Black.copy(alpha = .75f)))
@@ -209,12 +212,12 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
     val nearEnd by androidx.compose.runtime.remember(e) {
         androidx.compose.runtime.derivedStateOf { e.duration > 0 && e.duration - e.position <= 240.0 }
     }
-    LaunchedEffect(e.nativeStreamActive, e.anime.id, e.episode, ctl.persisted.settings.quality, nearEnd) {
+    LaunchedEffect(e.nativeStreamActive, e.anime.id, e.episode, ctl.preferredQuality, nearEnd) {
         if (e.nativeStreamActive && ctl.online) {
             ctl.nextPlayableEpisode(e.anime, e.episode)?.let { nextEp ->
                 val metered = com.milkglass.app.core.poster.isMeteredNetwork(context.applicationContext)
                 EngineRuntime.get(context.applicationContext).prefetchEpisode(
-                    e.anime.title, e.anime.romaji, nextEp, ctl.persisted.settings.quality,
+                    e.anime.title, e.anime.romaji, nextEp, ctl.preferredQuality,
                     maxAgeMs = if (nearEnd) 5L * 60L * 1000L else Long.MAX_VALUE,
                     prebuffer = nearEnd,
                     prebufferHeadBytes = if (metered) {
@@ -298,7 +301,8 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
         fxOn = true
     }
 
-    val alpha by animateFloatAsState(if (e.faded) 0f else 1f, tween(if (e.faded) 200 else 120, easing = MilkEasing.Ease), label = "controls")
+    val alphaState = animateFloatAsState(if (e.faded) 0f else 1f, tween(if (e.faded) 200 else 120, easing = MilkEasing.Ease), label = "controls")
+    val alphaProvider: () -> Float = remember(alphaState) { { alphaState.value } }
     val cutout = if (fullscreen) Modifier.windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)) else Modifier
     val buffering = e.nativeBuffering && !e.isOffline
     val bufferingActive = e.nativeBuffering || e.isOffline
@@ -334,11 +338,11 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
             modifier = Modifier.align(Alignment.BottomCenter)
         )
         Box(
-            Modifier.align(Alignment.TopCenter).fillMaxWidth().height(80.dp).graphicsLayer { this.alpha = alpha }
+            Modifier.align(Alignment.TopCenter).fillMaxWidth().height(80.dp).graphicsLayer { this.alpha = alphaProvider() }
                 .background(TOP_SCRIM_GRADIENT),
         )
 
-        Box(Modifier.fillMaxSize().then(cutout).graphicsLayer { this.alpha = alpha }) {
+        Box(Modifier.fillMaxSize().then(cutout).graphicsLayer { this.alpha = alphaProvider() }) {
             Row(
                 Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -387,24 +391,19 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
             enter = fadeIn(tween(80)), exit = fadeOut(tween(200)),
         ) { SeekIndicator(fx.dir, fx.total) }
 
-        val skipKind = e.skipButtonKind
-        if (skipKind != null && !(ctl.features.autoSkip && ctl.persisted.settings.autoSkipOpeningEnding != 0) && e.adSecondsLeft <= 0) {
-            Box(
-                Modifier.align(Alignment.BottomEnd).then(cutout).padding(end = 12.dp, bottom = 56.dp).height(36.dp)
-                    .clip(RoundedCornerShape(20.dp)).background(Color.White.copy(alpha = .92f))
-                    .milkClickable(pressDim = false) { e.skip() }.padding(horizontal = 16.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                MilkText(if (skipKind == SkipKind.Ending) tr.t("player.skipEnding") else tr.t("player.skipOpening"), ty.skipButton, Color(0xFF1D1B20))
-            }
-        }
+        PlayerSkipAndUpNextOverlays(
+            ctl = ctl,
+            e = e,
+            cutout = cutout,
+            modifier = Modifier.align(Alignment.BottomEnd),
+        )
 
         PlayerBottomControls(
             ctl = ctl,
             e = e,
             playerManager = playerManager,
             fullscreen = fullscreen,
-            alpha = alpha,
+            alphaProvider = alphaProvider,
             cutout = cutout,
             modifier = Modifier.align(Alignment.BottomCenter)
         )
@@ -412,50 +411,13 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
         if (fullscreen) {
             FullscreenProgressHairline(
                 e = e,
-                alpha = alpha,
+                alphaProvider = alphaProvider,
                 primary = c.primary,
                 modifier = Modifier.align(Alignment.BottomStart)
             )
         }
 
-        if (e.inEnding && !e.hasEnded && e.noticeTimer <= 0 && !e.isOffline) {
-            val upNext = ctl.nextPlayableEpisode(a, e.episode)
-            if (upNext != null) {
-                Box(
-                    Modifier.align(Alignment.BottomEnd).then(cutout).padding(end = 16.dp, bottom = if (skipKind != null) 104.dp else 56.dp)
-                        .clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = .55f))
-                        .milkClickable { e.playNextNow() }.padding(horizontal = 16.dp, vertical = 8.dp),
-                ) {
-                    MilkText(ctl.nextUpLineOf(a, upNext), ty.style(13f, 500), Color.White)
-                }
-            }
-        }
-        if (e.isOffline) {
-            PlayerOverlay(Modifier.padding(top = 48.dp)) {
-                MilkBadge(tr.t("player.offline"), BadgeKind.Neutral)
-                MilkText(tr.t("player.noConnection"), ty.style(14f, 700), Color.White)
-                MilkButton(tr.t("common.retry"), { e.retry() }, Modifier.widthIn(min = 140.dp), variant = ButtonVariant.Primary, onHero = true)
-            }
-        } else if (e.noticeTimer > 0) {
-            val nextEp = e.episode + 1
-            PlayerOverlay(Modifier, fireworks = true) {
-                MilkText(tr.t("player.next"), ty.style(13f), Color.White.copy(alpha = .85f))
-                MilkText(ctl.episodeLineOf(a, nextEp), ty.style(14f, 700), Color.White)
-                MilkText(tr.t("player.playingInSeconds", "ceil" to ceil(e.noticeTimer).toInt()), ty.style(13f), Color.White.copy(alpha = .85f))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MilkButton(tr.t("player.playNow"), { e.playNextNow() }, Modifier.widthIn(min = 140.dp), variant = ButtonVariant.Primary, onHero = true)
-                    MilkButton(tr.t("common.cancel"), { e.cancelAutoNext() }, Modifier.widthIn(min = 140.dp), onHero = true)
-                }
-            }
-        } else if (e.hasEnded) {
-            PlayerOverlay(Modifier, fireworks = true) {
-                MilkText(if (e.episode >= a.totalEpisodes) tr.t("player.finishedThanks") else tr.t("player.episodeFinished"), ty.style(14f, 700), Color.White)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MilkButton(tr.t("player.replay"), { e.replay() }, Modifier.widthIn(min = 140.dp), variant = ButtonVariant.Primary, onHero = true)
-                    MilkButton(tr.t("common.back"), { ctl.goBack() }, Modifier.widthIn(min = 140.dp), onHero = true)
-                }
-            }
-        }
+        PlayerStateOverlays(ctl = ctl, e = e)
     }
 }
 
@@ -520,61 +482,152 @@ private fun PlayerSubtitleOverlay(
 }
 
 @Composable
+private fun PlayerSkipAndUpNextOverlays(
+    ctl: AppController,
+    e: PlayerEngine,
+    cutout: Modifier,
+    modifier: Modifier = Modifier,
+) {
+    val ty = Milk.type
+    val tr = ctl.tr
+    val a = e.anime
+    val skipKind = e.skipButtonKind
+    val showSkip = skipKind != null && !ctl.autoSkipEnabled && !e.hasAd
+    val showUpNext = e.inEnding && !e.hasEnded && !e.hasNoticeTimer && !e.isOffline
+    val upNext = if (showUpNext) ctl.nextPlayableEpisode(a, e.episode) else null
+    if (!showSkip && upNext == null) return
+    Column(
+        modifier.then(cutout).padding(end = 12.dp, bottom = 56.dp),
+        horizontalAlignment = Alignment.End,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (upNext != null) {
+            Box(
+                Modifier.padding(end = 4.dp)
+                    .clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = .55f))
+                    .milkClickable { e.playNextNow() }.padding(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                MilkText(ctl.nextUpLineOf(a, upNext), ty.style(13f, 500), Color.White)
+            }
+        }
+        if (showSkip && skipKind != null) {
+            Box(
+                Modifier.height(36.dp)
+                    .clip(RoundedCornerShape(20.dp)).background(Color.White.copy(alpha = .92f))
+                    .milkClickable(pressDim = false) { e.skip() }.padding(horizontal = 16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                MilkText(if (skipKind == SkipKind.Ending) tr.t("player.skipEnding") else tr.t("player.skipOpening"), ty.skipButton, Color(0xFF1D1B20))
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerStateOverlays(ctl: AppController, e: PlayerEngine) {
+    val ty = Milk.type
+    val tr = ctl.tr
+    val a = e.anime
+    if (e.isOffline) {
+        PlayerOverlay(Modifier.padding(top = 48.dp)) {
+            MilkBadge(tr.t("player.offline"), BadgeKind.Neutral)
+            MilkText(tr.t("player.noConnection"), ty.style(14f, 700), Color.White)
+            MilkButton(tr.t("common.retry"), { e.retry() }, Modifier.widthIn(min = 140.dp), variant = ButtonVariant.Primary, onHero = true)
+        }
+    } else if (e.hasNoticeTimer) {
+        val nextEp = e.episode + 1
+        PlayerOverlay(Modifier, fireworks = true) {
+            MilkText(tr.t("player.next"), ty.style(13f), Color.White.copy(alpha = .85f))
+            MilkText(ctl.episodeLineOf(a, nextEp), ty.style(14f, 700), Color.White)
+            MilkText(tr.t("player.playingInSeconds", "ceil" to e.noticeSecondsLeft), ty.style(13f), Color.White.copy(alpha = .85f))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MilkButton(tr.t("player.playNow"), { e.playNextNow() }, Modifier.widthIn(min = 140.dp), variant = ButtonVariant.Primary, onHero = true)
+                MilkButton(tr.t("common.cancel"), { e.cancelAutoNext() }, Modifier.widthIn(min = 140.dp), onHero = true)
+            }
+        }
+    } else if (e.hasEnded) {
+        PlayerOverlay(Modifier, fireworks = true) {
+            MilkText(if (e.episode >= a.totalEpisodes) tr.t("player.finishedThanks") else tr.t("player.episodeFinished"), ty.style(14f, 700), Color.White)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MilkButton(tr.t("player.replay"), { e.replay() }, Modifier.widthIn(min = 140.dp), variant = ButtonVariant.Primary, onHero = true)
+                MilkButton(tr.t("common.back"), { ctl.goBack() }, Modifier.widthIn(min = 140.dp), onHero = true)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerTimeDisplay(ctl: AppController, e: PlayerEngine) {
+    val dur = e.duration
+    val posSec = e.positionWholeSecond
+    val durLabel = if (dur > 0) ctl.time.formatDuration(dur.toDouble()) else "--:--"
+    MilkText("${ctl.time.formatDuration(posSec.toDouble())} / $durLabel", Milk.type.style(12f, 400, mono = true), Color.White)
+}
+
+@Composable
+private fun PlayerQualityChip(ctl: AppController, e: PlayerEngine, playerManager: PlayerManager) {
+    val activeResFlow = remember(playerManager) {
+        playerManager.snapshot.map { it.activeResolution }.distinctUntilChanged()
+    }
+    val activeRes by activeResFlow.collectAsState(initial = playerManager.snapshot.value.activeResolution)
+    Box(
+        Modifier.height(32.dp).clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = .18f))
+            .milkClickable(enabled = !e.faded, pressDim = false) { ctl.overlay = com.milkglass.app.core.app.Overlay.QualityPicker }
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        val qualityLabel = if (ctl.preferredQuality == "Auto") "Otomatis · $activeRes" else activeRes
+        MilkText(qualityLabel, Milk.type.style(12f, 600), Color.White)
+    }
+}
+
+@Composable
 private fun PlayerBottomControls(
     ctl: AppController,
     e: PlayerEngine,
     playerManager: PlayerManager,
     fullscreen: Boolean,
-    alpha: Float,
+    alphaProvider: () -> Float,
     cutout: Modifier,
     modifier: Modifier = Modifier
 ) {
-    val ty = Milk.type
-    val activeRes = playerManager.snapshot.collectAsState().value.activeResolution
     Box(
         modifier.fillMaxWidth().height(96.dp)
-            .graphicsLayer { this.alpha = alpha }
+            .graphicsLayer { this.alpha = alphaProvider() }
             .background(BOTTOM_SCRIM_GRADIENT)
             .pointerInput(e.faded) { if (!e.faded) detectTapGestures { } },
     ) {
         Row(Modifier.then(cutout).padding(start = 12.dp, end = 12.dp).offset(y = 24.dp).fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
-            val durLabel = if (e.duration > 0) ctl.time.formatDuration(e.duration.toDouble()) else "--:--"
-            MilkText("${ctl.time.formatDuration(if (e.duration > 0) e.position else 0.0)} / $durLabel", ty.style(12f, 400, mono = true), Color.White)
+            PlayerTimeDisplay(ctl, e)
             Spacer(Modifier.weight(1f))
-            Box(
-                Modifier.height(32.dp).clip(RoundedCornerShape(16.dp))
-                    .background(Color.White.copy(alpha = .18f))
-                    .milkClickable(enabled = !e.faded, pressDim = false) { ctl.overlay = com.milkglass.app.core.app.Overlay.QualityPicker }
-                    .padding(horizontal = 12.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                val qualityLabel = if (ctl.persisted.settings.quality == "Auto") "Otomatis · $activeRes" else activeRes
-                MilkText(qualityLabel, ty.style(12f, 600), Color.White)
-            }
+            PlayerQualityChip(ctl, e, playerManager)
             Box(
                 Modifier.size(36.dp, 40.dp).clip(RoundedCornerShape(20.dp)).milkClickable(enabled = !e.faded, pressDim = false) { e.toggleFullscreen() },
                 contentAlignment = Alignment.Center,
             ) { MilkIcon(MilkIcons.Fs, size = 20.dp, tint = Color.White) }
         }
-        SeekBar(e.position, e.duration, fullscreen, { e.seekTo(it) }, Modifier.then(cutout).padding(horizontal = 8.dp).offset(y = 60.dp).fillMaxWidth())
+        SeekBar({ e.position }, e.duration, fullscreen, { e.seekTo(it) }, Modifier.then(cutout).padding(horizontal = 8.dp).offset(y = 60.dp).fillMaxWidth())
     }
 }
 
 @Composable
 private fun FullscreenProgressHairline(
     e: PlayerEngine,
-    alpha: Float,
+    alphaProvider: () -> Float,
     primary: Color,
     modifier: Modifier = Modifier
 ) {
-    if (e.duration <= 0) return
-    val frac = (e.position / e.duration).toFloat().coerceIn(0f, 1f)
-    Box(
+    val dur = e.duration
+    if (dur <= 0) return
+    val track = Color.White.copy(alpha = .3f)
+    Canvas(
         modifier.fillMaxWidth().height(2.dp)
-            .graphicsLayer { this.alpha = 1f - alpha }
-            .background(Color.White.copy(alpha = .3f)),
+            .graphicsLayer { this.alpha = 1f - alphaProvider() }
     ) {
-        Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(primary))
+        drawRect(track)
+        val frac = (e.position / dur).toFloat().coerceIn(0f, 1f)
+        drawRect(primary, size = ComposeSize(size.width * frac, size.height))
     }
 }
 
@@ -591,9 +644,11 @@ private fun PlayerOverlay(modifier: Modifier, fireworks: Boolean = false, conten
 
 @Composable
 private fun PlayerErrorBanner(playerManager: PlayerManager) {
-    val snap by playerManager.snapshot.collectAsState()
-    val errObj = snap.error
-    if (snap.phase == PlaybackPhase.ERROR && errObj != null) {
+    val errFlow = remember(playerManager) {
+        playerManager.snapshot.map { if (it.phase == PlaybackPhase.ERROR) it.error else null }.distinctUntilChanged()
+    }
+    val errObj by errFlow.collectAsState(initial = null)
+    if (errObj != null) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -619,7 +674,6 @@ private fun PlayerInfo(
     entry: ViewEntry.Player,
     modifier: Modifier
 ) {
-    val availableResolutions = ctl.availablePlayerQualities
     val c = Milk.colors
     val ty = Milk.type
     val tr = ctl.tr
@@ -627,152 +681,170 @@ private fun PlayerInfo(
     val e = entry.engine
     val a = e.anime
     val ep = e.episode
+    val mx = minOf(a.totalEpisodes, time.releasedEpisodeCount(a) + if (time.isOngoing(a)) 1 else 0)
+    val episodesList = remember(mx) { if (mx >= 2) (1..mx).toList() else emptyList() }
+    val recAnimes = remember(entry.rec, ctl.catalog) { entry.rec.mapNotNull { ctl.animeOf(it) }.take(9) }
+    val accent = remember(a.id, c.surface) { com.milkglass.app.core.design.accentFor(a, c.surface) }
     Column(
         modifier.fillMaxWidth().verticalScroll(rememberScrollState())
             .padding(start = Gutter, end = Gutter, top = 24.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
-        val ctx = LocalContext.current
-        val ioScope = rememberCoroutineScope()
-        val dlManager = remember(ctx) { MkvDownloadManager(ctx.applicationContext) }
-        val selectableQualities = remember(availableResolutions) {
-            val parsed = availableResolutions
-                .filterNot { it.equals("Auto", ignoreCase = true) }
-                .mapNotNull { MkvQuality.fromText(it) }
-                .distinct()
-                .sortedByDescending { it.height }
-            parsed.ifEmpty { MkvQuality.ALL_DESC }
-        }
-        val defaultQuality = remember(ctl.persisted.settings.quality, selectableQualities) {
-            val pref = MkvQuality.fromText(ctl.persisted.settings.quality)
-            if (pref != null && pref in selectableQualities) pref else selectableQualities.first()
-        }
-        var targetQuality by remember(a.id, ep, defaultQuality) { mutableStateOf(defaultQuality) }
-        var showQualityPicker by remember(a.id, ep) { mutableStateOf(false) }
-        var exportingGallery by remember(a.id, ep) { mutableStateOf(false) }
-
-        val animeSlug = remember(a.romaji, ep) {
-            StreamResolver.buildEpisodeSlug(a.romaji.ifBlank { a.title }, ep).substringBefore("-ep-")
-        }
-        val workName = remember(animeSlug, ep, targetQuality) {
-            dlManager.buildUniqueWorkName(animeSlug, ep, targetQuality.label)
-        }
-        val dlStatus by dlManager.observeDownload(workName).collectAsState(initial = MkvDownloadStatus())
-        val downloadedFile = remember(animeSlug, ep, targetQuality, dlStatus.isSucceeded) {
-            dlManager.getDownloadedFile(animeSlug, ep, targetQuality)
-        }
-        val alreadyDownloaded = remember(downloadedFile, dlStatus.isSucceeded) {
-            downloadedFile.exists() && downloadedFile.length() > 1024L
-        }
-
-        LaunchedEffect(workName, dlStatus.isFailed, dlStatus.outcome) {
-            if (dlStatus.isFailed && dlStatus.outcome == DownloadDrainOutcome.UNAVAILABLE_MP4.name) {
-                ctl.showToast("Unduhan MP4 tidak tersedia untuk ${targetQuality.label}")
-            }
-        }
-
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             MilkText(ctl.episodeLineOf(a, ep), ty.title, c.onSurface)
             MilkText("${a.romaji} ${tr.t("player.minutesSuffix", "episodeMinutes" to a.episodeMinutes)}", ty.body, c.onSurfaceVariant)
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {  // grid-exempt: 10dp sengaja (kontrol pemutar)
-                val btnLabel = when {
-                    alreadyDownloaded || dlStatus.isSucceeded -> "MP4 ${targetQuality.label} Tersimpan"
-                    dlStatus.isRunning -> "Mengunduh ${targetQuality.label} ${dlStatus.progressPercent}%..."
-                    dlStatus.isFailed && dlStatus.outcome == DownloadDrainOutcome.UNAVAILABLE_MP4.name -> "MP4 Tidak Tersedia • Pilih Lain"
-                    dlStatus.isFailed -> "Gagal • Unduh Ulang MP4"
-                    else -> "Unduh MP4"
+            PlayerDownloadSection(ctl = ctl, a = a, ep = ep)
+        }
+
+        if (episodesList.isNotEmpty()) {
+            Column {
+                SectionHeader(ctl.enumLabel("detailTab", "episodes"))
+                EpisodeStrip(ctl, a, episodesList, ep, accent)
+            }
+        }
+        LikeSection(ctl, recAnimes) { SectionHeader(tr.t("home.youMightLike")) }
+    }
+}
+
+@Composable
+private fun PlayerDownloadSection(
+    ctl: AppController,
+    a: com.milkglass.app.core.model.Anime,
+    ep: Int,
+) {
+    val availableResolutions = ctl.availablePlayerQualities
+    val ctx = LocalContext.current
+    val ioScope = rememberCoroutineScope()
+    val dlManager = remember(ctx) { MkvDownloadManager(ctx.applicationContext) }
+    val selectableQualities = remember(availableResolutions) {
+        val parsed = availableResolutions
+            .filterNot { it.equals("Auto", ignoreCase = true) }
+            .mapNotNull { MkvQuality.fromText(it) }
+            .distinct()
+            .sortedByDescending { it.height }
+        parsed.ifEmpty { MkvQuality.ALL_DESC }
+    }
+    val defaultQuality = remember(ctl.preferredQuality, selectableQualities) {
+        val pref = MkvQuality.fromText(ctl.preferredQuality)
+        if (pref != null && pref in selectableQualities) pref else selectableQualities.first()
+    }
+    var targetQuality by remember(a.id, ep, defaultQuality) { mutableStateOf(defaultQuality) }
+    var showQualityPicker by remember(a.id, ep) { mutableStateOf(false) }
+    var exportingGallery by remember(a.id, ep) { mutableStateOf(false) }
+
+    val animeSlug = remember(a.romaji, ep) {
+        StreamResolver.buildEpisodeSlug(a.romaji.ifBlank { a.title }, ep).substringBefore("-ep-")
+    }
+    val workName = remember(animeSlug, ep, targetQuality) {
+        dlManager.buildUniqueWorkName(animeSlug, ep, targetQuality.label)
+    }
+    val dlStatus by dlManager.observeDownload(workName).collectAsState(initial = MkvDownloadStatus())
+    val downloadedFile = remember(animeSlug, ep, targetQuality, dlStatus.isSucceeded) {
+        dlManager.getDownloadedFile(animeSlug, ep, targetQuality)
+    }
+    val alreadyDownloaded = remember(downloadedFile, dlStatus.isSucceeded) {
+        downloadedFile.exists() && downloadedFile.length() > 1024L
+    }
+
+    LaunchedEffect(workName, dlStatus.isFailed, dlStatus.outcome) {
+        if (dlStatus.isFailed && dlStatus.outcome == DownloadDrainOutcome.UNAVAILABLE_MP4.name) {
+            ctl.showToast("Unduhan MP4 tidak tersedia untuk ${targetQuality.label}")
+        }
+    }
+
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {  // grid-exempt: 10dp sengaja (kontrol pemutar)
+        val btnLabel = when {
+            alreadyDownloaded || dlStatus.isSucceeded -> "MP4 ${targetQuality.label} Tersimpan"
+            dlStatus.isRunning -> "Mengunduh ${targetQuality.label} ${dlStatus.progressPercent}%..."
+            dlStatus.isFailed && dlStatus.outcome == DownloadDrainOutcome.UNAVAILABLE_MP4.name -> "MP4 Tidak Tersedia • Pilih Lain"
+            dlStatus.isFailed -> "Gagal • Unduh Ulang MP4"
+            else -> "Unduh MP4"
+        }
+        MilkButton(
+            text = btnLabel,
+            onClick = {
+                if (!dlStatus.isRunning) {
+                    showQualityPicker = !showQualityPicker
                 }
-                MilkButton(
-                    text = btnLabel,
-                    onClick = {
-                        if (!dlStatus.isRunning) {
-                            showQualityPicker = !showQualityPicker
+            },
+            variant = if (alreadyDownloaded || dlStatus.isSucceeded) ButtonVariant.Outlined else ButtonVariant.Primary,
+            small = true,
+            dimmed = dlStatus.isRunning
+        )
+        if (dlStatus.isRunning) {
+            MilkButton(
+                text = "Batal",
+                onClick = { runCatching { dlManager.cancelDownload(workName) } },
+                variant = ButtonVariant.Outlined,
+                small = true
+            )
+        }
+        if ((alreadyDownloaded || dlStatus.isSucceeded) && !dlStatus.isRunning) {
+            MilkButton(
+                text = if (exportingGallery) "Menyimpan..." else "Simpan ke Galeri",
+                onClick = {
+                    if (!exportingGallery) {
+                        exportingGallery = true
+                        ioScope.launch {
+                            val res = withContext(Dispatchers.IO) {
+                                dlManager.exportToGallery(
+                                    sourceFile = downloadedFile,
+                                    displayTitle = "${a.romaji.ifBlank { a.title }} EP $ep ${targetQuality.label}"
+                                )
+                            }
+                            exportingGallery = false
+                            res.onSuccess {
+                                ctl.showToast("Disimpan ke Galeri (Movies/Milkglass)")
+                            }.onFailure { err ->
+                                ctl.showToast(err.message ?: "Gagal menyimpan ke Galeri")
+                            }
                         }
-                    },
-                    variant = if (alreadyDownloaded || dlStatus.isSucceeded) ButtonVariant.Outlined else ButtonVariant.Primary,
-                    small = true,
-                    dimmed = dlStatus.isRunning
-                )
-                if (dlStatus.isRunning) {
+                    }
+                },
+                variant = ButtonVariant.Outlined,
+                small = true,
+                dimmed = exportingGallery
+            )
+        }
+    }
+    if (showQualityPicker && !dlStatus.isRunning) {
+        val savedByQuality = remember(animeSlug, ep, selectableQualities, dlStatus.isSucceeded) {
+            selectableQualities.associateWith { q ->
+                dlManager.getDownloadedFile(animeSlug, ep, q).let { it.exists() && it.length() > 1024L }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            selectableQualities.forEach { q ->
+                key(q.label) {
+                    val qSaved = savedByQuality[q] == true
                     MilkButton(
-                        text = "Batal",
-                        onClick = { runCatching { dlManager.cancelDownload(workName) } },
-                        variant = ButtonVariant.Outlined,
-                        small = true
-                    )
-                }
-                if ((alreadyDownloaded || dlStatus.isSucceeded) && !dlStatus.isRunning) {
-                    MilkButton(
-                        text = if (exportingGallery) "Menyimpan..." else "Simpan ke Galeri",
+                        text = if (qSaved) "${q.label} ✓" else q.label,
                         onClick = {
-                            if (!exportingGallery) {
-                                exportingGallery = true
-                                ioScope.launch {
-                                    val res = withContext(Dispatchers.IO) {
-                                        dlManager.exportToGallery(
-                                            sourceFile = downloadedFile,
-                                            displayTitle = "${a.romaji.ifBlank { a.title }} EP $ep ${targetQuality.label}"
+                            targetQuality = q
+                            showQualityPicker = false
+                            if (!qSaved) {
+                                runCatching {
+                                    dlManager.enqueueEpisodeDownload(
+                                        MkvDownloadRequest(
+                                            animeSlug = animeSlug,
+                                            animeTitle = a.romaji.ifBlank { a.title },
+                                            episodeNumber = ep,
+                                            preferredQuality = q,
+                                            allowBatchFallback = false,
+                                            wifiOnly = ctl.wifiOnlyDownloads
                                         )
-                                    }
-                                    exportingGallery = false
-                                    res.onSuccess {
-                                        ctl.showToast("Disimpan ke Galeri (Movies/Milkglass)")
-                                    }.onFailure { err ->
-                                        ctl.showToast(err.message ?: "Gagal menyimpan ke Galeri")
-                                    }
+                                    )
+                                }.onFailure { err ->
+                                    ctl.showToast(err.message ?: "Gagal memulai unduhan MP4")
                                 }
                             }
                         },
-                        variant = ButtonVariant.Outlined,
-                        small = true,
-                        dimmed = exportingGallery
+                        variant = if (q == targetQuality) ButtonVariant.Primary else ButtonVariant.Outlined,
+                        small = true
                     )
                 }
             }
-            if (showQualityPicker && !dlStatus.isRunning) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    selectableQualities.forEach { q ->
-                        key(q.label) {
-                            val qSaved = dlManager.getDownloadedFile(animeSlug, ep, q).let { it.exists() && it.length() > 1024L }
-                            MilkButton(
-                                text = if (qSaved) "${q.label} ✓" else q.label,
-                                onClick = {
-                                    targetQuality = q
-                                    showQualityPicker = false
-                                    if (!qSaved) {
-                                        runCatching {
-                                            dlManager.enqueueEpisodeDownload(
-                                                MkvDownloadRequest(
-                                                    animeSlug = animeSlug,
-                                                    animeTitle = a.romaji.ifBlank { a.title },
-                                                    episodeNumber = ep,
-                                                    preferredQuality = q,
-                                                    allowBatchFallback = false,
-                                                    wifiOnly = ctl.persisted.settings.wifiOnlyDownloads != 0
-                                                )
-                                            )
-                                        }.onFailure { err ->
-                                            ctl.showToast(err.message ?: "Gagal memulai unduhan MP4")
-                                        }
-                                    }
-                                },
-                                variant = if (q == targetQuality) ButtonVariant.Primary else ButtonVariant.Outlined,
-                                small = true
-                            )
-                        }
-                    }
-                }
-            }
         }
-
-        val mx = minOf(a.totalEpisodes, time.releasedEpisodeCount(a) + if (time.isOngoing(a)) 1 else 0)
-        if (mx >= 2) {
-            Column {
-                SectionHeader(ctl.enumLabel("detailTab", "episodes"))
-                EpisodeStrip(ctl, a, (1..mx).toList(), ep, androidx.compose.runtime.remember(a.id, c.surface) { com.milkglass.app.core.design.accentFor(a, c.surface) })
-            }
-        }
-        LikeSection(ctl, entry.rec.mapNotNull { ctl.animeOf(it) }.take(9)) { SectionHeader(tr.t("home.youMightLike")) }
     }
 }
 

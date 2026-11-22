@@ -44,7 +44,7 @@ sealed interface ViewEntry {
     class Player(val engine: PlayerEngine, val rec: List<Int>) : ViewEntry
 }
 
-class ExitingView(val id: Int, val index: Int, val entry: ViewEntry)
+class ExitingView(val id: Int, val index: Int, val entry: ViewEntry, val instanceId: Long = id.toLong())
 
 @Immutable
 data class ListSelection(val scope: String, val keys: List<String>)
@@ -243,6 +243,8 @@ class AppController(
     private var extras by mutableStateOf<Map<Int, com.milkglass.app.core.remote.AniListExtras>>(emptyMap())
     private val extrasRequested = HashSet<Int>()
 
+    fun extrasOf(id: Int): com.milkglass.app.core.remote.AniListExtras? = extras[id]
+
     suspend fun loadExtras(a: Anime) {
         val src = extrasSource ?: return
         if (a.id in seedIds || !extrasRequested.add(a.id)) return
@@ -377,6 +379,8 @@ class AppController(
     var isBooting by mutableStateOf(true)
     var isSigningIn by mutableStateOf(false)
     val viewStack = mutableStateListOf<ViewEntry>()
+    val viewInstanceIds = mutableStateListOf<Long>()
+    private var viewSeq = 0L
 
     val exitingViews = mutableStateListOf<ExitingView>()
     private var exitSeq = 0
@@ -412,8 +416,30 @@ class AppController(
 
     val nowMs: Long get() { tick; return now() }
 
-    val meName: String get() = (persisted.displayName?.takeIf { it.isNotEmpty() } ?: tr.t("common.you")).replace(UNSAFE_CHARS, "")
-    val meHandle: String get() = persisted.handle?.takeIf { it.isNotEmpty() } ?: "kamu"
+    // Granular derived state slices: tiap komponen hanya mengamati slice milik fungsinya sendiri.
+    val themeKey: String by derivedStateOf { persisted.settings.theme }
+    val isAuthenticated: Boolean by derivedStateOf { persisted.isAuthenticated != 0 }
+    val collectionTab: String by derivedStateOf { persisted.collectionTab }
+    val preferredQuality: String by derivedStateOf { persisted.settings.quality }
+    val autoSkipEnabled: Boolean by derivedStateOf { features.autoSkip && persisted.settings.autoSkipOpeningEnding != 0 }
+    val wifiOnlyDownloads: Boolean by derivedStateOf { persisted.settings.wifiOnlyDownloads != 0 }
+    val watchlistIds: List<Int> by derivedStateOf { persisted.watchlist }
+    private val watchlistSet: Set<Int> by derivedStateOf { persisted.watchlist.toHashSet() }
+    val recentSearches: List<String> by derivedStateOf { persisted.recentSearches }
+    val historyList: List<com.milkglass.app.core.model.HistoryEntry> by derivedStateOf { persisted.history }
+    val progressMap: Map<String, Map<String, Double>> by derivedStateOf { persisted.progress }
+    val resumePositionsMap: Map<String, Map<String, Double>> by derivedStateOf { persisted.resumePositions }
+    val lastWatchedMap: Map<String, Long> by derivedStateOf { persisted.lastWatched }
+    val isFullscreenPlayer: Boolean by derivedStateOf {
+        (viewStack.lastOrNull() as? ViewEntry.Player)?.engine?.isFullscreen == true
+    }
+
+    val meName: String by derivedStateOf {
+        (persisted.displayName?.takeIf { it.isNotEmpty() } ?: tr.t("common.you")).replace(UNSAFE_CHARS, "")
+    }
+    val meHandle: String by derivedStateOf {
+        persisted.handle?.takeIf { it.isNotEmpty() } ?: "kamu"
+    }
     fun isPremium(): Boolean {
         if (!features.premium) return false
         val sub = persisted.subscription ?: return false
@@ -424,12 +450,12 @@ class AppController(
     fun enumLabel(group: String, code: String) = tr.t("$group.$code")
     fun genreSummary(a: Anime) = a.genres.take(2).joinToString(" · ") { enumLabel("genre", it) }
 
-    fun progressOf(a: Anime, ep: Int): Double = persisted.progress[a.id.toString()]?.get(ep.toString()) ?: 0.0
-    fun resumePosition(a: Anime, ep: Int): Double = persisted.resumePositions[a.id.toString()]?.get(ep.toString()) ?: progressOf(a, ep)
+    fun progressOf(a: Anime, ep: Int): Double = progressMap[a.id.toString()]?.get(ep.toString()) ?: 0.0
+    fun resumePosition(a: Anime, ep: Int): Double = resumePositionsMap[a.id.toString()]?.get(ep.toString()) ?: progressOf(a, ep)
     fun durationSeconds(a: Anime) = time.durationSeconds(a)
     fun isWatched(a: Anime, ep: Int) = progressOf(a, ep) >= durationSeconds(a) * .9
     fun startedEpisodes(a: Anime): List<Int> =
-        (persisted.progress[a.id.toString()]?.keys ?: emptySet()).mapNotNull { it.toIntOrNull() }.filter { progressOf(a, it) > 0 }
+        (progressMap[a.id.toString()]?.keys ?: emptySet()).mapNotNull { it.toIntOrNull() }.filter { progressOf(a, it) > 0 }
 
     fun isEarlyAccessWindow(a: Anime): Boolean = time.nextReleaseAt(a)?.let { it - now() <= DAY_MS } ?: false
 
@@ -456,7 +482,7 @@ class AppController(
         return ContinueInfo(episode = null, waiting = true, completed = l >= a.totalEpisodes)
     }
 
-    fun lastWatchedAt(a: Anime): Long = persisted.lastWatched[a.id.toString()] ?: 0L
+    fun lastWatchedAt(a: Anime): Long = lastWatchedMap[a.id.toString()] ?: 0L
 
     fun isReturning(a: Anime): Boolean { val t = lastWatchedAt(a); return t > 0L && now() - t >= 3 * DAY_MS }
 
@@ -464,7 +490,8 @@ class AppController(
         .filter { a -> continueInfo(a)?.let { !it.completed } == true }
         .sortedByDescending { lastWatchedAt(it) }
 
-    fun isInWatchlist(a: Anime) = persisted.watchlist.contains(a.id)
+    fun isInWatchlist(id: Int) = id in watchlistSet
+    fun isInWatchlist(a: Anime) = isInWatchlist(a.id)
 
     fun genreAffinity(): Map<String, Int> {
         val m = linkedMapOf<String, Int>()
@@ -705,15 +732,19 @@ class AppController(
         if (v !is ViewEntry.Player && viewStack.lastOrNull() == v) return
 
         exitingViews.removeAll { it.index >= viewStack.size }
-        viewStack.add(v); navKind = NavKind.Push; navToken++
+        viewStack.add(v)
+        viewInstanceIds.add(++viewSeq)
+        navKind = NavKind.Push; navToken++
     }
     fun popView() {
         if (viewStack.isNotEmpty()) {
-            val top = viewStack.last()
+            val idx = viewStack.lastIndex
+            val top = viewStack[idx]
+            val instId = if (idx < viewInstanceIds.size) viewInstanceIds.removeAt(idx) else ++viewSeq
             (top as? ViewEntry.Player)?.engine?.onLeave()
             popFromPlayer = top is ViewEntry.Player
-            if (top !is ViewEntry.Player) exitingViews.add(ExitingView(++exitSeq, viewStack.lastIndex, top))
-            viewStack.removeAt(viewStack.lastIndex); navKind = NavKind.Pop; navToken++
+            if (top !is ViewEntry.Player) exitingViews.add(ExitingView(++exitSeq, idx, top, instId))
+            viewStack.removeAt(idx); navKind = NavKind.Pop; navToken++
         }
     }
     fun goBack() {
@@ -851,14 +882,19 @@ class AppController(
             )
             return
         }
-        (viewStack.lastOrNull() as? ViewEntry.Player)?.let { it.engine.onLeave(); viewStack.removeAt(viewStack.lastIndex) }
+        (viewStack.lastOrNull() as? ViewEntry.Player)?.let {
+            it.engine.onLeave()
+            val idx = viewStack.lastIndex
+            viewStack.removeAt(idx)
+            if (idx < viewInstanceIds.size) viewInstanceIds.removeAt(idx)
+        }
         val sp = resumePosition(a, ep)
         val start = pos ?: if (sp > 0 && !isWatched(a, ep)) smartResume(sp, lastWatchedAt(a), now()) else 0.0
         val rec = catalog.filter { it.id != a.id }.shuffled().take(10).map { it.id }
         pushView(ViewEntry.Player(PlayerEngine(this, a, ep, start), rec))
     }
 
-    fun effectiveQuality(): String = persisted.settings.quality.let { if (it == "Auto") tr.t("player.automaticQuality") else it }
+    fun effectiveQuality(): String = preferredQuality.let { if (it == "Auto") tr.t("player.automaticQuality") else it }
 
     fun setQuality(q: String) {
         persisted = persisted.copy(settings = persisted.settings.copy(quality = q))
@@ -925,6 +961,7 @@ class AppController(
         persisted = persisted.copy(isAuthenticated = 0, accessToken = null)
         runCatching { onSignOut?.invoke() }
         viewStack.clear()
+        viewInstanceIds.clear()
         exitingViews.clear()
         navKind = NavKind.None
         isSigningIn = false
@@ -1066,6 +1103,7 @@ class AppController(
         val was = persisted.deletionScheduledAt
         persisted = persisted.copy(isAuthenticated = 1, deletionScheduledAt = 0)
         viewStack.clear()
+        viewInstanceIds.clear()
         exitingViews.clear()
         navKind = NavKind.None
         saveNow()

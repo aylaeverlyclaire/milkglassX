@@ -195,16 +195,17 @@ private fun SearchResults(ctl: AppController) {
             Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, top = 16.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
-            if (ctl.persisted.recentSearches.isNotEmpty()) {
+            val recent = ctl.recentSearches
+            if (recent.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SectionHeader(tr.t("search.recent"), right = { LabelStrong(tr.t("common.delete"), { ctl.clearRecentSearches() }) })
-                    MilkColumnGrid(ctl.persisted.recentSearches, itemKey = { it }) { t -> MilkChip(t, false, { ctl.runSearch(t) }, Modifier.fillMaxWidth()) }
+                    MilkColumnGrid(recent, itemKey = { it }) { t -> MilkChip(t, false, { ctl.runSearch(t) }, Modifier.fillMaxWidth()) }
                 }
             }
 
-            val tries = remember(ctl.catalog, ctl.persisted.recentSearches) {
+            val tries = remember(ctl.catalog, recent) {
                 ctl.searchSuggestions()
-                    .filter { s -> ctl.persisted.recentSearches.none { it.trim().equals(s.trim(), ignoreCase = true) } }
+                    .filter { s -> recent.none { it.trim().equals(s.trim(), ignoreCase = true) } }
             }
             if (tries.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

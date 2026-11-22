@@ -62,6 +62,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import com.milkglass.app.core.design.MilkEasing
@@ -89,7 +90,7 @@ fun BufferSpinner() {
 }
 
 @Composable
-fun SeekBar(position: Double, max: Int, fullscreen: Boolean, onSeek: (Double) -> Unit, modifier: Modifier = Modifier) {
+fun SeekBar(positionProvider: () -> Double, max: Int, fullscreen: Boolean, onSeek: (Double) -> Unit, modifier: Modifier = Modifier) {
     val primary = com.milkglass.app.core.design.Milk.colors.primary
     val fill = primary
     val rest = Color.White.copy(alpha = if (fullscreen) .3f else .35f)
@@ -108,7 +109,7 @@ fun SeekBar(position: Double, max: Int, fullscreen: Boolean, onSeek: (Double) ->
             }
         },
     ) {
-        val p = if (max > 0) (position / max).toFloat().coerceIn(0f, 1f) else 0f
+        val p = if (max > 0) (positionProvider() / max).toFloat().coerceIn(0f, 1f) else 0f
         val cy = size.height / 2f
         val th = 4.dp.toPx()
         drawRect(rest, Offset(0f, cy - th / 2f), Size(size.width, th))
@@ -196,19 +197,24 @@ internal data class SeekFx(val dir: Int, val total: Int, val token: Int)
 @Composable
 internal fun SeekIndicator(dir: Int, total: Int, modifier: Modifier = Modifier) {
     val t = rememberInfiniteTransition(label = "seekFx")
-    val p by t.animateFloat(0f, 1f, infiniteRepeatable(tween(720, easing = LinearEasing)), label = "phase")
-    val pulse = (1f - abs(p - .5f) * 1.4f).coerceIn(.35f, 1f)
+    val pState = t.animateFloat(0f, 1f, infiniteRepeatable(tween(720, easing = LinearEasing)), label = "phase")
+    val pulseProvider: () -> Float = remember(pState) { { (1f - abs(pState.value - .5f) * 1.4f).coerceIn(.35f, 1f) } }
     val label = (if (dir < 0) "-" else "+") + total
     Row(modifier, horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (dir < 0) SeekChevron(dir, pulse)
+        if (dir < 0) SeekChevron(dir, pulseProvider)
         MilkText(label, Milk.type.style(20f, 700).copy(shadow = SEEK_TEXT_SHADOW), Color.White)
-        if (dir >= 0) SeekChevron(dir, pulse)
+        if (dir >= 0) SeekChevron(dir, pulseProvider)
     }
 }
 
 @Composable
-private fun SeekChevron(dir: Int, alpha: Float) {
-    Box(Modifier.scale(scaleX = if (dir < 0) -1f else 1f, scaleY = 1f)) {
-        MilkIcon(MilkIcons.Chev, size = 24.dp, tint = Color.White.copy(alpha = alpha))
+private fun SeekChevron(dir: Int, alphaProvider: () -> Float) {
+    Box(
+        Modifier.graphicsLayer {
+            scaleX = if (dir < 0) -1f else 1f
+            alpha = alphaProvider()
+        }
+    ) {
+        MilkIcon(MilkIcons.Chev, size = 24.dp, tint = Color.White)
     }
 }

@@ -10,8 +10,10 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import kotlinx.coroutines.launch
 import com.milkglass.app.core.design.accentFor
 import com.milkglass.app.ui.common.milkCombinedClickable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -121,7 +123,8 @@ fun CountdownText(ctl: AppController, ts: Long, modifier: Modifier = Modifier, h
     MilkText(text, Milk.type.countdown, if (aired) Milk.colors.success else Milk.colors.primary, modifier)
 }
 
-private class HomeData(
+@Immutable
+private data class HomeData(
     val cl: List<Anime>, val anime: Anime, val resume: com.milkglass.app.core.app.ContinueInfo?,
     val today: List<com.milkglass.app.core.app.ScheduleEntry>, val trending: List<Anime>, val fy: List<Anime>,
     val personalized: Boolean,
@@ -149,7 +152,10 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
     val time = ctl.time
     if (ctl.catalog.isEmpty()) { CatalogEmpty(ctl); return }
     val todayBucket = time.startOfToday()
-    val d = androidx.compose.runtime.remember(ctl.persisted, ctl.catalog, todayBucket) {
+    val progress = ctl.progressMap
+    val resumePos = ctl.resumePositionsMap
+    val lastWatched = ctl.lastWatchedMap
+    val d = remember(progress, resumePos, lastWatched, ctl.catalog, todayBucket) {
         val cl = ctl.continueWatchingList()
         val anime = cl.firstOrNull() ?: ctl.trendingList().first()
         HomeData(
@@ -159,19 +165,19 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
     }
 
     val heroCtx = androidx.compose.ui.platform.LocalContext.current.applicationContext
-    androidx.compose.runtime.LaunchedEffect(d.anime.id, d.resume?.episode, ctl.persisted.settings.quality, ctl.online) {
+    androidx.compose.runtime.LaunchedEffect(d.anime.id, d.resume?.episode, ctl.preferredQuality, ctl.online) {
         val ep = d.resume?.episode ?: 1
         if (ctl.online && ctl.episodeAccess(d.anime, ep) == com.milkglass.app.core.app.Access.Ok) {
             kotlinx.coroutines.delay(250)
             val rt = id.my.milkglass.EngineRuntime.get(heroCtx)
             rt.seedSourceUrls(d.anime.title, d.anime.romaji, d.anime.sourceUrls)
             rt.prefetchEpisode(
-                d.anime.title, d.anime.romaji, ep, ctl.persisted.settings.quality,
+                d.anime.title, d.anime.romaji, ep, ctl.preferredQuality,
             )
         }
     }
 
-    val stopped = androidx.compose.runtime.remember(ctl.persisted, d.cl, todayBucket) {
+    val stopped = remember(progress, lastWatched, d.cl, todayBucket) {
         d.cl.firstOrNull { ctl.isReturning(it) }?.let { s ->
             s to ctl.similarOf(s, 16).filter { ctl.startedEpisodes(it).isEmpty() }.take(8)
         }
@@ -233,9 +239,10 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
         }
 
         if (cl.size > 1) {
+            val moreWatching = remember(cl) { cl.drop(1) }
             Column {
                 SectionHeader(tr.t("home.continueWatchingShort"))
-                Carousel(cl.drop(1), modifier = Modifier.padding(top = 8.dp), key = { it.id }) { a ->
+                Carousel(moreWatching, modifier = Modifier.padding(top = 8.dp), key = { it.id }) { a ->
                     val r = ctl.continueInfo(a)
                     val pct = if (r != null && r.position != 0.0) (r.position / ctl.durationSeconds(a) * 100).toFloat() else 0f
                     AnimeCard(ctl, a, ctl.continueLabel(a), progressPct = pct)
@@ -265,8 +272,9 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
         }
 
         Column {
+            val rankedTrending = remember(trending) { trending.withIndex().toList() }
             SectionHeader(tr.t("home.mostPopular"))
-            Carousel(trending.withIndex().toList(), modifier = Modifier.padding(top = 8.dp), key = { it.value.id }) { (i, a) ->
+            Carousel(rankedTrending, modifier = Modifier.padding(top = 8.dp), key = { it.value.id }) { (i, a) ->
                 AnimeCard(ctl, a, tr.t("home.ratingCount", "value" to i + 1, "formatCompactCount" to time.formatCompactCount(a.voteCount)))
             }
         }
