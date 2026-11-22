@@ -33,7 +33,7 @@ const HINT_REFRESH_AFTER_SEC = 20 * 60;
 const HINT_MAX_CANDIDATES = 12;
 const IP_AGNOSTIC_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
-  'filedon.co', 'odfiles.com', 'odcloud.net', 'buzzheavier.com', 'qiwi.gg', 'spyderrock.com',
+  'filedon.co', 'odfiles.com', 'r2.dev', 'blogger.googleusercontent.com', 'video-downloads.googleusercontent.com', 'odcloud.net', 'buzzheavier.com', 'qiwi.gg', 'spyderrock.com',
   'mediafire.com', 'krakenfiles.com', 'kfiles.io', 'wibufile.com', 'uqni.net',
   'drive.google.com', 'drive.usercontent.google.com',
 ];
@@ -736,7 +736,8 @@ playRoutes.post(
 );
 
 // Wave 3: Episode-level Playback Failure & TTFF Telemetry + Automated GitHub Issue Alerting (Option B)
-const SLOW_ALERT_THRESHOLD_MS = 1500;
+const SLOW_ALERT_THRESHOLD_MS = 5000;
+const GITHUB_ISSUE_DEDUP_SEC = 24 * 3600;
 const DEFAULT_TELEMETRY_REPO = 'aylaeverlyclaire/milkglassX';
 
 const playbackReportSchema = z.object({
@@ -894,12 +895,24 @@ playRoutes.post(
       return c.json({ status: 'ok', stored: false, degraded: true });
     }
 
-    // 3) Option B: Auto-open GitHub Issue on every failure or slow playback (>1.5s) without dedup/rate-limit (tester mode)
+    // 3) Option B: Auto-open GitHub Issue on failure or severe slow playback (>5s) with 24h per-episode deduplication
     const shouldAlert = report.status === 'failed' || report.ttff_ms > SLOW_ALERT_THRESHOLD_MS;
     let issueScheduled = false;
     if (shouldAlert && c.env.GITHUB_TELEMETRY_TOKEN?.trim()) {
-      issueScheduled = true;
-      c.executionCtx?.waitUntil?.(dispatchGitHubTelemetryIssue(c.env, report, asn, reportId));
+      try {
+        const recentIssue = await c.env.DB.prepare(
+          `SELECT id FROM playback_reports
+           WHERE title_key = ?1 AND ep = ?2 AND status = ?3
+             AND github_issue_url != '' AND created_at >= ?4
+           LIMIT 1`
+        )
+          .bind(tKey, report.ep, report.status, nowSec - GITHUB_ISSUE_DEDUP_SEC)
+          .first<{ id: number }>();
+        if (!recentIssue) {
+          issueScheduled = true;
+          c.executionCtx?.waitUntil?.(dispatchGitHubTelemetryIssue(c.env, report, asn, reportId));
+        }
+      } catch {}
     }
 
     return c.json({ status: 'ok', stored: true, report_id: reportId, issue_scheduled: issueScheduled });
