@@ -461,7 +461,11 @@ export function extractHostersFromOploverzEpisodeJson(epObj, pageUrl) {
   return results.slice(0, 16);
 }
 
+const ALLOWED_CATALOG_PROVIDERS = new Set(['samehadaku', 'otakudesu']);
+
 export function buildSourceFirstCatalog(catalog, providerIndices) {
+  const allowedIndices = (providerIndices || []).filter((p) => p && ALLOWED_CATALOG_PROVIDERS.has(p.provider));
+  providerIndices = allowedIndices;
   const matched = [];
   const claimedUrls = new Set();
   const syncItems = [];
@@ -498,7 +502,7 @@ export function buildSourceFirstCatalog(catalog, providerIndices) {
     }
   }
 
-  // Source-First: sertakan anime yang ada di Samehadaku/Otakudesu/NontonAnimeID meski belum masuk AniList top-N
+  // Source-First: sertakan anime yang ada di Samehadaku/Otakudesu
   const sourceOnlyByKey = new Map();
   for (const pIdx of providerIndices) {
     for (const cand of pIdx.list) {
@@ -602,31 +606,6 @@ async function runPool(items, concurrency, fn) {
   return out;
 }
 
-async function fetchOploverzIndex(oploBase) {
-  const out = [];
-  for (let page = 1; page <= 4; page++) {
-    try {
-      const json = await fetchJson(`https://backapi.oploverz.ac/api/series?page=${page}&pageSize=250`, {}, 15000);
-      const data = json?.data || [];
-      for (const item of data) {
-        if (item?.title && item?.slug) {
-          out.push({
-            title: String(item.title),
-            url: `${oploBase}/series/${item.slug}`,
-            slug: String(item.slug),
-            provider: 'oploverz',
-          });
-        }
-      }
-      if (data.length < 250) break;
-    } catch (err) {
-      console.warn(`[oploverz] page ${page} error: ${err.message}`);
-      break;
-    }
-  }
-  return out;
-}
-
 async function main() {
   const workerUrl = (process.env.WORKER_URL || 'https://milkglass-backend.milkyliquid.workers.dev').replace(/\/+$/, '');
   const adminSecret = (process.env.ADMIN_SECRET || '').trim();
@@ -647,23 +626,18 @@ async function main() {
   const catalog = (catJson.data || []).slice(0, maxAnimes);
   const sourcesMap = new Map((srcJson.sources || []).map((s) => [s.id, s.base_url]));
   const sameBase = (sourcesMap.get('samehadaku') || 'https://v2.samehadaku.how').replace(/\/+$/, '');
-  const nontonBase = (sourcesMap.get('nontonanimeid') || 'https://nontonanimeid.stream').replace(/\/+$/, '');
   const otakuBase = (sourcesMap.get('otakudesu') || 'https://otakudesu.blog').replace(/\/+$/, '');
-  const oploBase = (sourcesMap.get('oploverz') || 'https://oploverz.ch').replace(/\/+$/, '');
 
+  // Katalog eksklusif Samehadaku & Otakudesu saja.
   const providerIndices = [];
-  const [sameRes, nontonRes, otakuRes, oploRes] = await Promise.allSettled([
+  const [sameRes, otakuRes] = await Promise.allSettled([
     fetchText(`${sameBase}/daftar-anime-2/?list`, `${sameBase}/`, 20000).then(parseSamehadakuAnimeList),
-    fetchText(`${nontonBase}/anime/`, `${nontonBase}/`, 20000).then((h) => parseNontonAnimeIdList(h, nontonBase)),
     fetchText(`${otakuBase}/anime-list/`, `${otakuBase}/`, 20000).then(parseOtakudesuAnimeList),
-    fetchOploverzIndex(oploBase),
   ]);
 
   const orderedProviderResults = [
     ['samehadaku', sameBase, sameRes],
     ['otakudesu', otakuBase, otakuRes],
-    ['nontonanimeid', nontonBase, nontonRes],
-    ['oploverz', oploBase, oploRes],
   ];
   for (const [provider, base, res] of orderedProviderResults) {
     if (res.status === 'fulfilled' && res.value.length > 0) {
@@ -680,7 +654,7 @@ async function main() {
 
   const { matched, syncItems } = buildSourceFirstCatalog(catalog, providerIndices);
   console.log(
-    `Matched ${matched.length}/${catalog.length} AniList anime + ${syncItems.length - matched.length} source-only anime across ${providerIndices.length} provider(s)`
+    `Matched ${matched.length}/${catalog.length} anime + ${syncItems.length - matched.length} source-only anime across ${providerIndices.length} provider(s)`
   );
 
   // Sinkronkan seluruh source_urls_json ke D1 (Source-First Catalog) agar katalog langsung lengkap & bypass search saat Play
@@ -743,52 +717,6 @@ async function main() {
 
     for (const source of hits) {
       try {
-        if (source.provider === 'oploverz' && source.slug) {
-          try {
-            const detail = await fetchJson(`https://backapi.oploverz.ac/api/series/${encodeURIComponent(source.slug)}`, {}, 15000);
-            const rawEpArr = detail?.episodes || detail?.data?.episodes || [];
-            const parsedEps = rawEpArr
-              .map((e) => ({
-                ep: Number.parseInt(String(e?.episodeNumber ?? e?.episode ?? e?.number ?? ''), 10),
-                raw: e,
-              }))
-              .filter((x) => Number.isFinite(x.ep) && x.ep >= 1 && x.ep <= 2000)
-              .sort((a, b) => a.ep - b.ep);
-
-            for (const item of selectEpisodesToIndex(parsedEps, maxEps)) {
-              let hosters = extractHostersFromOploverzEpisodeJson(item.raw, source.url);
-              if (hosters.length === 0 && (item.raw?.slug || item.raw?.id)) {
-                const epSlug = item.raw.slug || item.raw.id;
-                try {
-                  const epDetail = await fetchJson(
-                    `https://backapi.oploverz.ac/api/series/${encodeURIComponent(source.slug)}/episodes/${encodeURIComponent(epSlug)}`,
-                    {},
-                    12000
-                  );
-                  hosters = extractHostersFromOploverzEpisodeJson(epDetail, source.url);
-                } catch {}
-              }
-              if (hosters.length > 0) {
-                const existing = epHostersMap.get(item.ep) || [];
-                const existingUrls = new Set(existing.map((x) => x.url));
-                for (const h of hosters) {
-                  if (!existingUrls.has(h.url) && existing.length < 20) {
-                    existing.push(h);
-                    existingUrls.add(h.url);
-                  }
-                }
-                epHostersMap.set(item.ep, existing);
-              }
-            }
-            if (epHostersMap.size >= 2) break;
-          } catch (err) {
-            if (diagLogs < 4) {
-              diagLogs++;
-              console.log(`[diag:oploverz-api-err] ${source.slug}: ${err.message}`);
-            }
-          }
-        }
-
         const animeHtml = await fetchText(source.url, `${source.base}/`, 15000);
         const rawEps =
           source.provider === 'otakudesu'
