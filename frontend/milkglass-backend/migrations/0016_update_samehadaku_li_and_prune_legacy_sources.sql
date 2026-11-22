@@ -1,3 +1,9 @@
+-- Pastikan tabel app_config tersedia sebelum menulis source_cascade_order
+CREATE TABLE IF NOT EXISTS app_config (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 -- Otomatis bersihkan override domain/konfigurasi 4 sumber lama dan arahkan Samehadaku ke https://samehadaku.li
 DELETE FROM catalog_meta
 WHERE key IN ('animasu_base_url', 'oploverz_base_url', 'kusonime_base_url', 'nontonanimeid_base_url');
