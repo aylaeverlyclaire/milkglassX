@@ -485,10 +485,7 @@ playRoutes.get(
       order: cascadeOrder.join(','),
     });
     if (sourceMap.samehadaku) params.set('samehadaku', sourceMap.samehadaku);
-    if (sourceMap.oploverz) params.set('oploverz', sourceMap.oploverz);
-    if (sourceMap.nontonanimeid) params.set('nontonanimeid', sourceMap.nontonanimeid);
     if (sourceMap.otakudesu) params.set('otakudesu', sourceMap.otakudesu);
-    if (sourceMap.animasu) params.set('animasu', sourceMap.animasu);
 
     const headers = buildCfHandlerHeaders(c.env);
 

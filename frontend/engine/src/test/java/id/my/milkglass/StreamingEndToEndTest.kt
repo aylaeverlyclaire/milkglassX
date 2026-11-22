@@ -69,18 +69,16 @@ class StreamingEndToEndTest {
             {
               "status": "ok",
               "sources": [
-                {"rank": 1, "id": "otakudesu", "base_url": "https://otakudesu.best/"},
-                {"rank": 2, "id": "samehadaku", "base_url": "https://v3.samehadaku.how"},
-                {"rank": 3, "id": "oploverz", "base_url": "http://insecure.oploverz.ch"},
-                {"rank": 4, "id": "kusonime", "base_url": "https://kusonime.com"}
+                {"rank": 1, "id": "samehadaku", "base_url": "https://v3.samehadaku.how"},
+                {"rank": 2, "id": "otakudesu", "base_url": "https://otakudesu.best/"},
+                {"rank": 3, "id": "unknown", "base_url": "http://insecure.example.com"}
               ]
             }
         """.trimIndent()
         val parsed = SourceConfigStore.parseSourcesJson(json)
         assertEquals("https://otakudesu.best", parsed[SourcePriority.OTAKUDESU])
         assertEquals("https://v3.samehadaku.how", parsed[SourcePriority.SAMEHADAKU])
-        assertEquals(null, parsed[SourcePriority.OPLOVERZ])
-        assertEquals("https://kusonime.com", parsed[SourcePriority.KUSONIME])
+        assertEquals(2, parsed.size)
     }
 
     @Test
@@ -108,13 +106,10 @@ class StreamingEndToEndTest {
     }
 
     @Test
-    fun sourcePriorityOrderMatchesSixSourceCascade() {
+    fun sourcePriorityOrderMatchesTwoSourceCascade() {
+        assertEquals(2, SourcePriority.entries.size)
         assertEquals(1, SourcePriority.SAMEHADAKU.rank)
         assertEquals(2, SourcePriority.OTAKUDESU.rank)
-        assertEquals(3, SourcePriority.NONTONANIMEID.rank)
-        assertEquals(4, SourcePriority.KUSONIME.rank)
-        assertEquals(5, SourcePriority.OPLOVERZ.rank)
-        assertEquals(6, SourcePriority.ANIMASU.rank)
     }
 
     @Test

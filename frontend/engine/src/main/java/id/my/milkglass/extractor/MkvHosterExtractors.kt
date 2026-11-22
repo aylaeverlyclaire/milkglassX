@@ -29,21 +29,36 @@ data class ExtractedDirectMedia(
 )
 
 object HosterFilter {
+    // Hoster lambat, sering gagal, arsip, atau shortener diblokir total.
     private val blacklistedTokens = listOf(
         "mega.nz", "mega.co.nz", "megaup", "otakufiles", "zippyshare",
-        "mirrored.to", "acefile.co", "(rar)", ".rar", "(zip)", "terabox", "shrinkearn"
+        "mirrored.to", "acefile.co", "(rar)", ".rar", "(zip)", "terabox", "shrinkearn",
+        "krakenfiles", "kfiles", "streamtape", "mixdrop", "dood", "doodstream",
+        "qiwi.gg", "mediafire", "kuramadrive", "drive.google", "gdrive",
+        "yourupload", "berkasdrive", "mitedrive", "fileditch", "racaty",
+        "1fichier", "send.now", "send.cm", "tusfiles", "userscloud"
     )
 
+    // 4 hoster cepat sebagai cadangan otomatis (Tahap 2) & sumber 1080p.
+    private val fastFallbackTokens = listOf(
+        "pixeldrain", "pdrain", "gofile", "buzzheavier", "bzzhr", "fuckingfast", "filedon", "odfiles"
+    )
+
+    // Embed streaming langsung (Tahap 1) + 4 hoster cepat (Tahap 2).
     private val preferredOrder = listOf(
         "pixeldrain", "pdrain", "gofile", "buzzheavier", "filedon", "odfiles",
-        "gdrive", "drive.google", "qiwi", "mediafire", "kuramadrive",
-        "icefile.web.id", "odstream", "ondesu", "desustream", "blogger", "streamruby",
-        "vidhide", "vidhidepre", "yourupload", "berkasdrive", "mitedrive", "short.ink", "filemoon", "mixdrop", "streamtape", "dood", "krakenfiles", "kfiles"
+        "icefile.web.id", "odstream", "odcdn", "ondesu", "desustream", "blogger",
+        "streamruby", "rubyvidhub", "vidhide", "filemoon", "streamwish", "mp4upload"
     )
 
     fun isBlacklisted(hosterLabel: String, url: String): Boolean {
         val combined = "${hosterLabel.lowercase()} ${url.lowercase()}"
         return blacklistedTokens.any { combined.contains(it) }
+    }
+
+    fun isFastFallbackHoster(hosterLabel: String, url: String): Boolean {
+        val combined = "${hosterLabel.lowercase()} ${url.lowercase()}"
+        return !isBlacklisted(hosterLabel, url) && fastFallbackTokens.any { combined.contains(it) }
     }
 
     fun rank(hosterLabel: String, url: String): Int {
@@ -54,18 +69,13 @@ object HosterFilter {
 
     fun isKnownPlayableHost(url: String): Boolean {
         val low = url.lowercase()
+        if (blacklistedTokens.any { low.contains(it) }) return false
         return preferredOrder.any { low.contains(it) } ||
-            low.contains("wibufile.com") ||
-            low.contains("uqni.net") ||
-            low.contains("drive.usercontent.google.com") ||
-            low.contains("docs.google.com") ||
             low.contains("workers.dev") ||
             low.contains("r2.dev") ||
+            low.contains("r2.cloudflarestorage.com") ||
             low.contains("storage.googleapis.com") ||
             low.contains("googlevideo.com") ||
-            low.contains("rubyvidhub.com") ||
-            low.contains("streamhide.") ||
-            low.contains("sunrong.my.id") ||
             low.contains(".mkv") ||
             low.contains(".mp4") ||
             low.contains(".m3u8")

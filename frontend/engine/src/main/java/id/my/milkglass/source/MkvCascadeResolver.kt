@@ -18,10 +18,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Piramida Prioritas Sumber (berlaku per resolusi):
- * watermarkTier 0 = Bersih tanpa watermark permanen (Puncak Piramida: Samehadaku, NontonAnimeID)
- * watermarkTier 1 = Watermark sudut / ringan (Oploverz)
- * watermarkTier 2 = Watermark berat / banner iklan atau batch (Dasar Piramida: Otakudesu, Kusonime)
+ * Prioritas Sumber (berlaku per resolusi):
+ * Hanya Samehadaku (watermarkTier 0) dan Otakudesu (watermarkTier 2).
  */
 enum class SourcePriority(
     val rank: Int,
@@ -30,11 +28,7 @@ enum class SourcePriority(
     val watermarkTier: Int
 ) {
     SAMEHADAKU(1, "samehadaku", "https://v2.samehadaku.how", 0),
-    OTAKUDESU(2, "otakudesu", "https://otakudesu.blog", 2),
-    NONTONANIMEID(3, "nontonanimeid", "https://nontonanimeid.stream", 0),
-    KUSONIME(4, "kusonime", "https://kusonime.com", 2),
-    OPLOVERZ(5, "oploverz", "https://oploverz.ch", 1),
-    ANIMASU(6, "animasu", "https://animasu.love", 0)
+    OTAKUDESU(2, "otakudesu", "https://otakudesu.blog", 2)
 }
 
 enum class MediaContainer(val rank: Int, val label: String) {
@@ -505,11 +499,7 @@ class MkvCascadeResolver(
     private val embedSniffer: ((url: String, referer: String?) -> ExtractedDirectMedia?)? = null,
     private val providers: List<MkvSourceProvider> = listOf(
         SamehadakuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.SAMEHADAKU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
-        OploverzSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OPLOVERZ) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
-        NontonAnimeIdSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.NONTONANIMEID) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
-        OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
-        AnimasuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.ANIMASU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
-        KusonimeSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.KUSONIME) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher)
+        OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher)
     )
 ) {
     private val unshortener = LinkUnshortener(clients)
@@ -916,8 +906,12 @@ class MkvCascadeResolver(
     )
 
     /**
-     * Balapkan stream embed DAN direct hoster (Pixeldrain/GoFile/Icefile/dll.) SECARA BERSAMAAN
-     * agar hoster HTTP cepat pada anime baru tidak pernah kelaparan menunggu sniffer WebView.
+     * Arsitektur 2-Tahap Ketat:
+     * - Tahap 1 (Embed-First Eksklusif): HANYA kandidat stream embed langsung yang aktif dan diuji lebih dulu.
+     *   Hoster download tidak disentuh sama sekali selama Tahap 1.
+     * - Tahap 2 (Fallback 4 Hoster Cepat & Sumber 1080p): Hanya aktif otomatis jika Tahap 1 gagal
+     *   atau jika 1080p diminta namun tidak tersedia di embed. Hanya memakai 4 hoster cepat
+     *   (Pixeldrain, GoFile, Buzzheavier, Filedon/Odfiles).
      */
     private fun raceExtractByQualityOrder(
         candidates: List<RawMkvCandidate>,
@@ -926,35 +920,47 @@ class MkvCascadeResolver(
         preferStreamingEmbeds: Boolean = true
     ): List<ResolvedMkvMedia> {
         val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(12L)
-        val bestDirectQuality = qualityOrder.firstOrNull { q ->
-            candidates.any { !it.isStreamEmbed && it.quality == q }
-        } ?: qualityOrder.first()
-        if (preferStreamingEmbeds) {
-            // Tahap 1: balapkan batch gabungan (embed utama + direct hoster teratas di kualitas terbaik yang tersedia) secara paralel
-            val preferredTier = candidates.filter { !it.isStreamEmbed && it.quality == bestDirectQuality }
-            val embeds = candidates.filter { it.isStreamEmbed }
-            val combinedFirst = (embeds.take(4) + preferredTier.take(6)).distinctBy { it.rawUrl }
-            if (combinedFirst.isNotEmpty()) {
-                val fastWin = raceExtractCandidates(combinedFirst, maxResults = maxResults, timeoutMs = 6_500L)
-                if (fastWin.isNotEmpty()) return fastWin
+        val embeds = candidates.filter { it.isStreamEmbed }.distinctBy { it.rawUrl }
+        val wants1080p = qualityOrder.firstOrNull() == MkvQuality.P1080
+        val embedHas1080p = embeds.any { it.quality == MkvQuality.P1080 }
+
+        // Tahap 1: HANYA Embed-First yang aktif lebih dulu (kecuali user khusus memilih 1080p dan embed tidak punya 1080p)
+        if (preferStreamingEmbeds && embeds.isNotEmpty() && (!wants1080p || embedHas1080p)) {
+            val embedBatch = if (wants1080p) {
+                embeds.sortedByDescending { it.quality == MkvQuality.P1080 }.take(4)
+            } else {
+                embeds.take(4)
             }
+            val embedWin = raceExtractCandidates(embedBatch, maxResults = maxResults, timeoutMs = 4_500L)
+            if (embedWin.isNotEmpty()) return embedWin
         }
-        val tried = if (preferStreamingEmbeds) {
-            val preferredTier = candidates.filter { !it.isStreamEmbed && it.quality == bestDirectQuality }
-            (candidates.filter { it.isStreamEmbed }.take(4) + preferredTier.take(6))
-                .mapTo(HashSet()) { it.rawUrl }
-        } else {
-            emptySet()
-        }
+
+        // Tahap 2: Fallback otomatis ke 4 hoster cepat (Pixeldrain, GoFile, Buzzheavier, Filedon/Odfiles)
+        val fastHosters = candidates
+            .filter { !it.isStreamEmbed && id.my.milkglass.extractor.HosterFilter.isFastFallbackHoster(it.hosterLabel, it.rawUrl) }
+            .distinctBy { it.rawUrl }
+
         for (quality in qualityOrder) {
             if (Thread.currentThread().isInterrupted) break
             val remainingMs = TimeUnit.NANOSECONDS.toMillis(totalDeadlineNs - System.nanoTime())
             if (remainingMs <= 500L) break
-            val tier = candidates.filter { it.quality == quality && it.rawUrl !in tried }
+            val tier = fastHosters
+                .filter { it.quality == quality }
+                .sortedBy { id.my.milkglass.extractor.HosterFilter.rank(it.hosterLabel, it.rawUrl) }
+                .take(4)
             if (tier.isEmpty()) continue
             val tierBudgetMs = remainingMs.coerceAtMost(4_000L)
             val extracted = raceExtractCandidates(tier, maxResults = maxResults, timeoutMs = tierBudgetMs)
             if (extracted.isNotEmpty()) return extracted
+        }
+
+        // Jika 1080p tidak ketemu di 4 hoster cepat dan embed belum dicoba, coba embed sebagai jaring pengaman terakhir
+        if (preferStreamingEmbeds && embeds.isNotEmpty() && wants1080p && !embedHas1080p) {
+            val remainingMs = TimeUnit.NANOSECONDS.toMillis(totalDeadlineNs - System.nanoTime())
+            if (remainingMs > 500L) {
+                val embedFallback = raceExtractCandidates(embeds.take(4), maxResults = maxResults, timeoutMs = remainingMs.coerceAtMost(4_000L))
+                if (embedFallback.isNotEmpty()) return embedFallback
+            }
         }
         return emptyList()
     }

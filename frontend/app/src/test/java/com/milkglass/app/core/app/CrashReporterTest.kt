@@ -13,7 +13,7 @@ class CrashReporterTest {
         val json = CrashReporter.buildCrashPayloadJson(
             throwable = wrapped,
             threadName = "main",
-            appVersion = "0.7.0-animasu-mkv",
+            appVersion = "0.8.0-samehadaku-otakudesu",
             versionCode = 42,
             deviceModel = "Google Pixel 9",
             androidVersion = "15 (SDK 35)",
@@ -23,7 +23,7 @@ class CrashReporterTest {
 
         assertTrue(json.contains("IllegalStateException"))
         assertTrue(json.contains("MediaCodec decoder failed"))
-        assertTrue(json.contains("0.7.0-animasu-mkv"))
+        assertTrue(json.contains("0.8.0-samehadaku-otakudesu"))
         assertTrue(json.contains("PlayerScreen"))
         assertTrue(json.contains("CrashReporterTest"))
     }

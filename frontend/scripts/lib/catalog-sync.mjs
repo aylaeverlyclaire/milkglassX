@@ -1,6 +1,6 @@
 export const ALLOWED_CATALOG_PROVIDERS = ['samehadaku', 'otakudesu'];
 
-export const ENRICH_FIELDS = `id idMal title{romaji english native} averageScore episodes coverImage{extraLarge large}`;
+export const ENRICH_FIELDS = `id idMal title{romaji english native} averageScore episodes genres coverImage{extraLarge large}`;
 
 export const ENRICH_SEARCH_QUERY = `query($search:String){Page(page:1,perPage:5){media(search:$search,type:ANIME,isAdult:false){${ENRICH_FIELDS}}}}`;
 
@@ -70,7 +70,7 @@ export function parseOtakudesuCatalog(html) {
 
 /**
  * Menggabungkan entri katalog HANYA dari Samehadaku dan Otakudesu.
- * Provider lain (AniList, Animasu, Oploverz, NontonAnimeID, Kusonime) selalu ditolak.
+ * Provider di luar Samehadaku dan Otakudesu selalu ditolak.
  */
 export function mergeProviderCatalogs(providerLists) {
   const allowed = new Set(ALLOWED_CATALOG_PROVIDERS);
@@ -142,11 +142,19 @@ export function applyAniListEnrichment(item, anilistMedia) {
   if (Number.isInteger(anilistMedia.idMal) && anilistMedia.idMal > 0) {
     out.mal_id = anilistMedia.idMal;
   }
+  const cleanMain = String(anilistMedia.title?.romaji || anilistMedia.title?.english || '').trim();
+  const cleanAlt = String(anilistMedia.title?.english || anilistMedia.title?.native || '').trim();
+  if (cleanMain) out.title = cleanMain.slice(0, 180);
+  if (cleanAlt) out.title_alt = cleanAlt.slice(0, 180);
   if (Number.isInteger(anilistMedia.episodes) && anilistMedia.episodes > 0) {
     out.episodes_total = anilistMedia.episodes;
   }
   if (typeof anilistMedia.averageScore === 'number' && anilistMedia.averageScore > 0) {
     out.score = Number((anilistMedia.averageScore / 10).toFixed(2));
+  }
+  if (Array.isArray(anilistMedia.genres)) {
+    const cleanGenres = anilistMedia.genres.filter((g) => typeof g === 'string' && g.trim().length > 0).slice(0, 20);
+    if (cleanGenres.length > 0) out.genres = cleanGenres;
   }
   const poster = anilistMedia.coverImage?.extraLarge || anilistMedia.coverImage?.large || '';
   if (poster.startsWith('https://')) {

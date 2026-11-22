@@ -9,12 +9,9 @@ import id.my.milkglass.download.MkvDownloadManager
 import id.my.milkglass.net.IsolatedHttpClients
 import id.my.milkglass.net.PublicIpGuard
 import id.my.milkglass.source.CascadeResult
-import id.my.milkglass.source.KusonimeSourceProvider
 import id.my.milkglass.source.MediaContainer
 import id.my.milkglass.source.MkvCascadeResolver
 import id.my.milkglass.source.MkvQuality
-import id.my.milkglass.source.OploverzSourceProvider
-import id.my.milkglass.source.AnimasuSourceProvider
 import id.my.milkglass.source.OtakudesuSourceProvider
 import id.my.milkglass.source.RawMkvCandidate
 import id.my.milkglass.source.ResolutionConsolidator
@@ -116,29 +113,14 @@ class StreamResolver(
         clients = clients,
         slugCache = slugCache,
         providers = listOf(
-            AnimasuSourceProvider(
-                clients,
-                sourceBaseUrls[SourcePriority.ANIMASU] ?: SourcePriority.ANIMASU.defaultBaseUrl,
-                slugCache = slugCache
-            ),
-            OtakudesuSourceProvider(
-                clients,
-                sourceBaseUrls[SourcePriority.OTAKUDESU] ?: SourcePriority.OTAKUDESU.defaultBaseUrl,
-                slugCache = slugCache
-            ),
             SamehadakuSourceProvider(
                 clients,
                 sourceBaseUrls[SourcePriority.SAMEHADAKU] ?: SourcePriority.SAMEHADAKU.defaultBaseUrl,
                 slugCache = slugCache
             ),
-            OploverzSourceProvider(
+            OtakudesuSourceProvider(
                 clients,
-                sourceBaseUrls[SourcePriority.OPLOVERZ] ?: SourcePriority.OPLOVERZ.defaultBaseUrl,
-                slugCache = slugCache
-            ),
-            KusonimeSourceProvider(
-                clients,
-                sourceBaseUrls[SourcePriority.KUSONIME] ?: SourcePriority.KUSONIME.defaultBaseUrl,
+                sourceBaseUrls[SourcePriority.OTAKUDESU] ?: SourcePriority.OTAKUDESU.defaultBaseUrl,
                 slugCache = slugCache
             )
         )

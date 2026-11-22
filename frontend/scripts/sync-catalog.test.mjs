@@ -34,8 +34,7 @@ test('mergeProviderCatalogs: hanya menggabungkan Samehadaku & Otakudesu, menolak
     <a class="hodebgst" href="https://otakudesu.blog/anime/dandadan-sub-indo/">Dandadan</a>
   `);
   const rejected = [
-    { title: 'Animasu Only Anime', url: 'https://animasu.love/anime/animasu-only/', provider: 'animasu' },
-    { title: 'Oploverz Only Anime', url: 'https://oploverz.ch/series/oplo-only/', provider: 'oploverz' },
+    { title: 'Unknown Provider Anime', url: 'https://example.com/anime/unknown/', provider: 'other' },
     { title: 'AniList Only Anime', url: 'https://anilist.co/anime/999', provider: 'anilist' },
   ];
 
@@ -47,7 +46,7 @@ test('mergeProviderCatalogs: hanya menggabungkan Samehadaku & Otakudesu, menolak
     samehadaku: 'https://v2.samehadaku.how/anime/sousou-no-frieren/',
     otakudesu: 'https://otakudesu.blog/anime/frieren-sub-indo/',
   });
-  assert.equal(merged.some((x) => x.title.includes('Animasu') || x.title.includes('Oploverz') || x.title.includes('AniList')), false);
+  assert.equal(merged.some((x) => x.title.includes('Unknown') || x.title.includes('AniList')), false);
 });
 
 test('isStrictIdentityMatch menegakkan Law of Identity untuk season, part, dan movie', () => {
@@ -65,8 +64,10 @@ test('applyAniListEnrichment hanya mengisi anime_id, mal_id, total eps, rating, 
   const enriched = applyAniListEnrichment(base, {
     id: 154587,
     idMal: 52991,
+    title: { romaji: 'Sousou no Frieren', english: "Frieren: Beyond Journey's End" },
     episodes: 28,
     averageScore: 91,
+    genres: ['Adventure', 'Drama', 'Fantasy'],
     coverImage: { extraLarge: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587.jpg' },
   });
   assert.equal(enriched.title, 'Sousou no Frieren');
@@ -75,6 +76,8 @@ test('applyAniListEnrichment hanya mengisi anime_id, mal_id, total eps, rating, 
   assert.equal(enriched.mal_id, 52991);
   assert.equal(enriched.episodes_total, 28);
   assert.equal(enriched.score, 9.1);
+  assert.equal(enriched.title_alt, "Frieren: Beyond Journey's End");
+  assert.deepEqual(enriched.genres, ['Adventure', 'Drama', 'Fantasy']);
   assert.equal(enriched.poster_url, 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587.jpg');
 });
 

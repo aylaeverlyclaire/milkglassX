@@ -138,6 +138,12 @@ ingestRoutes.post('/ingest', zValidator('json', ingestEpisodeBodySchema), async 
     payload.mal_id,
     payload.anime_title || `Anime #${payload.anime_id}`
   );
+  if (!ensured.exists) {
+    return c.json(
+      { status: 'error', message: 'Wadah anime tidak ditemukan di katalog Samehadaku/Otakudesu.' },
+      404
+    );
+  }
 
   const epRow = await db
     .prepare(
@@ -220,7 +226,7 @@ ingestRoutes.post('/ingest', zValidator('json', ingestEpisodeBodySchema), async 
 
   c.executionCtx.waitUntil(
     (async () => {
-      if (ensured.wasCreatedPlaceholder) {
+      if (ensured.needsEnrichment) {
         await enrichSingleAnimeFromAniListAsync(db, payload.anime_id);
       }
 
@@ -321,7 +327,7 @@ function normalizeHosterTitleKey(title: string): string {
 
 ingestRoutes.get('/catalog-list', async (c) => {
   const { results } = await c.env.DB.prepare(
-    `SELECT id, title, title_alt, synonyms_json, status, popularity, episodes_total, score, poster_url, has_live_source, source_urls_json
+    `SELECT id, title, title_alt, synonyms_json, status, popularity, episodes_total, score, poster_url, genres_json, has_live_source, source_urls_json
      FROM animes
      WHERE has_live_source = 1
        AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
@@ -457,9 +463,11 @@ const syncSourceCatalogSchema = z.object({
         anime_id: z.number().int().positive().optional(),
         mal_id: z.number().int().positive().nullable().optional(),
         title: z.string().trim().min(1).max(200),
+        title_alt: z.string().trim().max(200).optional(),
         poster_url: z.string().trim().max(1024).optional(),
         score: z.number().min(0).max(10).optional(),
         episodes_total: z.number().int().min(0).max(5000).optional(),
+        genres: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
         status: z.number().int().min(1).max(5).optional(),
         source_urls: z.record(z.string(), z.string().url().max(1024)),
       })
@@ -509,79 +517,54 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
     }
 
     const urlsJson = JSON.stringify(cleanUrls);
+    const titleAlt = item.title_alt?.trim() || item.title;
     const posterUrl = item.poster_url?.trim() || '';
     const score = typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : 0;
     const episodesTotal =
       typeof item.episodes_total === 'number' && Number.isInteger(item.episodes_total) && item.episodes_total > 0
         ? item.episodes_total
         : 0;
+    const genresJson = JSON.stringify(item.genres ?? []);
     const statusVal = item.status ?? 1;
     const compact = item.title.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 120);
+    const targetId = item.anime_id ?? sourceCatalogStableId(item.title);
 
-    if (item.anime_id) {
-      stmts.push(
-        c.env.DB.prepare(
-          `INSERT INTO animes (
-             id, mal_id, title, title_alt, synopsis, score, type, status, schedule_day,
-             duration, studio, release_season, poster_url, genres_json, popularity,
-             updated_at, episodes_total, next_airing_at, next_airing_ep,
-             has_live_source, norm_compact, source_urls_json
-           ) VALUES (?1, ?2, ?3, ?3, '', ?4, 'TV', ?5, 0, '24 min', '-', '-', ?6, '[]', 100, ?7, ?8, 0, 0, 1, ?9, ?10)
-           ON CONFLICT(id) DO UPDATE SET
-             mal_id = COALESCE(excluded.mal_id, animes.mal_id),
-             score = CASE WHEN excluded.score > 0 THEN excluded.score ELSE animes.score END,
-             poster_url = COALESCE(NULLIF(excluded.poster_url, ''), animes.poster_url),
-             episodes_total = CASE WHEN excluded.episodes_total > 0 THEN excluded.episodes_total ELSE animes.episodes_total END,
-             source_urls_json = excluded.source_urls_json,
-             has_live_source = 1,
-             updated_at = excluded.updated_at`
-        ).bind(
-          item.anime_id,
-          item.mal_id ?? null,
-          item.title,
-          score,
-          statusVal,
-          posterUrl,
-          now,
-          episodesTotal,
-          compact,
-          urlsJson
-        )
-      );
-      updated++;
-    } else {
-      const sid = sourceCatalogStableId(item.title);
-      stmts.push(
-        c.env.DB.prepare(
-          `INSERT INTO animes (
-             id, mal_id, title, title_alt, synopsis, score, type, status, schedule_day,
-             duration, studio, release_season, poster_url, genres_json, popularity,
-             updated_at, episodes_total, next_airing_at, next_airing_ep,
-             has_live_source, norm_compact, source_urls_json
-           ) VALUES (?1, ?2, ?3, ?3, '', ?4, 'TV', ?5, 0, '24 min', '-', '-', ?6, '[]', 100, ?7, ?8, 0, 0, 1, ?9, ?10)
-           ON CONFLICT(id) DO UPDATE SET
-             mal_id = COALESCE(excluded.mal_id, animes.mal_id),
-             score = CASE WHEN excluded.score > 0 THEN excluded.score ELSE animes.score END,
-             poster_url = COALESCE(NULLIF(excluded.poster_url, ''), animes.poster_url),
-             episodes_total = CASE WHEN excluded.episodes_total > 0 THEN excluded.episodes_total ELSE animes.episodes_total END,
-             source_urls_json = excluded.source_urls_json,
-             has_live_source = 1,
-             updated_at = excluded.updated_at`
-        ).bind(
-          sid,
-          item.mal_id ?? null,
-          item.title,
-          score,
-          statusVal,
-          posterUrl,
-          now,
-          episodesTotal,
-          compact,
-          urlsJson
-        )
-      );
-      inserted++;
-    }
+    stmts.push(
+      c.env.DB.prepare(
+        `INSERT INTO animes (
+           id, mal_id, title, title_alt, synopsis, score, type, status, schedule_day,
+           duration, studio, release_season, poster_url, genres_json, popularity,
+           updated_at, episodes_total, next_airing_at, next_airing_ep,
+           has_live_source, norm_compact, source_urls_json
+         ) VALUES (?1, ?2, ?3, ?4, '', ?5, 'TV', ?6, 0, '24 min', '-', '-', ?7, ?8, 100, ?9, ?10, 0, 0, 1, ?11, ?12)
+         ON CONFLICT(id) DO UPDATE SET
+           mal_id = COALESCE(excluded.mal_id, animes.mal_id),
+           title = COALESCE(NULLIF(excluded.title, ''), animes.title),
+           title_alt = COALESCE(NULLIF(excluded.title_alt, ''), animes.title_alt),
+           score = CASE WHEN excluded.score > 0 THEN excluded.score ELSE animes.score END,
+           poster_url = COALESCE(NULLIF(excluded.poster_url, ''), animes.poster_url),
+           genres_json = CASE WHEN excluded.genres_json != '[]' THEN excluded.genres_json ELSE animes.genres_json END,
+           episodes_total = CASE WHEN excluded.episodes_total > 0 THEN excluded.episodes_total ELSE animes.episodes_total END,
+           source_urls_json = excluded.source_urls_json,
+           has_live_source = 1,
+           updated_at = excluded.updated_at`
+      ).bind(
+        targetId,
+        item.mal_id ?? null,
+        item.title,
+        titleAlt,
+        score,
+        statusVal,
+        posterUrl,
+        genresJson,
+        now,
+        episodesTotal,
+        compact,
+        urlsJson
+      )
+    );
+    if (item.anime_id) updated++;
+    else inserted++;
   }
 
   for (let i = 0; i < stmts.length; i += 80) {

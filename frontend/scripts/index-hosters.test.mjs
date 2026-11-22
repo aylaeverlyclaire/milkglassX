@@ -8,7 +8,6 @@ import {
   unwrapShortenerUrl,
   isBlacklistedUrl,
   parseOtakudesuAnimeList,
-  parseNontonAnimeIdList,
   parseOtakudesuEpisodes,
   parseEpisodeHostersFromHtml,
   selectEpisodesToIndex,
@@ -33,7 +32,7 @@ test('unwrapShortenerUrl decodes shrinkearn base64 targets and filters archives/
   assert.equal(isBlacklistedUrl('GoFile', 'https://gofile.io/d/abc123'), false);
 });
 
-test('parseOtakudesuAnimeList, parseNontonAnimeIdList, and parseOtakudesuEpisodes extract clean links', () => {
+test('parseOtakudesuAnimeList and parseOtakudesuEpisodes extract clean links', () => {
   const listHtml = `
     <a class="hodebgst" href="https://otakudesu.blog/anime/frieren-sub-indo/">Sousou no Frieren</a>
     <a class="hodebgst" href="https://otakudesu.blog/anime/solo-leveling-sub-indo/">Solo Leveling</a>
@@ -41,14 +40,6 @@ test('parseOtakudesuAnimeList, parseNontonAnimeIdList, and parseOtakudesuEpisode
   const list = parseOtakudesuAnimeList(listHtml);
   assert.equal(list.length, 2);
   assert.equal(list[0].title, 'Sousou no Frieren');
-
-  const naHtml = `
-    <a href="/anime/gachiakuta/">Gachiakuta</a>
-    <a href="/anime/gachiakuta/episode-1/">Ep 1</a>
-  `;
-  const naList = parseNontonAnimeIdList(naHtml, 'https://nontonanimeid.stream');
-  assert.equal(naList.length, 1);
-  assert.equal(naList[0].url, 'https://nontonanimeid.stream/anime/gachiakuta/');
 
   const epHtml = `
     <a href="https://otakudesu.blog/episode/frrn-episode-2-sub-indo/">Frieren Episode 2 Sub Indo</a>
@@ -83,10 +74,10 @@ test('parseEpisodeHostersFromHtml ranks reliable hosters, balances qualities, an
     </div>
   `;
   const hosters = parseEpisodeHostersFromHtml(html, 'https://otakudesu.blog/episode/test-1/', 'otakudesu');
-  assert.equal(hosters.length, 5);
+  assert.equal(hosters.length, 4);
   assert.deepEqual(
     hosters.map((h) => `${h.quality}:${h.container}:${h.hoster}`),
-    ['1080p:mkv:Buzzheavier', '720p:mp4:Pdrain', '720p:mp4:Gofile', '720p:mp4:KFiles', '360p:mp4:Filedon']
+    ['1080p:mkv:Buzzheavier', '720p:mp4:Pdrain', '720p:mp4:Gofile', '360p:mp4:Filedon']
   );
 });
 

@@ -19,7 +19,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         versionCode = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)
-        versionName = "0.7.0-animasu-mkv"
+        versionName = "0.8.0-samehadaku-otakudesu"
         val masterSecret = System.getenv("MILKGLASS_MASTER_SECRET")
             ?: (project.findProperty("MILKGLASS_MASTER_SECRET") as? String)
             ?: ""
