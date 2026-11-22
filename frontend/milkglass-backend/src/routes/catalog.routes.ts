@@ -19,12 +19,8 @@ const CATALOG_SOURCE_FILTER = `(has_live_source = 1 AND (source_urls_json LIKE '
 const CATALOG_SOURCE_FILTER_A = `(a.has_live_source = 1 AND (a.source_urls_json LIKE '%"samehadaku"%' OR a.source_urls_json LIKE '%"otakudesu"%'))`;
 
 const DEFAULT_ENGINE_RULES = {
-  animasu: { search_path: '/?s={q}', selectors: { search_item: '.listupd .bs .bsx > a[href]', search_title: '.tt', episode_list: '#daftarepisode li a[href]', mirror_select: 'select.mirror option[value]', player_iframe: '#tonton iframe[src]', download_block: '.soraddlx', download_row: '.soraurlx', quality_text: 'strong', hoster_link: 'a[href]' } },
   otakudesu: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'ul.chivsrc > li', search_link: 'h2 > a[href]', episode_box: 'div.episodelist', episode_link: 'ul li a[href]', download_block: 'div.download ul', download_row: 'li', quality_text: 'strong', size_text: 'i', hoster_link: 'a[href]' } },
   samehadaku: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'div.animposx > a[href], article.animpost div.animposx > a[href], article.animepost div.animposx a[href]', search_title: '.data .title h2', series_link: "a[href*='/anime/'], div.nvs.nvsc a[href]", episode_row: 'div.lstepsiode.listeps ul li, .listeps ul li, .lstepsiode ul li, .episode-lainnya ul li', episode_badge: '.epsright, .epl-num, .shrink-0 a, .shrink-0 div', episode_link: "h4 a[href], .lchx a[href], a[href*='-episode-'], a[href]", download_block: 'div.download-eps, div#downloadb', download_header: 'p b, p', download_row: 'ul li', quality_text: 'strong', hoster_link: 'a[href]' } },
-  nontonanimeid: { search_path: '/?s={q}', selectors: { search_item: '.result ul li a[href], article.animeseries a[href]', search_title: 'h2, .title', episode_link: '.episodelist li a[href]', player_iframe: '.player-embed iframe[src], iframe[src]', download_block: '.download-eps', download_row: 'ul li', quality_text: 'strong', hoster_link: 'a[href]' } },
-  oploverz: { back_api_url: 'https://backapi.oploverz.ac', search_path: '/?s={q}', selectors: { search_item: 'div.bsx, article.bs', search_title: 'div.tt h4, h4, .tt', series_link: "div.nvs.nvsc a[href], a[aria-label='All Episodes'], a[href*='/series/'], .year a[href*='/anime/']", episode_row: 'div.eplister ul li, ul#episodelist li', episode_badge: 'div.epl-num', download_block: 'div.soraddlx, div.mctnx, div.download-box', download_header: '.sorattlx, h3, h4', download_row: '.soraurlx, li', quality_text: 'strong', hoster_link: 'a[href]' } },
-  kusonime: { search_path: '/?s={q}', selectors: { search_item: 'div.kover a[href], h2.episodeye a[href]', download_block: 'div.smokeddlrh, div.dlbodz', download_header: '.smokettlrh, h3', download_row: 'div.smokeurlrh', quality_text: 'strong', hoster_link: 'a[href]' } },
 };
 
 export const catalogRoutes = new Hono<{ Bindings: AppBindings }>();
@@ -499,11 +495,13 @@ catalogRoutes.get(
 );
 
 catalogRoutes.get('/', edgeCache(300), async (c) => {
-  const rows = await readDb(c.env).prepare(
-    'SELECT slug, anilist_id, title, romaji_title, episode, poster_url, banner_url, synopsis, updated_at FROM catalog_episodes ORDER BY updated_at DESC LIMIT 60'
-  ).all();
+  const rows = await readDb(c.env)
+    .prepare(
+      `SELECT ${LIST_COLUMNS} FROM animes WHERE ${CATALOG_SOURCE_FILTER} ORDER BY updated_at DESC LIMIT 60`
+    )
+    .all<Record<string, unknown>>();
 
-  return c.json({ status: 'ok', items: rows.results ?? [] });
+  return c.json({ status: 'ok', items: shapeRows(rows.results) });
 });
 
 catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
@@ -815,7 +813,6 @@ catalogRoutes.get('/play/:slug', async (c) => {
     target_format: 'MKV',
     resolutions: [...TARGET_RESOLUTIONS],
     source_cascade: [...SOURCE_CASCADE_ORDER],
-    animasu_base_url: urls.animasu,
     otakudesu_base_url: urls.otakudesu,
     source_urls: urls,
     sub_state: 'MKV_EMBEDDED',
@@ -856,12 +853,8 @@ catalogRoutes.get('/rules', edgeCache(1800, 3600, false), async (c) => {
     schema_version: 1,
     updated_at: Math.floor(Date.now() / 1000),
     sources: {
-      animasu: merge('animasu', DEFAULT_ENGINE_RULES.animasu),
-      otakudesu: merge('otakudesu', DEFAULT_ENGINE_RULES.otakudesu),
       samehadaku: merge('samehadaku', DEFAULT_ENGINE_RULES.samehadaku),
-      nontonanimeid: merge('nontonanimeid', DEFAULT_ENGINE_RULES.nontonanimeid),
-      oploverz: merge('oploverz', DEFAULT_ENGINE_RULES.oploverz),
-      kusonime: merge('kusonime', DEFAULT_ENGINE_RULES.kusonime),
+      otakudesu: merge('otakudesu', DEFAULT_ENGINE_RULES.otakudesu),
     },
   });
 });
