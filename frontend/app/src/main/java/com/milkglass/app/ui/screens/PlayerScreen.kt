@@ -644,6 +644,7 @@ private fun PlayerBottomControls(
             max = e.duration,
             fullscreen = fullscreen,
             onSeek = { e.seekTo(it) },
+            enabled = !e.faded,
             modifier = Modifier.then(cutout).padding(horizontal = edge - 4.dp).offset(y = 60.dp).fillMaxWidth(),
             onScrub = { sec ->
                 scrubSec = sec

@@ -103,6 +103,7 @@ fun SeekBar(
     onSeek: (Double) -> Unit,
     modifier: Modifier = Modifier,
     onScrub: (Double?) -> Unit = {},
+    enabled: Boolean = true,
 ) {
     val fill = com.milkglass.app.core.design.Milk.colors.primary
     val rest = Color.White.copy(alpha = if (fullscreen) .3f else .35f)
@@ -110,11 +111,14 @@ fun SeekBar(
     var scrubFrac by remember { mutableFloatStateOf(-1f) }
     val currentOnSeek by rememberUpdatedState(onSeek)
     val currentOnScrub by rememberUpdatedState(onScrub)
+    // Dibaca saat jari turun (bukan kunci pointerInput) agar gestur yang sedang berjalan tidak terputus.
+    val currentEnabled by rememberUpdatedState(enabled)
     Canvas(
         modifier.height(32.dp).pointerInput(max) {
             awaitEachGesture {
                 val down = awaitFirstDown()
-                if (max <= 0) return@awaitEachGesture
+                // Kontrol tersembunyi: seek bar tak terlihat tidak boleh melompatkan video / memicu scrub.
+                if (!currentEnabled || max <= 0) return@awaitEachGesture
                 fun fracAt(x: Float): Float {
                     val inset = 8.dp.toPx()
                     return ((x - inset) / (size.width - 2f * inset)).coerceIn(0f, 1f)
