@@ -175,4 +175,34 @@ class InstantPlayFirstPrinciplesTest {
         assertTrue(id.my.milkglass.download.EndpointHealthScorer.score("nekocloud") < 0)
         id.my.milkglass.download.EndpointHealthScorer.reset()
     }
+
+    @Test
+    fun magicByteValidatorAcceptsVideoContainersAndRejectsArchivesOrHtml() {
+        val mkvHeader = byteArrayOf(0x1A, 0x45, 0xDF.toByte(), 0xA3.toByte(), 0x93.toByte(), 0x42, 0x82.toByte(), 0x88.toByte())
+        val mp4Header = byteArrayOf(0x00, 0x00, 0x00, 0x18, 'f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte())
+        val rarHeader = byteArrayOf(0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00)
+        val zipHeader = byteArrayOf(0x50, 0x4B, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00)
+        val sevenZHeader = byteArrayOf(0x37, 0x7A, 0xBC.toByte(), 0xAF.toByte(), 0x27, 0x1C, 0x00, 0x04)
+        val htmlHeader = "<!DOCTYPE html>".toByteArray(Charsets.UTF_8)
+
+        assertTrue(id.my.milkglass.extractor.MkvHosterExtractorRegistry.isSupportedMediaMagicBytes(mkvHeader, mkvHeader.size))
+        assertTrue(id.my.milkglass.extractor.MkvHosterExtractorRegistry.isSupportedMediaMagicBytes(mp4Header, mp4Header.size))
+        assertFalse(id.my.milkglass.extractor.MkvHosterExtractorRegistry.isSupportedMediaMagicBytes(rarHeader, rarHeader.size, "video/x-matroska"))
+        assertFalse(id.my.milkglass.extractor.MkvHosterExtractorRegistry.isSupportedMediaMagicBytes(zipHeader, zipHeader.size, "video/mp4"))
+        assertFalse(id.my.milkglass.extractor.MkvHosterExtractorRegistry.isSupportedMediaMagicBytes(sevenZHeader, sevenZHeader.size, "application/octet-stream"))
+        assertFalse(id.my.milkglass.extractor.MkvHosterExtractorRegistry.isSupportedMediaMagicBytes(htmlHeader, htmlHeader.size, "text/html"))
+    }
+
+    @Test
+    fun titleMatcherGeneratesSynonymsAndSymbolSeasonQueries() {
+        val gotoubun = TitleMatcher.searchQueries("5-toubun no Hanayome ∬")
+        assertEquals(2, TitleMatcher.parse("5-toubun no Hanayome ∬").season)
+        assertTrue(gotoubun.any { it.contains("Gotoubun no Hanayome", ignoreCase = true) })
+
+        val cote = TitleMatcher.searchQueries("Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e S4 (Classroom of the Elite S4)")
+        assertTrue(cote.any { it.contains("Classroom of the Elite", ignoreCase = true) })
+
+        val movie = TitleMatcher.searchQueries("Pokemon Movie 12: Arceus and the Jewel of Life")
+        assertTrue(movie.any { it.contains("Arceus and the Jewel of Life", ignoreCase = true) })
+    }
 }
