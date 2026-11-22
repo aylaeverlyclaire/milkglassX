@@ -151,7 +151,7 @@ let enrichAttempts = 0;
 for (let i = 0; i < merged.length; i++) {
   const item = merged[i];
   const prev = existingMap.get(normalizeCatalogKey(item.title));
-  if (prev && prev.poster_url && Number(prev.score) > 0 && Number(prev.episodes_total) > 0) {
+  if (prev && prev.poster_url && Number(prev.score) > 0 && Number(prev.episodes_total) > 0 && prev.genres_json && prev.genres_json !== '[]') {
     if (Number.isInteger(prev.id) && prev.id > 0 && prev.id < 900_000_000) {
       item.anime_id = prev.id;
     }

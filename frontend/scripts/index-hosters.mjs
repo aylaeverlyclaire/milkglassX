@@ -11,23 +11,24 @@ const BLACKLISTED_HOSTER_PATTERNS = [
   'saweria', 'trakteer', 'paypal', 'javascript:', 'mailto:', '#',
   'mirrored.to', 'acefile.co', 'mega.nz', 'mega.co.nz', 'megaup',
   'racaty', '(rar)', '.rar', '(zip)', '.zip', 'terabox',
+  'krakenfiles', 'kfiles', 'mediafire', 'qiwi.gg', 'drive.google',
+  'kuramadrive', 'fileditch', 'mixdrop', 'streamtape', 'dood',
+  'yourupload', 'berkasdrive', 'mitedrive',
 ];
 
+// Embed streaming langsung (Tahap 1) + 4 hoster cepat (Tahap 2: Pixeldrain, GoFile, Buzzheavier, Filedon/Odfiles)
 const KNOWN_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
   'gofile.io', 'buzzheavier.com', 'filedon.co', 'odfiles.com',
-  'icefile.web.id', 'qiwi.gg', 'mediafire.com', 'drive.google.com',
-  'kuramadrive.com', 'fileditchfiles.me', 'fileditch.com',
-  'desudrive.com', 'desustream.info', 'desustream.com', 'odstream', 'odcdn', 'ondesu.com',
-  'blogger.com', 'streamruby', 'rubyvidhub.com', 'vidhide', 'filemoon',
-  'mixdrop', 'streamtape', 'dood', 'krakenfiles.com', 'kfiles.io',
+  'icefile.web.id', 'desudrive.com', 'desustream.info', 'desustream.com',
+  'odstream', 'odcdn', 'ondesu.com', 'blogger.com',
+  'streamruby', 'rubyvidhub.com', 'vidhide', 'filemoon', 'streamwish', 'mp4upload',
 ];
 
 const HOST_RELIABILITY_RANK = [
   'pixeldrain', 'pdrain', 'gofile', 'buzzheavier', 'filedon', 'odfiles',
-  'icefile', 'drive.google', 'qiwi', 'mediafire', 'fileditch',
-  'odcdn', 'odstream', 'desustream', 'blogger', 'streamruby',
-  'vidhide', 'filemoon', 'mixdrop', 'streamtape', 'dood', 'krakenfiles', 'kfiles',
+  'icefile', 'odcdn', 'odstream', 'desustream', 'ondesu', 'blogger',
+  'streamruby', 'vidhide', 'filemoon', 'streamwish', 'mp4upload',
 ];
 
 export function unwrapShortenerUrl(rawUrl) {
@@ -243,23 +244,6 @@ export function parseSamehadakuAnimeList(html) {
   return out;
 }
 
-export function parseNontonAnimeIdList(html, baseUrl = 'https://nontonanimeid.stream') {
-  const out = [];
-  const seen = new Set();
-  const re = /<a[^>]+href="([^"]*\/anime\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    let url = m[1].trim();
-    if (url.startsWith('/')) url = `${baseUrl}${url}`;
-    const title = m[2].replace(/<[^>]+>/g, '').trim();
-    if (url.startsWith('http') && !/\/episode/i.test(url) && title.length >= 2 && !seen.has(url)) {
-      seen.add(url);
-      out.push({ title, url, provider: 'nontonanimeid' });
-    }
-  }
-  return out;
-}
-
 export function parseOtakudesuEpisodes(html) {
   const map = new Map();
   const re = /<a[^>]+href="(https?:\/\/[^"]+\/episode\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -419,46 +403,6 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     }
   }
   return balanced;
-}
-
-export function extractHostersFromOploverzEpisodeJson(epObj, pageUrl) {
-  const results = [];
-  const seen = new Set();
-  const walk = (node, qualityHint = '720p', formatHint = 'mp4') => {
-    if (!node) return;
-    if (Array.isArray(node)) {
-      for (const item of node) walk(item, qualityHint, formatHint);
-      return;
-    }
-    if (typeof node === 'object') {
-      const q = parseQuality(node.quality || node.resolution || node.res || node.name || '') || qualityHint;
-      const fmt = parseContainer(node.format || node.type || '', node.name || '') || formatHint;
-      const rawUrl = node.url || node.link || node.href || node.downloadUrl || node.streamUrl;
-      const url = typeof rawUrl === 'string' ? unwrapShortenerUrl(rawUrl) : '';
-      if (url && url.startsWith('http') && !isBlacklistedUrl(node.name || node.server || '', url)) {
-        const label = String(node.server || node.hoster || node.name || 'Hoster').trim().slice(0, 60) || 'Hoster';
-        const dedup = `${q}|${url}`;
-        if (!seen.has(dedup)) {
-          seen.add(dedup);
-          results.push({
-            url,
-            quality: q,
-            hoster: label,
-            provider: 'oploverz',
-            container: fmt,
-            referer: pageUrl,
-          });
-        }
-      }
-      for (const [k, v] of Object.entries(node)) {
-        if (typeof v === 'object' && v !== null) {
-          walk(v, parseQuality(k) || q, parseContainer(k, '') || fmt);
-        }
-      }
-    }
-  };
-  walk(epObj);
-  return results.slice(0, 16);
 }
 
 const ALLOWED_CATALOG_PROVIDERS = new Set(['samehadaku', 'otakudesu']);
