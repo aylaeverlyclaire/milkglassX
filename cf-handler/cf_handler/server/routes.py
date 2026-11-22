@@ -387,7 +387,7 @@ def setup_routes(app: FastAPI):
         title: str = Query(..., min_length=2, max_length=160),
         ep: int = Query(..., ge=1, le=2000),
         quality: str = Query("1080p"),
-        samehadaku: str = Query("https://v2.samehadaku.how"),
+        samehadaku: str = Query("https://samehadaku.li"),
         otakudesu: str = Query("https://otakudesu.blog"),
         order: Optional[str] = Query(None),
         handler: CFhandler = Depends(get_handler),

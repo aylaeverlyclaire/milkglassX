@@ -27,8 +27,8 @@ enum class SourcePriority(
     val defaultBaseUrl: String,
     val watermarkTier: Int
 ) {
-    SAMEHADAKU(1, "samehadaku", "https://v2.samehadaku.how", 0),
-    OTAKUDESU(2, "otakudesu", "https://otakudesu.blog", 2)
+    OTAKUDESU(1, "otakudesu", "https://otakudesu.blog", 2),
+    SAMEHADAKU(2, "samehadaku", "https://samehadaku.li", 0)
 }
 
 enum class MediaContainer(val rank: Int, val label: String) {
@@ -63,7 +63,7 @@ enum class MkvQuality(val label: String, val height: Int) {
             val low = text.lowercase(Locale.ROOT).trim()
             return when {
                 low.contains("1080") || low.contains("fullhd") || low == "fhd" -> P1080
-                low.contains("720") || low == "hd" -> P720
+                low.contains("720") || low.contains("mp4hd") || low == "hd" -> P720
                 low.contains("480") || low == "mini" || low == "sd" -> P480
                 low.contains("360") -> P360
                 else -> null
@@ -160,7 +160,7 @@ internal object TitleMatcher {
     private val movieRegex = Regex("""\b(?:movie|gekijouban|film)\b""", RegexOption.IGNORE_CASE)
     private val ovaRegex = Regex("""\b(?:ova|oad)\b""", RegexOption.IGNORE_CASE)
     private val onaRegex = Regex("""\bona\b""", RegexOption.IGNORE_CASE)
-    private val sideStoryRegex = Regex("""\b(?:side\s*story|gaiden|spin[\s-]*off)\b""", RegexOption.IGNORE_CASE)
+    private val sideStoryRegex = Regex("""\b(?:side\s*story|gaiden|spin[\s-]*off|nikki|diaries|coleus|bullet)\b""", RegexOption.IGNORE_CASE)
     private val specialRegex = Regex("""\b(?:special|recap|sp)\b""", RegexOption.IGNORE_CASE)
     private val romanSeasonRegex = Regex("""\b(II|III|IV|V)\b""")
     private val symbolSeason2Regex = Regex("""(?:∬|²)""")
@@ -193,7 +193,8 @@ internal object TitleMatcher {
     }
 
     private fun parseUncached(input: String): ParsedTitle {
-        val noBrackets = brackets.replace(input.replace('\u00D7', 'x'), " ")
+        val cleanedPlusOva = Regex("""\+\s*(?:ova|oad|special)\b""", RegexOption.IGNORE_CASE).replace(input, " ")
+        val noBrackets = brackets.replace(cleanedPlusOva.replace('\u00D7', 'x'), " ")
         var season: Int? = null
         for (p in seasonPatterns) {
             val m = p.find(noBrackets)
@@ -498,8 +499,8 @@ class MkvCascadeResolver(
     private val onEpisodeResolved: ((String, List<RawMkvCandidate>) -> Unit)? = null,
     private val embedSniffer: ((url: String, referer: String?) -> ExtractedDirectMedia?)? = null,
     private val providers: List<MkvSourceProvider> = listOf(
-        SamehadakuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.SAMEHADAKU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
-        OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher)
+        OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
+        SamehadakuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.SAMEHADAKU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher)
     )
 ) {
     private val unshortener = LinkUnshortener(clients)
@@ -775,61 +776,39 @@ class MkvCascadeResolver(
         var idx = 0
         if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
         if (activeProviders.size >= 2) {
-            val fanOutCount = minOf(activeProviders.size, 3)
-            val hedgeQueue = LinkedBlockingQueue<ProviderResolvedOutcome>(fanOutCount)
+            // Optimasi #1: Balapkan Samehadaku & Otakudesu secara paralel penuh sejak t=0ms (tanpa jeda hedge),
+            // first-playable-wins langsung membatalkan provider lainnya.
+            val fanOutCount = minOf(activeProviders.size, 2)
+            val raceQueue = LinkedBlockingQueue<ProviderResolvedOutcome>(fanOutCount)
             val abandoned = AtomicBoolean(false)
             val futures = ArrayList<Future<*>>(fanOutCount)
-            val primary = activeProviders[0]
-            attempted.add(primary.priority)
-            futures.add(
-                sharedProviderPool.submit {
-                    val outcome = runCatching {
-                        fetchAndResolveProvider(
-                            primary, animeTitle, episodeNumber, cacheKey,
-                            qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds, abandoned
-                        )
-                    }.getOrElse { e ->
-                        ProviderResolvedOutcome(primary.priority, error = e.message ?: e::class.java.simpleName)
+            for (i in 0 until fanOutCount) {
+                val p = activeProviders[i]
+                attempted.add(p.priority)
+                futures.add(
+                    sharedProviderPool.submit {
+                        val outcome = runCatching {
+                            fetchAndResolveProvider(
+                                p, animeTitle, episodeNumber, cacheKey,
+                                qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds, abandoned
+                            )
+                        }.getOrElse { e ->
+                            ProviderResolvedOutcome(p.priority, error = e.message ?: e::class.java.simpleName)
+                        }
+                        raceQueue.offer(outcome)
                     }
-                    hedgeQueue.offer(outcome)
-                }
-            )
+                )
+            }
             try {
-                val fastPrimary = pollKeepingInterrupt(hedgeQueue, TimeUnit.MILLISECONDS.toNanos(HEDGE_DELAY_MS))
-                if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
-
-                if (fastPrimary != null) {
-                    val resolved = consumeResolvedOutcome(fastPrimary, attempted, errors, cfHosts)
+                val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(8L)
+                repeat(fanOutCount) {
+                    val remainingNs = deadlineNs - System.nanoTime()
+                    if (remainingNs <= 0L) return@repeat
+                    val done = pollKeepingInterrupt(raceQueue, remainingNs) ?: return@repeat
+                    val resolved = consumeResolvedOutcome(done, attempted, errors, cfHosts)
                     if (resolved != null) return resolved
-                    idx = 1
-                } else {
-                    for (i in 1 until fanOutCount) {
-                        val p = activeProviders[i]
-                        attempted.add(p.priority)
-                        futures.add(
-                            sharedProviderPool.submit {
-                                val outcome = runCatching {
-                                    fetchAndResolveProvider(
-                                        p, animeTitle, episodeNumber, cacheKey,
-                                        qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds, abandoned
-                                    )
-                                }.getOrElse { e ->
-                                    ProviderResolvedOutcome(p.priority, error = e.message ?: e::class.java.simpleName)
-                                }
-                                hedgeQueue.offer(outcome)
-                            }
-                        )
-                    }
-                    val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(14L)
-                    repeat(fanOutCount) {
-                        val remainingNs = deadlineNs - System.nanoTime()
-                        if (remainingNs <= 0L) return@repeat
-                        val done = pollKeepingInterrupt(hedgeQueue, remainingNs) ?: return@repeat
-                        val resolved = consumeResolvedOutcome(done, attempted, errors, cfHosts)
-                        if (resolved != null) return resolved
-                    }
-                    idx = fanOutCount
                 }
+                idx = fanOutCount
             } finally {
                 abandoned.set(true)
                 futures.forEach { if (!it.isDone) it.cancel(true) }
@@ -919,7 +898,7 @@ class MkvCascadeResolver(
         maxResults: Int = 3,
         preferStreamingEmbeds: Boolean = true
     ): List<ResolvedMkvMedia> {
-        val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(12L)
+        val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(7L)
         val embeds = candidates.filter { it.isStreamEmbed }.distinctBy { it.rawUrl }
         val wants1080p = qualityOrder.firstOrNull() == MkvQuality.P1080
         val embedHas1080p = embeds.any { it.quality == MkvQuality.P1080 }
@@ -931,7 +910,7 @@ class MkvCascadeResolver(
             } else {
                 embeds.take(4)
             }
-            val embedWin = raceExtractCandidates(embedBatch, maxResults = maxResults, timeoutMs = 4_500L)
+            val embedWin = raceExtractCandidates(embedBatch, maxResults = maxResults, timeoutMs = 2_800L)
             if (embedWin.isNotEmpty()) return embedWin
         }
 
@@ -1060,7 +1039,7 @@ class MkvCascadeResolver(
                 )
             }
             var deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
-            val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(100L)
+            val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(40L)
             repeat(futures.size) {
                 if (Thread.currentThread().isInterrupted) return@repeat
                 val remainingNs = deadlineNs - System.nanoTime()

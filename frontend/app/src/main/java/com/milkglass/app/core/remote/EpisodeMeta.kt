@@ -105,7 +105,7 @@ internal fun parseAniZipEpisodes(json: String): Map<Int, EpisodeMeta>? {
     val eps = root["episodes"] as? JsonObject ?: return emptyMap()
     val out = HashMap<Int, EpisodeMeta>()
     for ((key, value) in eps) {
-        val n = key.toIntOrNull()?.takeIf { it > 0 } ?: continue
+        val n = key.toIntOrNull()?.takeIf { it >= 0 } ?: continue
         val obj = value as? JsonObject ?: continue
         val raw = (obj["image"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
         val image = when {

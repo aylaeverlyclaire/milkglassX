@@ -39,7 +39,7 @@ object EmbedMediaSniffer {
         "doubleclick.net", "googlesyndication.com", "googleadservices.com", "googletagmanager.com",
         "google-analytics.com", "popads.net", "popcash.net", "exoclick.com", "juicyads.com",
         "propellerads.com", "adsterra.com", "highcpmgate.com", "effectivegatecpm.com",
-        "histats.com", "disqus.com", "facebook.net", "facebook.com/tr", "qq288",
+        "histats.com", "disqus.com", "facebook.net", "facebook.com/tr", "qq288", "qq188", "qq1x2os", "velvetcairns", "redirectthisclick",
         "bet365", "1xbet", "slot", "casino", "judi", "togel", "gacor", "mgid.com",
         "taboola.com", "outbrain.com", "mc.yandex.ru", "onclickperformance", "acscdn.com"
     )
@@ -260,14 +260,33 @@ object EmbedMediaSniffer {
                                     """
                                     (function(){
                                       try {
+                                        // 1. Tutup overlay iklan (mis. "Tutup Iklan" / ad banner) sebelum memicu play
+                                        var closeEls = document.querySelectorAll('a, button, span, div');
+                                        for (var i = 0; i < closeEls.length; i++) {
+                                          var txt = (closeEls[i].innerText || '').trim().toLowerCase();
+                                          if (txt === 'tutup iklan' || txt === 'close ad' || txt === 'close ads' || txt === 'skip ad') {
+                                            closeEls[i].click();
+                                          }
+                                        }
+                                        var overlays = document.querySelectorAll('[class*="iklan" i], [id*="iklan" i], [class*="ad-overlay" i], [class*="popup" i]');
+                                        for (var j = 0; j < overlays.length; j++) {
+                                          overlays[j].style.display = 'none';
+                                        }
+                                        // 2. Cek video source langsung atau picu play (termasuk klik kedua untuk player 2-tahap)
                                         var v = document.querySelector('video');
                                         if (v) {
                                           var s = v.currentSrc || v.src || (v.querySelector('source') && v.querySelector('source').src) || '';
                                           if (s) return s;
                                           if (typeof v.play === 'function') v.play().catch(function(){});
                                         }
-                                        var btn = document.querySelector('.jw-icon-display, .plyr__control--overlaid, .vjs-big-play-button, button[aria-label*="Play" i]');
-                                        if (btn) btn.click();
+                                        var triggerPlay = function() {
+                                          var btn = document.querySelector('.jw-icon-display, .plyr__control--overlaid, .vjs-big-play-button, button[aria-label*="Play" i], .play-button, #play');
+                                          if (btn) btn.click();
+                                          var vv = document.querySelector('video');
+                                          if (vv && typeof vv.play === 'function') vv.play().catch(function(){});
+                                        };
+                                        triggerPlay();
+                                        setTimeout(triggerPlay, 350);
                                       } catch(e) {}
                                       return '';
                                     })();

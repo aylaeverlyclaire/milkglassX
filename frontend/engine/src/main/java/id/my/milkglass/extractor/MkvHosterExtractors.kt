@@ -36,7 +36,7 @@ object HosterFilter {
         "krakenfiles", "kfiles", "streamtape", "mixdrop", "dood", "doodstream",
         "qiwi.gg", "mediafire", "kuramadrive", "drive.google", "gdrive",
         "yourupload", "berkasdrive", "mitedrive", "fileditch", "racaty",
-        "1fichier", "send.now", "send.cm", "tusfiles", "userscloud"
+        "1fichier", "send.now", "send.cm", "tusfiles", "userscloud", "moedesu", "nekocloud", "ondesuhd", "filesim", "letsup", "desufiles"
     )
 
     // 4 hoster cepat sebagai cadangan otomatis (Tahap 2) & sumber 1080p.
@@ -47,7 +47,7 @@ object HosterFilter {
     // Embed streaming langsung (Tahap 1) + 4 hoster cepat (Tahap 2).
     private val preferredOrder = listOf(
         "pixeldrain", "pdrain", "gofile", "buzzheavier", "filedon", "odfiles",
-        "icefile.web.id", "odstream", "odcdn", "ondesu", "desustream", "blogger",
+        "odstream", "odcdn", "otakuwatch", "desustream", "icefile.web.id", "blogger",
         "streamruby", "rubyvidhub", "vidhide", "filemoon", "streamwish", "mp4upload"
     )
 

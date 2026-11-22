@@ -7,8 +7,10 @@ import {
   isStrictIdentityMatch,
   mergeProviderCatalogs,
   minUnique,
+  canonicalCatalogKey,
   normalizeCatalogKey,
   parseOtakudesuCatalog,
+  parseOtakudesuSchedule,
   parseSamehadakuCatalog,
   sleep,
 } from './lib/catalog-sync.mjs';
@@ -77,7 +79,7 @@ async function resolveProviderBaseUrls() {
     } catch {}
   }
   return {
-    samehadaku: sameBase || 'https://v2.samehadaku.how',
+    samehadaku: sameBase || 'https://samehadaku.li',
     otakudesu: otakuBase || 'https://otakudesu.blog',
   };
 }
@@ -92,7 +94,7 @@ async function fetchExistingEnrichedMap() {
     if (!res.ok) return existing;
     const json = await res.json();
     for (const row of json?.data || []) {
-      const key = normalizeCatalogKey(row.title);
+      const key = canonicalCatalogKey(row.title);
       if (key) existing.set(key, row);
     }
   } catch {}
@@ -122,14 +124,51 @@ async function enrichFromAniList(title) {
   );
 }
 
+
+const MAX_AZ_PAGES = Math.max(1, Math.min(30, Number(process.env.MAX_AZ_PAGES ?? 15)));
+
+async function fetchSamehadakuCatalogPaginated(sameBase) {
+  const all = [];
+  const seenPages = new Set();
+  let nextUrl = `${sameBase}/az-list/`;
+  for (let page = 1; page <= MAX_AZ_PAGES && nextUrl && !seenPages.has(nextUrl); page++) {
+    seenPages.add(nextUrl);
+    let html = '';
+    try {
+      html = await fetchHtml(nextUrl, `${sameBase}/`);
+    } catch {
+      if (page === 1) {
+        html = await fetchHtml(`${sameBase}/daftar-anime-2/?list`, `${sameBase}/`);
+        return parseSamehadakuCatalog(html);
+      }
+      break;
+    }
+    const items = parseSamehadakuCatalog(html);
+    if (items.length === 0) break;
+    all.push(...items);
+    const nextMatch =
+      html.match(/<a[^>]+class="[^"]*next[^"]*"[^>]+href="([^"]+)"/i) ||
+      html.match(/<a[^>]+href="([^"]+\/az-list\/page\/\d+\/?[^"]*)"/i);
+    if (nextMatch && nextMatch[1]) {
+      const candidate = nextMatch[1].startsWith('http') ? nextMatch[1] : `${sameBase}${nextMatch[1]}`;
+      nextUrl = candidate !== nextUrl ? candidate : '';
+    } else {
+      nextUrl = '';
+    }
+  }
+  return all;
+}
+
 const bases = await resolveProviderBaseUrls();
 const providerResults = await Promise.allSettled([
-  fetchHtml(`${bases.samehadaku}/daftar-anime-2/?list`, `${bases.samehadaku}/`).then(parseSamehadakuCatalog),
   fetchHtml(`${bases.otakudesu}/anime-list/`, `${bases.otakudesu}/`).then(parseOtakudesuCatalog),
+  fetchSamehadakuCatalogPaginated(bases.samehadaku),
+  fetchHtml(`${bases.otakudesu}/jadwal-rilis/`, `${bases.otakudesu}/`).then(parseOtakudesuSchedule),
 ]);
 
-const sameList = providerResults[0].status === 'fulfilled' ? providerResults[0].value : [];
-const otakuList = providerResults[1].status === 'fulfilled' ? providerResults[1].value : [];
+const otakuList = providerResults[0].status === 'fulfilled' ? providerResults[0].value : [];
+const sameList = providerResults[1].status === 'fulfilled' ? providerResults[1].value : [];
+const scheduleMap = providerResults[2].status === 'fulfilled' ? providerResults[2].value : new Map();
 
 console.log(
   `[samehadaku] ${providerResults[0].status === 'fulfilled' ? `${sameList.length} judul` : `GAGAL: ${providerResults[0].reason?.message}`}`
@@ -138,7 +177,7 @@ console.log(
   `[otakudesu] ${providerResults[1].status === 'fulfilled' ? `${otakuList.length} judul` : `GAGAL: ${providerResults[1].reason?.message}`}`
 );
 
-const merged = mergeProviderCatalogs([sameList, otakuList]);
+const merged = mergeProviderCatalogs([otakuList, sameList], scheduleMap);
 if (merged.length === 0) {
   console.error('0 item dari Samehadaku & Otakudesu — batalkan sinkronisasi');
   process.exit(1);
@@ -150,11 +189,12 @@ let enrichAttempts = 0;
 
 for (let i = 0; i < merged.length; i++) {
   const item = merged[i];
-  const prev = existingMap.get(normalizeCatalogKey(item.title));
+  const prev = existingMap.get(canonicalCatalogKey(item.title));
+  if (prev && Number.isInteger(prev.id) && prev.id > 0) {
+    // Kunci ID wadah yang sudah ada di D1 agar favorit & riwayat tonton user tidak pernah terputus
+    item.anime_id = prev.id;
+  }
   if (prev && prev.poster_url && Number(prev.score) > 0 && Number(prev.episodes_total) > 0 && prev.genres_json && prev.genres_json !== '[]') {
-    if (Number.isInteger(prev.id) && prev.id > 0 && prev.id < 900_000_000) {
-      item.anime_id = prev.id;
-    }
     continue;
   }
   if (enrichAttempts >= MAX_ENRICH) continue;
@@ -167,6 +207,7 @@ for (let i = 0; i < merged.length; i++) {
   if (PAGE_DELAY_MS > 0) await sleep(PAGE_DELAY_MS);
 }
 
+const enough = merged.length >= MIN_UNIQUE;
 const batches = chunk(merged, SYNC_CHUNK);
 let totalUpdated = 0;
 let totalInserted = 0;
@@ -175,6 +216,7 @@ let importFailed = false;
 for (let i = 0; i < batches.length; i++) {
   const part = batches[i];
   const isLast = i === batches.length - 1;
+  const shouldPrune = isLast && enough;
   const r = await fetchWithRetry(
     `${WORKER}/v1/internal/sync-source-catalog`,
     {
@@ -184,7 +226,7 @@ for (let i = 0; i < batches.length; i++) {
         'X-Admin-Secret': SECRET,
         'User-Agent': 'MilkglassCatalogSync/3.0',
       },
-      body: JSON.stringify({ items: part, scope: SCOPE, prune: isLast }),
+      body: JSON.stringify({ items: part, scope: SCOPE, prune: shouldPrune }),
       signal: AbortSignal.timeout(30000),
     },
     { attempts: 3, baseDelayMs: RETRY_BASE_MS }
@@ -200,7 +242,6 @@ for (let i = 0; i < batches.length; i++) {
   console.log(`batch ${i + 1}/${batches.length}: updated=${j.updated ?? 0} inserted=${j.inserted ?? 0} pruned=${j.pruned ?? false}`);
 }
 
-const enough = merged.length >= MIN_UNIQUE;
 console.log(
   `SUMMARY ${JSON.stringify({
     scope: SCOPE,

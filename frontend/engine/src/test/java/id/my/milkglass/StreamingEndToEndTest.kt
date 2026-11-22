@@ -69,7 +69,7 @@ class StreamingEndToEndTest {
             {
               "status": "ok",
               "sources": [
-                {"rank": 1, "id": "samehadaku", "base_url": "https://v3.samehadaku.how"},
+                {"rank": 1, "id": "samehadaku", "base_url": "https://samehadaku.li"},
                 {"rank": 2, "id": "otakudesu", "base_url": "https://otakudesu.best/"},
                 {"rank": 3, "id": "unknown", "base_url": "http://insecure.example.com"}
               ]
@@ -77,7 +77,7 @@ class StreamingEndToEndTest {
         """.trimIndent()
         val parsed = SourceConfigStore.parseSourcesJson(json)
         assertEquals("https://otakudesu.best", parsed[SourcePriority.OTAKUDESU])
-        assertEquals("https://v3.samehadaku.how", parsed[SourcePriority.SAMEHADAKU])
+        assertEquals("https://samehadaku.li", parsed[SourcePriority.SAMEHADAKU])
         assertEquals(2, parsed.size)
     }
 
@@ -108,8 +108,8 @@ class StreamingEndToEndTest {
     @Test
     fun sourcePriorityOrderMatchesTwoSourceCascade() {
         assertEquals(2, SourcePriority.entries.size)
-        assertEquals(1, SourcePriority.SAMEHADAKU.rank)
-        assertEquals(2, SourcePriority.OTAKUDESU.rank)
+        assertEquals(1, SourcePriority.OTAKUDESU.rank)
+        assertEquals(2, SourcePriority.SAMEHADAKU.rank)
     }
 
     @Test
@@ -261,7 +261,7 @@ class StreamingEndToEndTest {
                     title = "Dummy Anime $i",
                     normalizedTitle = "dummy anime $i",
                     tokens = TitleMatcher.tokenize("Dummy Anime $i"),
-                    url = "https://v2.samehadaku.how/anime/dummy-$i/"
+                    url = "https://samehadaku.li/anime/dummy-$i/"
                 )
             }
         )

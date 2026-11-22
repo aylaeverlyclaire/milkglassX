@@ -10,17 +10,14 @@ import { getSourceBaseUrls } from '../services/anilist.service';
 import { AppBindings } from '../index';
 import { readDb } from '../utils/db';
 
-const R2_KEY_HOME = 'catalog/v1/home.json';
-const R2_KEY_STATUS = 'catalog/v1/status.json';
-const R2_KEY_SNAPSHOT = 'catalog/v1/snapshot.json';
 
 const ALLOWED_CATALOG_PROVIDERS = new Set(['samehadaku', 'otakudesu']);
 const CATALOG_SOURCE_FILTER = `(has_live_source = 1 AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%'))`;
 const CATALOG_SOURCE_FILTER_A = `(a.has_live_source = 1 AND (a.source_urls_json LIKE '%"samehadaku"%' OR a.source_urls_json LIKE '%"otakudesu"%'))`;
 
 const DEFAULT_ENGINE_RULES = {
-  otakudesu: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'ul.chivsrc > li', search_link: 'h2 > a[href]', episode_box: 'div.episodelist', episode_link: 'ul li a[href]', download_block: 'div.download ul', download_row: 'li', quality_text: 'strong', size_text: 'i', hoster_link: 'a[href]' } },
-  samehadaku: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'div.animposx > a[href], article.animpost div.animposx > a[href], article.animepost div.animposx a[href]', search_title: '.data .title h2', series_link: "a[href*='/anime/'], div.nvs.nvsc a[href]", episode_row: 'div.lstepsiode.listeps ul li, .listeps ul li, .lstepsiode ul li, .episode-lainnya ul li', episode_badge: '.epsright, .epl-num, .shrink-0 a, .shrink-0 div', episode_link: "h4 a[href], .lchx a[href], a[href*='-episode-'], a[href]", download_block: 'div.download-eps, div#downloadb', download_header: 'p b, p', download_row: 'ul li', quality_text: 'strong', hoster_link: 'a[href]' } },
+  otakudesu: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'ul.chivsrc > li', search_link: 'h2 > a[href]', episode_box: 'div.episodelist', episode_link: 'ul li a[href]', download_block: 'div.download ul', download_row: 'li', quality_text: 'strong', size_text: 'i', hoster_link: 'a[href]', ajax_nonce_action: 'aa1208d27f29ca340c92c66d1926f13f', ajax_mirror_action: '2a3505c93b0035d3f455df82bf976b84' } },
+  samehadaku: { search_path: '/?s={q}', selectors: { search_item: '.listupd .bs .bsx > a[href], article.bs .bsx a[href], div.animposx > a[href]', search_title: '.tt, h2, .data .title h2', series_link: "a[href*='/anime/'], div.nvs.nvsc a[href]", episode_row: 'div.eplister ul li, .eplister ul li, div.lstepsiode.listeps ul li, .listeps ul li', episode_badge: '.epl-num, .epsright, .shrink-0 a', episode_link: "a[href*='-episode-'], h4 a[href], .lchx a[href], a[href]", mirror_select: 'select.mirror option[value]', player_iframe: '#embed_holder iframe[src], .video-content iframe[src], iframe[src]', download_block: 'div.download-eps, div#downloadb', download_header: 'p b, p', download_row: 'ul li', quality_text: 'strong', hoster_link: 'a[href]' } },
 };
 
 export const catalogRoutes = new Hono<{ Bindings: AppBindings }>();
@@ -88,17 +85,6 @@ function escapeSqlLike(input: string): string {
 }
 
 catalogRoutes.get('/home', edgeCache(300, 600, false), async (c) => {
-  if (c.env.CATALOG_R2) {
-    try {
-      const obj = await c.env.CATALOG_R2.get(R2_KEY_HOME);
-      if (obj) {
-        return new Response(obj.body, {
-          status: 200,
-          headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Milkglass-Source': 'R2' },
-        });
-      }
-    } catch {}
-  }
   const db = readDb(c.env);
   const [ongoingRes, popularRes, completedRes, metaRes] = await db.batch([
     db.prepare(
@@ -143,33 +129,6 @@ catalogRoutes.get('/home', edgeCache(300, 600, false), async (c) => {
 });
 
 catalogRoutes.get('/status', edgeCache(60, 120, false), async (c) => {
-  if (c.env.CATALOG_R2) {
-    try {
-      const obj = await c.env.CATALOG_R2.get(R2_KEY_STATUS);
-      if (obj) {
-        const doc = await obj.json<{ total: number; version: string; synced_at: number | null; full_synced_at: number | null }>();
-        if (doc && typeof doc.total === 'number' && doc.total > 0 && typeof doc.version === 'string') {
-          const nowSec = Math.floor(Date.now() / 1000);
-          const ageSec = doc.synced_at === null ? null : Math.max(0, nowSec - doc.synced_at);
-          const stale = ageSec === null || ageSec > CATALOG_STALE_AFTER_SEC;
-          c.header('X-Milkglass-Source', 'R2');
-          return c.json({
-            status: 'ok',
-            data: {
-              total: doc.total,
-              version: doc.version,
-              synced_at: doc.synced_at,
-              full_synced_at: doc.full_synced_at,
-              age_sec: ageSec,
-              stale,
-              stale_after_sec: CATALOG_STALE_AFTER_SEC,
-              recheck_after_sec: recheckAfterSec(nowSec, doc.synced_at),
-            },
-          });
-        }
-      }
-    } catch {}
-  }
   const db = readDb(c.env);
   const [metaRes, countRes, totalAllRes, hosterRes] = await db.batch([
     db.prepare(META_QUERY),
@@ -194,6 +153,7 @@ catalogRoutes.get('/status', edgeCache(60, 120, false), async (c) => {
     status: 'ok',
     data: {
       total,
+      catalog_sources: ['otakudesu', 'samehadaku'],
       total_catalog: totalCatalog,
       live_hosters: liveHosters,
       version: catalogVersion(marker, total),
@@ -215,39 +175,6 @@ catalogRoutes.get(
   async (c) => {
     const db = readDb(c.env);
     const { v } = c.req.valid('query');
-    if (c.env.CATALOG_R2) {
-      try {
-        if (!v) {
-          const head = await c.env.CATALOG_R2.head(R2_KEY_SNAPSHOT);
-          const ver = head?.customMetadata?.version;
-          if (ver) {
-            const target = new URL(c.req.url);
-            target.search = `?v=${encodeURIComponent(ver)}`;
-            c.header('Cache-Control', 'no-store');
-            c.header('X-Milkglass-Source', 'R2');
-            return c.redirect(target.toString(), 307);
-          }
-        } else {
-          const obj = await c.env.CATALOG_R2.get(R2_KEY_SNAPSHOT);
-          const ver = obj?.customMetadata?.version;
-          if (obj && ver) {
-            if (ver === v) {
-              return new Response(obj.body, {
-                status: 200,
-                headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Milkglass-Source': 'R2' },
-              });
-            }
-            await obj.body?.cancel?.();
-            const target = new URL(c.req.url);
-            target.search = `?v=${encodeURIComponent(ver)}`;
-            c.header('Cache-Control', 'no-store');
-            c.header('X-Milkglass-Source', 'R2');
-            return c.redirect(target.toString(), 307);
-          }
-          await obj?.body?.cancel?.();
-        }
-      } catch {}
-    }
     const statements: D1PreparedStatement[] = [
       db.prepare(META_QUERY),
       db.prepare(`SELECT COUNT(*) AS total FROM animes WHERE ${CATALOG_SOURCE_FILTER}`),
@@ -623,10 +550,28 @@ function scoreMultilingualRow(qSpaced: string, qCompact: string, row: Record<str
 
 catalogRoutes.get(
   '/search',
-  edgeCache(300, 600, true, { allowedQueryParams: ['q'] }),
+  edgeCache(300, 600, true, { allowedQueryParams: ['q'], normalizeTitleParam: true }),
   rateLimit(30, 60),
   async (c) => {
-    const q = (c.req.query('q') || '').trim().slice(0, 80);
+    const SEARCH_ALIASES: Record<string, string> = {
+      tensura: 'tensei shitara slime',
+      slime: 'tensei shitara slime',
+      jjk: 'jujutsu kaisen',
+      aot: 'shingeki no kyojin',
+      snk: 'shingeki no kyojin',
+      kny: 'kimetsu no yaiba',
+      danmachi: 'dungeon ni deai',
+      mha: 'boku no hero academia',
+      bnha: 'boku no hero academia',
+      sao: 'sword art online',
+      cote: 'youkoso jitsuryoku',
+      konosuba: 'kono subarashii',
+      oregairu: 'yahari ore no seishun',
+      frieren: 'sousou no frieren',
+    };
+    const rawQ = (c.req.query('q') || '').trim().slice(0, 80);
+    const rawCompact = normalizeSearchSpaced(rawQ).replace(/\s+/g, '');
+    const q = SEARCH_ALIASES[rawCompact] ?? rawQ;
     const qSpaced = normalizeSearchSpaced(q);
     const qCompact = qSpaced.replace(/\s+/g, '');
     const minLen = CJK_CHAR_RE.test(qCompact) ? 1 : 2;
@@ -671,7 +616,8 @@ catalogRoutes.get(
       const root = baseUrl.trim().replace(/\/+$/, '');
       if (!root.startsWith('https://')) return [];
       try {
-        const resp = await fetch(`${root}/?s=${encodeURIComponent(q)}&post_type=anime`, {
+        const searchPath = sourceId === 'samehadaku' ? `/?s=${encodeURIComponent(q)}` : `/?s=${encodeURIComponent(q)}&post_type=anime`;
+        const resp = await fetch(`${root}${searchPath}`, {
           method: 'GET',
           headers: {
             Accept: 'text/html,application/xhtml+xml,*/*',
@@ -767,22 +713,44 @@ catalogRoutes.get(
       d1Rows = [...d1Rows, ...scored];
     }
 
-    const [sameLive, otakuLive] = await Promise.allSettled([
-      scrapeSourceSearch('samehadaku', sourceUrls.samehadaku),
-      scrapeSourceSearch('otakudesu', sourceUrls.otakudesu),
-    ]);
-    const liveRows: Array<Record<string, unknown>> = [
-      ...(sameLive.status === 'fulfilled' ? sameLive.value : []),
-      ...(otakuLive.status === 'fulfilled' ? otakuLive.value : []),
-    ];
+    // D1-first (<50ms): jika D1 sudah mengembalikan >= 6 hasil relevan, lewati live-scrape eksternal
+    // agar hemat kuota Worker subrequest dan menghindari rate-limit IP situs sumber.
+    let liveRows: Array<Record<string, unknown>> = [];
+    if (d1Rows.length < 6) {
+      const [otakuLive, sameLive] = await Promise.allSettled([
+        scrapeSourceSearch('otakudesu', sourceUrls.otakudesu),
+        scrapeSourceSearch('samehadaku', sourceUrls.samehadaku),
+      ]);
+      liveRows = [
+        ...(otakuLive.status === 'fulfilled' ? otakuLive.value : []),
+        ...(sameLive.status === 'fulfilled' ? sameLive.value : []),
+      ];
+    }
 
     const shapedD1 = shapeRows(d1Rows);
     const merged: Array<Record<string, unknown>> = [];
     const seenCompactKeys = new Set<string>();
-    const compactKey = (s: unknown) => normalizeSearchSpaced(String(s || '')).replace(/\s+/g, '');
+    const canonicalSearchKey = (raw: unknown): string => {
+      const str = String(raw || '').replace(/\+\s*(?:ova|oad|special)\b/gi, ' ');
+      const norm = normalizeSearchSpaced(str);
+      if (!norm) return '';
+      const sm = norm.match(/\bseason\s*(\d+)\b/) || norm.match(/\bs(\d+)\b/) || norm.match(/\b(\d+)(?:st|nd|rd|th)\s+season\b/);
+      const roman = str.match(/\b(II|III|IV|V)\b/);
+      const season = sm ? Number(sm[1]) : roman ? ({ II: 2, III: 3, IV: 4, V: 5 }[roman[1]] ?? 1) : 1;
+      const pm = norm.match(/\b(?:part|cour)\s*(\d+)\b/);
+      const part = pm ? Number(pm[1]) : 0;
+      const base = norm
+        .replace(/\bseason\s*\d+\b/g, ' ')
+        .replace(/\bs\d+\b/g, ' ')
+        .replace(/\b\d+(?:st|nd|rd|th)\s+season\b/g, ' ')
+        .replace(/\b(?:ii|iii|iv|v)\b/g, ' ')
+        .replace(/\b(?:part|cour)\s*\d+\b/g, ' ')
+        .replace(/\s+/g, '');
+      return base ? `${base}|s${season}|p${part}` : '';
+    };
     for (const row of [...shapedD1, ...liveRows]) {
-      const k = compactKey(row.title);
-      const ka = compactKey(row.title_alt);
+      const k = canonicalSearchKey(row.title);
+      const ka = canonicalSearchKey(row.title_alt);
       if ((k && seenCompactKeys.has(k)) || (ka && seenCompactKeys.has(ka))) continue;
       if (k) seenCompactKeys.add(k);
       if (ka) seenCompactKeys.add(ka);

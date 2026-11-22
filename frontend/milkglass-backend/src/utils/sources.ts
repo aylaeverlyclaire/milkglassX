@@ -12,12 +12,12 @@ export interface SourceBaseUrls {
  * Hanya Samehadaku dan Otakudesu yang aktif.
  */
 export const SOURCE_CASCADE_ORDER: readonly SourceId[] = [
-  'samehadaku',
   'otakudesu',
+  'samehadaku',
 ] as const;
 
 export const DEFAULT_SOURCE_URLS: Readonly<SourceBaseUrls> = {
-  samehadaku: 'https://v2.samehadaku.how',
+  samehadaku: 'https://samehadaku.li',
   otakudesu: 'https://otakudesu.blog',
 };
 

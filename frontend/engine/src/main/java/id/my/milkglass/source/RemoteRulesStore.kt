@@ -35,7 +35,7 @@ class RemoteRulesStore(
     init {
         diskCache.loadCached()?.let { raw ->
             val parsed = parseManifest(raw)
-            if (parsed.isNotEmpty()) rules.putAll(parsed)
+            if (parsed.isNotEmpty()) { rules.putAll(parsed); globalRules.putAll(parsed) }
         }
     }
 
@@ -55,10 +55,17 @@ class RemoteRulesStore(
             if (parsed.isEmpty()) return@refreshIfNeeded false
             rules.clear()
             rules.putAll(parsed)
+            globalRules.clear()
+            globalRules.putAll(parsed)
             true
         }
 
     companion object {
+        private val globalRules = ConcurrentHashMap<SourcePriority, SourceRuleEntry>()
+
+        fun globalSelectorFor(source: SourcePriority, key: String, default: String): String =
+            globalRules[source]?.selectors?.get(key)?.takeIf { it.isNotBlank() } ?: default
+
         private const val RULES_TTL_MS = 6L * 60L * 60L * 1000L
         private const val MAX_DISK_AGE_MS = 7L * 24L * 60L * 60L * 1000L
         private const val MAX_MANIFEST_BYTES = 32 * 1024

@@ -14,6 +14,7 @@ const BLACKLISTED_HOSTER_PATTERNS = [
   'krakenfiles', 'kfiles', 'mediafire', 'qiwi.gg', 'drive.google',
   'kuramadrive', 'fileditch', 'mixdrop', 'streamtape', 'dood',
   'yourupload', 'berkasdrive', 'mitedrive',
+  'vidhide', 'ondesuhd', 'moedesu', 'nekocloud', 'otakufiles', 'vikingfile',
 ];
 
 // Embed streaming langsung (Tahap 1) + 4 hoster cepat (Tahap 2: Pixeldrain, GoFile, Buzzheavier, Filedon/Odfiles)
@@ -21,14 +22,14 @@ const KNOWN_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
   'gofile.io', 'buzzheavier.com', 'filedon.co', 'odfiles.com',
   'icefile.web.id', 'desudrive.com', 'desustream.info', 'desustream.com',
-  'odstream', 'odcdn', 'ondesu.com', 'blogger.com',
-  'streamruby', 'rubyvidhub.com', 'vidhide', 'filemoon', 'streamwish', 'mp4upload',
+  'odstream', 'odcdn', 'otakuwatch', 'ondesu.com', 'blogger.com',
+  'streamruby', 'rubyvidhub.com', 'filemoon', 'streamwish', 'mp4upload',
 ];
 
 const HOST_RELIABILITY_RANK = [
   'pixeldrain', 'pdrain', 'gofile', 'buzzheavier', 'filedon', 'odfiles',
-  'icefile', 'odcdn', 'odstream', 'desustream', 'ondesu', 'blogger',
-  'streamruby', 'vidhide', 'filemoon', 'streamwish', 'mp4upload',
+  'odstream', 'odcdn', 'otakuwatch', 'icefile', 'desustream', 'ondesu', 'blogger',
+  'streamruby', 'filemoon', 'streamwish', 'mp4upload',
 ];
 
 export function unwrapShortenerUrl(rawUrl) {
@@ -171,8 +172,8 @@ export function scoreTitleMatch(catalogTitle, candidateTitle) {
 
 export function parseQuality(text) {
   const s = String(text || '').toLowerCase();
-  if (s.includes('1080')) return '1080p';
-  if (s.includes('720')) return '720p';
+  if (s.includes('1080') || s.includes('fullhd') || /\bfhd\b/.test(s)) return '1080p';
+  if (s.includes('720') || s.includes('mp4hd')) return '720p';
   if (s.includes('480')) return '480p';
   if (s.includes('360')) return '360p';
   return null;
@@ -187,9 +188,18 @@ export function parseContainer(blockTitle, qualityText) {
 
 export function isBlacklistedUrl(label, url) {
   const low = `${label || ''} ${url || ''}`.toLowerCase();
+  const urlLow = String(url || '').toLowerCase();
   if (!url || (!url.startsWith('https://') && !url.startsWith('http://'))) return true;
   if (low.includes('shrinkearn')) return true;
-  return BLACKLISTED_HOSTER_PATTERNS.some((p) => low.includes(p));
+  // Otakudesu membungkus tautan Filedon/Pdrain/GoFile lewat desustream.com/safelink/link/?id=...
+  // yang sudah di-unwrap otomatis oleh MkvHosterExtractors.kt di Engine.
+  const isOtakudesuDesuSafelink =
+    (urlLow.includes('desustream.com/safelink') || urlLow.includes('desudrive.com/safelink')) &&
+    !/mega|acefile|kraken|viking|mirrored|racaty|zippy|otakufiles/i.test(String(label || ''));
+  return BLACKLISTED_HOSTER_PATTERNS.some((p) => {
+    if (p === 'safelink' && isOtakudesuDesuSafelink) return false;
+    return low.includes(p);
+  });
 }
 
 export function isKnownHoster(url) {
@@ -211,7 +221,7 @@ export function extractEpisodeNumber(text, url) {
     combined.match(/-(\d{1,4})(?:[-/]|$)/);
   if (!m) return null;
   const n = Number.parseInt(m[1], 10);
-  return Number.isFinite(n) && n >= 1 && n <= 2000 ? n : null;
+  return Number.isFinite(n) && n >= 0 && n <= 2000 ? n : null;
 }
 
 export function parseOtakudesuAnimeList(html) {
@@ -246,15 +256,22 @@ export function parseSamehadakuAnimeList(html) {
 
 export function parseOtakudesuEpisodes(html) {
   const map = new Map();
+  const nonBatchFallback = [];
   const re = /<a[^>]+href="(https?:\/\/[^"]+\/episode\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(html)) !== null) {
     const url = m[1].trim();
+    if (/\/batch\//i.test(url)) continue;
+    if (!nonBatchFallback.includes(url)) nonBatchFallback.push(url);
     const text = m[2].replace(/<[^>]+>/g, '').trim();
     const ep = extractEpisodeNumber(text, url);
     if (ep && !map.has(ep)) {
       map.set(ep, url);
     }
+  }
+  // Movie/OVA tunggal Otakudesu (mis. Kimi no Na wa BD) tidak memiliki angka "Episode 1" di teks/URL.
+  if (map.size === 0 && nonBatchFallback.length === 1) {
+    map.set(1, nonBatchFallback[0]);
   }
   return Array.from(map.entries())
     .sort((a, b) => a[0] - b[0])
@@ -315,12 +332,20 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     addEmbed(im[1], 'Embed', '');
   }
 
+  let pageHost = '';
+  try { pageHost = new URL(pageUrl).hostname.toLowerCase(); } catch {}
   const optRe = /<option[^>]+value=["']([^"']+)["'][^>]*>([\s\S]*?)<\/option>/gi;
   let om;
   while ((om = optRe.exec(html)) !== null) {
     const val = om[1].trim();
     const label = om[2].replace(/<[^>]+>/g, '').trim();
     if (/^https?:\/\//i.test(val)) {
+      // Tolak dropdown navigasi "Pilih Episode Lainnya" (host sama dengan halaman atau link /episode/)
+      let optHost = '';
+      try { optHost = new URL(val).hostname.toLowerCase(); } catch {}
+      if ((pageHost && optHost === pageHost) || /\/(?:episode|anime)\/|subtitle-indonesia/i.test(val)) {
+        continue;
+      }
       addEmbed(val, label, label);
     } else if (/^[A-Za-z0-9+/=]{16,}$/.test(val)) {
       try {
@@ -363,7 +388,7 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     }
   }
 
-  if (results.length === 0) {
+  if (!results.some((r) => !r.isEmbed)) {
     const anyLinkRe = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
     let m;
     while ((m = anyLinkRe.exec(html)) !== null) {
@@ -569,19 +594,48 @@ async function main() {
 
   const catalog = (catJson.data || []).slice(0, maxAnimes);
   const sourcesMap = new Map((srcJson.sources || []).map((s) => [s.id, s.base_url]));
-  const sameBase = (sourcesMap.get('samehadaku') || 'https://v2.samehadaku.how').replace(/\/+$/, '');
+  const sameBase = (sourcesMap.get('samehadaku') || 'https://samehadaku.li').replace(/\/+$/, '');
   const otakuBase = (sourcesMap.get('otakudesu') || 'https://otakudesu.blog').replace(/\/+$/, '');
 
   // Katalog eksklusif Samehadaku & Otakudesu saja.
   const providerIndices = [];
+  async function fetchSamehadakuAllPages() {
+    const all = [];
+    const seenUrls = new Set();
+    for (let page = 1; page <= 15; page++) {
+      const pageUrl = page === 1 ? `${sameBase}/az-list/` : `${sameBase}/az-list/page/${page}/`;
+      let html = '';
+      try {
+        html = await fetchText(pageUrl, `${sameBase}/`, 20000);
+      } catch {
+        if (page === 1) {
+          html = await fetchText(`${sameBase}/daftar-anime-2/?list`, `${sameBase}/`, 20000);
+          return parseSamehadakuAnimeList(html);
+        }
+        break;
+      }
+      const items = parseSamehadakuAnimeList(html);
+      let added = 0;
+      for (const it of items) {
+        if (!seenUrls.has(it.url)) {
+          seenUrls.add(it.url);
+          all.push(it);
+          added++;
+        }
+      }
+      if (added === 0 || !new RegExp(`/az-list/page/${page + 1}/`, 'i').test(html)) break;
+    }
+    return all;
+  }
+
   const [sameRes, otakuRes] = await Promise.allSettled([
-    fetchText(`${sameBase}/daftar-anime-2/?list`, `${sameBase}/`, 20000).then(parseSamehadakuAnimeList),
+    fetchSamehadakuAllPages(),
     fetchText(`${otakuBase}/anime-list/`, `${otakuBase}/`, 20000).then(parseOtakudesuAnimeList),
   ]);
 
   const orderedProviderResults = [
-    ['samehadaku', sameBase, sameRes],
     ['otakudesu', otakuBase, otakuRes],
+    ['samehadaku', sameBase, sameRes],
   ];
   for (const [provider, base, res] of orderedProviderResults) {
     if (res.status === 'fulfilled' && res.value.length > 0) {
