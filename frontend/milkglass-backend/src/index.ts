@@ -101,7 +101,7 @@ export default {
           await syncAniListCatalog(env.DB, 1, 50, 3);
         }
         try {
-          await backfillIncompleteAnime(env.DB, 5);
+          await backfillIncompleteAnime(env.DB, 50);
         } catch (err: unknown) {
           console.error('[cron] backfillIncompleteAnime failed', err instanceof Error ? err.message : String(err));
         }

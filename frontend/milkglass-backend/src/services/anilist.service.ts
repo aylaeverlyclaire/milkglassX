@@ -466,19 +466,53 @@ export async function enrichSingleAnimeFromAniListAsync(
   }
 }
 
+const BACKFILL_QUERY = `
+query ($ids: [Int], $perPage: Int) {
+  Page(page: 1, perPage: $perPage) {
+    media(id_in: $ids, type: ANIME) {
+      ${MEDIA_FIELDS}
+    }
+  }
+}
+`;
+
 /**
  * Placeholder hasil ingest (poster kosong / judul generik) hanya di-enrich satu kali dengan timeout 3,5 dtk;
  * bila AniList gagal/429 barisnya tertinggal tanpa poster, skor, dan jadwal. Cron memanggil ini untuk
- * mencoba lagi sejumlah kecil baris tak lengkap (acak agar baris yang terus gagal tidak memblokir antrean).
+ * melengkapi baris tak lengkap secara massal: SATU request AniList (id_in) + SATU batch D1 untuk hingga
+ * `limit` baris. Pemilihan acak agar id yang tak dikenal AniList tidak memblokir antrean.
+ * `last_import_at` dinaikkan bila ada yang berubah supaya snapshot katalog klien ikut ter-refresh.
  */
-export async function backfillIncompleteAnime(db: D1Database, limit = 5): Promise<number> {
+export async function backfillIncompleteAnime(db: D1Database, limit = 50): Promise<number> {
   const rows = await db
     .prepare(`SELECT id FROM animes WHERE poster_url IS NULL OR poster_url = '' ORDER BY RANDOM() LIMIT ?1`)
     .bind(limit)
     .all<{ id: number }>();
-  const ids = (rows.results ?? []).map((r) => r.id);
-  for (const id of ids) await enrichSingleAnimeFromAniListAsync(db, id);
-  return ids.length;
+  const ids = (rows.results ?? []).map((r) => r.id).filter((id) => Number.isInteger(id) && id > 0);
+  if (ids.length === 0) return 0;
+
+  const response = await fetchAniListGraphQL(
+    JSON.stringify({ query: BACKFILL_QUERY, variables: { ids, perPage: ids.length } }),
+    8000,
+    'MilkglassCatalogSync/2.0',
+    `backfill:n=${ids.length}`
+  );
+  if (!response.ok) {
+    console.error('[AniList] backfill http error', { status: response.status, ids: ids.length });
+    return 0;
+  }
+  const payload = (await response.json()) as { data?: { Page?: { media?: AniListRawMedia[] } } };
+  const valid = (payload.data?.Page?.media ?? []).filter(
+    (m) => m && Number.isInteger(m.id) && m.id > 0 && m.title && typeof m.title.romaji === 'string'
+  );
+  if (valid.length === 0) return 0;
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  await db.batch([
+    ...valid.map((m) => bindAnimeUpsert(db, m, nowSec)),
+    db.prepare(UPSERT_META_SQL).bind(META_LAST_IMPORT_AT, String(nowSec), nowSec),
+  ]);
+  return valid.length;
 }
 
 let cachedSourceUrls: { expiresAt: number; value: SourceBaseUrls } | null = null;
