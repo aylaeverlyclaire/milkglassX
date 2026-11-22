@@ -72,7 +72,7 @@ fun CollectionPage(ctl: AppController, scrolls: List<ScrollState>, activeTab: ()
     val c = Milk.colors
     val ty = Milk.type
 
-    val index = SUB_TABS.indexOf(ctl.persisted.collectionTab).coerceAtLeast(0)
+    val index = SUB_TABS.indexOf(ctl.collectionTab).coerceAtLeast(0)
     val vc = LocalViewConfiguration.current
     val vc480 = remember(vc) { object : ViewConfiguration by vc { override val longPressTimeoutMillis: Long get() = 480L } }
 
@@ -100,11 +100,14 @@ fun CollectionPage(ctl: AppController, scrolls: List<ScrollState>, activeTab: ()
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(c.outlineVariant))
             PageColumn(scrolls[index], Modifier.weight(1f)) {
-                when (SUB_TABS[index]) {
-                    "watchlist" -> WatchlistTab(ctl, activeTab)
-                    "watching" -> WatchingTab(ctl, activeTab)
-                    "completed" -> CompletedTab(ctl, activeTab)
-                    else -> HistoryTab(ctl, activeTab)
+                val tabName = SUB_TABS[index]
+                key(tabName) {
+                    when (tabName) {
+                        "watchlist" -> WatchlistTab(ctl, activeTab)
+                        "watching" -> WatchingTab(ctl, activeTab)
+                        "completed" -> CompletedTab(ctl, activeTab)
+                        else -> HistoryTab(ctl, activeTab)
+                    }
                 }
             }
         }
@@ -175,7 +178,7 @@ private fun AnimeRowContent(ctl: AppController, a: Anime, sub: String, scope: Ro
 @Composable
 private fun WatchlistTab(ctl: AppController, activeTab: () -> String) {
     val tr = ctl.tr
-    val list = ctl.persisted.watchlist.mapNotNull { ctl.animeOf(it) }
+    val list = remember(ctl.watchlistIds, ctl.catalog) { ctl.watchlistIds.mapNotNull { ctl.animeOf(it) } }
     if (list.isEmpty()) {
         EmptyBlock(MilkIcons.BmO, tr.t("collection.watchlistEmpty"))
         return
@@ -199,7 +202,7 @@ private fun WatchlistTab(ctl: AppController, activeTab: () -> String) {
 @Composable
 private fun WatchingTab(ctl: AppController, activeTab: () -> String) {
     val tr = ctl.tr
-    val list = ctl.continueWatchingList()
+    val list = remember(ctl.progressMap, ctl.resumePositionsMap, ctl.lastWatchedMap, ctl.catalog) { ctl.continueWatchingList() }
     if (list.isEmpty()) {
         EmptyBlock(MilkIcons.Play, tr.t("collection.noneWatching"))
         return
@@ -219,7 +222,7 @@ private fun WatchingTab(ctl: AppController, activeTab: () -> String) {
 private fun CompletedTab(ctl: AppController, activeTab: () -> String) {
     val tr = ctl.tr
     val time = ctl.time
-    val list = remember(ctl.catalog, ctl.persisted.progress) { ctl.catalog.filter { ctl.isCompleted(it) } }
+    val list = remember(ctl.catalog, ctl.progressMap) { ctl.catalog.filter { ctl.isCompleted(it) } }
     if (list.isEmpty()) {
         EmptyBlock(MilkIcons.Check, tr.t("collection.noneCompleted"))
         return
@@ -244,7 +247,7 @@ private fun HistoryTab(ctl: AppController, activeTab: () -> String) {
     val tr = ctl.tr
     val time = ctl.time
     val today0 = time.startOfToday()
-    val items = remember(ctl.persisted.history) { ctl.persisted.history.sortedByDescending { it.watchedAt } }
+    val items = remember(ctl.historyList) { ctl.historyList.sortedByDescending { it.watchedAt } }
     if (items.isEmpty()) {
         EmptyBlock(MilkIcons.Lib, tr.t("collection.historyEmpty"))
         return

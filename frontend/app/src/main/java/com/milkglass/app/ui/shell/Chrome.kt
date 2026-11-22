@@ -287,7 +287,7 @@ private fun SheetBody(ctl: AppController, o: Overlay, vh: androidx.compose.ui.un
                     ctl.availablePlayerQualities.forEach { q ->
                         key(q) {
                             RadioRow(
-                                ctl.persisted.settings.quality == q,
+                                ctl.preferredQuality == q,
                                 if (q == "Auto") tr.t("player.automatic") else q,
                                 if (q == "Auto") tr.t("player.adaptsToNetwork") else null,
                             ) { ctl.setQuality(q) }
@@ -308,7 +308,7 @@ private fun SheetBody(ctl: AppController, o: Overlay, vh: androidx.compose.ui.un
                 is Overlay.SettingOptions -> {
                     THEME_MODES.forEach { v ->
                         key(v) {
-                            RadioRow(ctl.persisted.settings.theme == v, ctl.enumLabel("theme", v), null) { ctl.chooseSettingOption(o.key, v) }
+                            RadioRow(ctl.themeKey == v, ctl.enumLabel("theme", v), null) { ctl.chooseSettingOption(o.key, v) }
                         }
                     }
                 }

@@ -27,10 +27,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.geometry.Offset
@@ -99,16 +102,17 @@ fun DetailScreen(ctl: AppController, id: Int) {
     val mx = minOf(a.totalEpisodes, released + if (time.isOngoing(a)) 1 else 0)
     val eps = remember(mx, ctl.episodesDescending) { (1..mx).toList().let { if (ctl.episodesDescending) it.reversed() else it } }
     val n = time.nextReleaseAt(a)
-    val inList = ctl.isInWatchlist(a)
+    var detailTab by rememberSaveable(id) { mutableStateOf("episodes") }
+    var synopsisExpanded by rememberSaveable(id) { mutableStateOf(false) }
 
     val statusText = if (time.isOngoing(a) && n != null) tr.t("detail.airing", "day" to tr.locale.weekdaysLong[time.weekdayOf(n)])
         else tr.t("detail.finished", "totalEpisodes" to a.totalEpisodes)
     val statusKind = if (time.isOngoing(a) && n != null) BadgeKind.Success else BadgeKind.Neutral
-    val accent = androidx.compose.runtime.remember(a.id, c.surface) { accentFor(a, c.surface) }
+    val accent = remember(a.id, c.surface) { accentFor(a, c.surface) }
     LaunchedEffect(a.id) { ctl.loadEpisodeMeta(a) }
     LaunchedEffect(a.id) { ctl.loadExtras(a) }
     val detailCtx = LocalContext.current.applicationContext
-    LaunchedEffect(a.id, resume?.episode, resume?.waiting, ctl.persisted.settings.quality, ctl.online) {
+    LaunchedEffect(a.id, resume?.episode, resume?.waiting, ctl.preferredQuality, ctl.online) {
         val targetEp = when {
             resume == null -> 1
             resume.waiting && resume.completed -> 1
@@ -120,7 +124,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
             rt.seedSourceUrls(a.title, a.romaji, a.sourceUrls)
             val metered = com.milkglass.app.core.poster.isMeteredNetwork(detailCtx)
             rt.prefetchEpisode(
-                a.title, a.romaji, targetEp, ctl.persisted.settings.quality,
+                a.title, a.romaji, targetEp, ctl.preferredQuality,
                 prebuffer = true,
                 prebufferHeadBytes = if (metered) {
                     PlayerManager.PREBUFFER_METERED_HEAD_BYTES
@@ -133,7 +137,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
 
     Column(Modifier.fillMaxSize().background(c.surface)) {
         TopBar("", bare = true, leading = { MilkIconButton(MilkIcons.Back, { ctl.goBack() }) }) {
-            MilkIconButton(if (inList) MilkIcons.Bm else MilkIcons.BmO, { ctl.toggleWatchlist(a.id) })
+            WatchlistToggleButton(ctl, a.id)
         }
         val scroll = rememberScrollState()
 
@@ -208,10 +212,10 @@ fun DetailScreen(ctl: AppController, id: Int) {
             Column {
                 MilkText(
                     a.synopsis, ty.style(14f), c.onSurface, Modifier.fillMaxWidth(),
-                    maxLines = if (ctl.synopsisExpanded) Int.MAX_VALUE else 3, ellipsize = true,
+                    maxLines = if (synopsisExpanded) Int.MAX_VALUE else 3, ellipsize = true,
                 )
                 if (a.synopsis.length > 120) {
-                    LabelStrong(if (ctl.synopsisExpanded) tr.t("detail.collapse") else tr.t("detail.readMore"), { ctl.synopsisExpanded = !ctl.synopsisExpanded })
+                    LabelStrong(if (synopsisExpanded) tr.t("detail.collapse") else tr.t("detail.readMore"), { synopsisExpanded = !synopsisExpanded })
                 }
             }
 
@@ -222,10 +226,10 @@ fun DetailScreen(ctl: AppController, id: Int) {
             ) {
                 Row(Modifier.fillMaxWidth().height(48.dp)) {
                     DETAIL_TABS.forEach { t -> key(t) {
-                        val active = t == ctl.detailTab
+                        val active = t == detailTab
                         Box(
                             Modifier.weight(1f).height(48.dp)
-                                .milkClickable(pressDim = false) { ctl.detailTab = t },
+                                .milkClickable(pressDim = false) { detailTab = t },
                             contentAlignment = Alignment.Center,
                         ) {
                             MilkText(ctl.enumLabel("detailTab", t), ty.tab, if (active) accent else c.onSurfaceVariant)
@@ -239,7 +243,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(c.outlineVariant))
             }
 
-            when (ctl.detailTab) {
+            when (detailTab) {
                 "episodes" -> Column {
                     Row(Modifier.fillMaxWidth().heightIn(min = 32.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         MilkText(
@@ -261,7 +265,8 @@ fun DetailScreen(ctl: AppController, id: Int) {
                 }
                 "comments" -> Unit
                 else -> Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    val similarRows = remember(a.id, ctl.catalog) { ctl.similarOf(a).chunked(2) }
+                    val extrasForAnime = ctl.extrasOf(a.id)
+                    val similarRows = remember(a.id, ctl.catalog, extrasForAnime) { ctl.similarOf(a).chunked(2) }
                     similarRows.forEach { row ->
                         key(row.first().id) {
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -413,20 +418,8 @@ private fun EpisodeRow(ctl: AppController, a: Anime, ep: Int) {
         else -> tr.t("episode.notAired")
     }
 
-    val noIcon = st == Access.Ok && !(w && !ctl.isPremium())
-    @Composable
-    fun StateIcon() {
-        val m = Modifier.size(40.dp).clip(CircleShape)
-        when {
-            st == Access.Ok && w && !ctl.isPremium() ->
-                Box(m, contentAlignment = Alignment.Center) { MilkIcon(MilkIcons.Check, size = 24.dp, tint = c.success) }
-            st == Access.Ok -> Unit
-            else ->
-                Box(m, contentAlignment = Alignment.Center) {
-                    MilkIcon(if (st == Access.Early) MilkIcons.Crown else MilkIcons.Lock, size = 24.dp, tint = c.premiumText)
-                }
-        }
-    }
+    val isPrem = ctl.isPremium()
+    val noIcon = st == Access.Ok && !(w && !isPrem)
     Row(
         Modifier.fillMaxWidth().heightIn(min = 68.dp).padding(start = 12.dp, end = if (noIcon) 16.dp else 4.dp, top = 12.dp, bottom = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -464,8 +457,29 @@ private fun EpisodeRow(ctl: AppController, a: Anime, ep: Int) {
                 Clamp1(ctl.episodeTitleOf(a, ep), ty.style(16f, 500, 22f, .1f), c.onSurface, Modifier.fillMaxWidth())
                 if (sub != null) MilkText(sub, ty.caption, c.onSurfaceVariant)
             }
-            if (!noIcon) StateIcon()
+            if (!noIcon) EpisodeStateIcon(st = st, watched = w, isPremium = isPrem)
         }
+    }
+}
+
+@Composable
+private fun WatchlistToggleButton(ctl: AppController, animeId: Int) {
+    val inList by remember(ctl, animeId) { derivedStateOf { ctl.isInWatchlist(animeId) } }
+    MilkIconButton(if (inList) MilkIcons.Bm else MilkIcons.BmO, { ctl.toggleWatchlist(animeId) })
+}
+
+@Composable
+private fun EpisodeStateIcon(st: Access, watched: Boolean, isPremium: Boolean) {
+    val c = Milk.colors
+    val m = Modifier.size(40.dp).clip(CircleShape)
+    when {
+        st == Access.Ok && watched && !isPremium ->
+            Box(m, contentAlignment = Alignment.Center) { MilkIcon(MilkIcons.Check, size = 24.dp, tint = c.success) }
+        st == Access.Ok -> Unit
+        else ->
+            Box(m, contentAlignment = Alignment.Center) {
+                MilkIcon(if (st == Access.Early) MilkIcons.Crown else MilkIcons.Lock, size = 24.dp, tint = c.premiumText)
+            }
     }
 }
 

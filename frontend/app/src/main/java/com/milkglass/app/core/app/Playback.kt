@@ -3,10 +3,12 @@ package com.milkglass.app.core.app
 import androidx.compose.runtime.Stable
 
 import com.milkglass.app.core.data.DAY_MS
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlin.math.ceil
 import com.milkglass.app.core.model.Anime
 import com.milkglass.app.core.model.HistoryEntry
 import com.milkglass.app.core.remote.SkipTimes
@@ -90,20 +92,28 @@ class PlayerEngine(
     val duration: Int get() = nativeDurationSeconds ?: 0
     val opening: IntRange get() = anime.openingRange[0]..anime.openingRange[1]
     val ending: Pair<Double, Double> get() = endingRange(anime, duration)
-    val inOpening: Boolean get() = position >= anime.openingRange[0] && position < anime.openingRange[1]
-    val inEnding: Boolean get() = position >= ending.first && position < duration
 
-    val skipButtonKind: SkipKind? get() =
+    // Derived agar konsumen UI hanya rekomposisi saat transisi masuk/keluar segmen, bukan tiap 250ms.
+    val inOpening: Boolean by derivedStateOf { position >= anime.openingRange[0] && position < anime.openingRange[1] }
+    val inEnding: Boolean by derivedStateOf { duration > 0 && position >= ending.first && position < duration }
+    val skipButtonKind: SkipKind? by derivedStateOf {
         if (skipTimes == null) (if (inEnding) SkipKind.Ending else if (inOpening) SkipKind.Opening else null) else skipPrompt
+    }
+    val hasAd: Boolean by derivedStateOf { adSecondsLeft > 0.0 }
+    val hasNoticeTimer: Boolean by derivedStateOf { noticeTimer > 0.0 }
+    val noticeSecondsLeft: Int by derivedStateOf { ceil(noticeTimer).toInt().coerceAtLeast(0) }
+    val positionWholeSecond: Int by derivedStateOf { if (duration > 0) floor(position).toInt().coerceAtLeast(0) else 0 }
 
-    private val autoSkipOn: Boolean get() = ctl.features.autoSkip && ctl.persisted.settings.autoSkipOpeningEnding != 0
+    private var lastSavedWholeSecond: Int = -1
+    private val autoSkipOn: Boolean get() = ctl.autoSkipEnabled
 
     private fun isPlayerOffline(): Boolean =
         !ctl.online && !hasLocalDownload && ctl.persisted.downloads["${anime.id}.$episode"] != 100
 
     fun save() {
         if (!nativeStreamActive || duration <= 0) return
-        ctl.persisted = savePlayback(ctl.persisted, anime, episode, position, duration, ctl.now())
+        val next = savePlayback(ctl.persisted, anime, episode, position, duration, ctl.now())
+        if (next != ctl.persisted) ctl.persisted = next
     }
 
     fun onLeave() {
@@ -284,7 +294,11 @@ class PlayerEngine(
                 ctl.showToast(ctl.tr.t("player.endingSkipped"))
             }
         }
-        if (floor(position * 4).toLong() % 4 == 0L) save()
+        val wholeSec = floor(position).toInt()
+        if (wholeSec != lastSavedWholeSecond && wholeSec % 2 == 0) {
+            lastSavedWholeSecond = wholeSec
+            save()
+        }
         if (position >= duration) {
             onNativeEnded()
             return

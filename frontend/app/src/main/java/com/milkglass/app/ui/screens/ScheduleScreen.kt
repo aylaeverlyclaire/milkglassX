@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -61,45 +63,65 @@ fun ScheduleScreen(ctl: AppController, scroll: ScrollState) {
     val ty = Milk.type
     val tr = ctl.tr
     val time = ctl.time
-    val nowTs = ctl.nowMs
-
     val today = time.startOfDay(0)
-    val days = remember(ctl, today) { (0 until 7).map { ctl.scheduleForDay(it) } }
+    val days = remember(ctl.catalog, today) { (0 until 7).map { ctl.scheduleForDay(it) } }
     PageColumn(scroll) {
         (0 until 7).forEach { k ->
             key(k) {
-                val ds = time.startOfDay(k)
-                val items = days[k]
-                Column {
-
-                    Row(Modifier.padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MilkText(tr.locale.weekdaysLong[time.weekdayOf(ds)], ty.sectionTitle, c.onSurface, Modifier.alignByBaseline())
-                        MilkText(
-                            "${time.dayOfMonthOf(ds)} ${tr.locale.monthsShort[time.monthIndexOf(ds)]}${if (k == 0) " · " + tr.t("common.today") else ""}",
-                            ty.caption, c.onSurfaceVariant, Modifier.alignByBaseline(),
-                        )
-                    }
-                    if (items.isEmpty()) {
-                        MilkText(tr.t("schedule.noReleasesDay"), ty.caption, c.onSurfaceVariant)
-                    } else {
-                        val at = items.indexOfFirst { !ctl.hasAired(it.ts) }
-                        items.forEachIndexed { i, x ->
-                            if (k == 0 && i == (if (at < 0) items.size else at)) NowRow(ctl, nowTs)
-                            key("${x.a.id}.${x.ep}") {
-                                ScheduleRow(ctl, x, last = i == items.size - 1)
-                            }
-                        }
-                        if (k == 0 && at < 0) NowRow(ctl, nowTs)
-                    }
-                }
+                ScheduleDayColumn(ctl = ctl, dayOffset = k, items = days[k])
             }
         }
     }
 }
 
 @Composable
-private fun NowRow(ctl: AppController, nowTs: Long) {
+private fun ScheduleDayColumn(ctl: AppController, dayOffset: Int, items: List<ScheduleEntry>) {
     val c = Milk.colors
+    val ty = Milk.type
+    val tr = ctl.tr
+    val time = ctl.time
+    val ds = time.startOfDay(dayOffset)
+    Column {
+        Row(Modifier.padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MilkText(tr.locale.weekdaysLong[time.weekdayOf(ds)], ty.sectionTitle, c.onSurface, Modifier.alignByBaseline())
+            MilkText(
+                "${time.dayOfMonthOf(ds)} ${tr.locale.monthsShort[time.monthIndexOf(ds)]}${if (dayOffset == 0) " · " + tr.t("common.today") else ""}",
+                ty.caption, c.onSurfaceVariant, Modifier.alignByBaseline(),
+            )
+        }
+        if (items.isEmpty()) {
+            MilkText(tr.t("schedule.noReleasesDay"), ty.caption, c.onSurfaceVariant)
+        } else {
+            // Hanya hari ke-0 yang perlu mengamati perpindahan posisi garis "Sekarang".
+            val nowInsertIdx by remember(ctl, dayOffset, items) {
+                derivedStateOf {
+                    if (dayOffset != 0) -1
+                    else {
+                        val now = ctl.nowMs
+                        val firstUpcoming = items.indexOfFirst { it.ts > now }
+                        if (firstUpcoming < 0) items.size else firstUpcoming
+                    }
+                }
+            }
+            items.forEachIndexed { i, x ->
+                if (dayOffset == 0 && i == nowInsertIdx) {
+                    key("now") { NowRow(ctl) }
+                }
+                key("${x.a.id}.${x.ep}") {
+                    ScheduleRow(ctl, x, last = i == items.size - 1)
+                }
+            }
+            if (dayOffset == 0 && nowInsertIdx == items.size) {
+                key("now") { NowRow(ctl) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NowRow(ctl: AppController) {
+    val c = Milk.colors
+    val nowTs = ctl.nowMs
     TimelineRail(c.primary, c.primary, ctl.time.formatClock(nowTs), c.primary) {
         Box(Modifier.height(28.dp))
 
@@ -114,7 +136,7 @@ private fun ScheduleRow(ctl: AppController, e: ScheduleEntry, last: Boolean) {
     val tr = ctl.tr
     val time = ctl.time
     val a = e.a
-    val ok = ctl.hasAired(e.ts)
+    val ok by remember(ctl, e.ts) { derivedStateOf { e.ts <= ctl.nowMs } }
     TimelineRail(
         if (ok) c.outlineVariant else c.primary, if (ok) c.outlineVariant else c.primary,
         time.formatClock(e.ts), c.onSurfaceVariant,

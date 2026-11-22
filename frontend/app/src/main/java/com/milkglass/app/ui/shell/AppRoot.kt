@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -133,7 +134,7 @@ fun AppRoot(ctl: AppController) {
         onDispose { owner.lifecycle.removeObserver(obs) }
     }
 
-    val fullscreenPlayer = (ctl.viewStack.lastOrNull() as? ViewEntry.Player)?.engine?.isFullscreen == true
+    val fullscreenPlayer = ctl.isFullscreenPlayer
     Box(Modifier.fillMaxSize().background(c.surfaceVariant), contentAlignment = Alignment.TopCenter) {
         Box(
             if (fullscreenPlayer) {
@@ -149,7 +150,7 @@ fun AppRoot(ctl: AppController) {
         ) {
             when {
                 ctl.isBooting -> SplashScreen()
-                ctl.persisted.isAuthenticated == 0 -> LoginScreen(ctl)
+                !ctl.isAuthenticated -> LoginScreen(ctl)
                 else -> MainFlow(ctl)
             }
             OverlayHost(ctl)
@@ -163,6 +164,7 @@ fun AppRoot(ctl: AppController) {
 
 private enum class FxKind { Enter, Back }
 private data class PaneFx(val page: Int, val kind: FxKind, val token: Int)
+private data class ShownView(val index: Int, val entry: ViewEntry, val exitId: Int, val instanceId: Long)
 
 @Composable
 private fun MainFlow(ctl: AppController) {
@@ -170,25 +172,24 @@ private fun MainFlow(ctl: AppController) {
     val pagerState = rememberPagerState(initialPage = 1) { TAB_PAGES.size }
     val scrolls = rememberScrollStates(TAB_PAGES.size)
     val collScrolls = rememberScrollStates(4)
-    val activeTab = TAB_PAGES[pagerState.targetPage]
+    val activeTab by remember(pagerState) { derivedStateOf { TAB_PAGES[pagerState.targetPage] } }
 
     val activeTabNow: () -> String = remember(pagerState) { { TAB_PAGES[pagerState.targetPage] } }
     var fx by remember { mutableStateOf<PaneFx?>(null) }
     var fxCounter by remember { mutableStateOf(0) }
-    val tr = ctl.tr
 
     val holder = rememberSaveableStateHolder()
-    val topEntry = ctl.viewStack.lastOrNull()
-    var settledFor by remember { mutableStateOf<ViewEntry?>(null) }
-    LaunchedEffect(topEntry) {
-        if (topEntry is ViewEntry.Player) { delay(320); settledFor = topEntry } else settledFor = null
+    val topIsPlayer by remember(ctl) { derivedStateOf { ctl.viewStack.lastOrNull() is ViewEntry.Player } }
+    var settledForPlayer by remember { mutableStateOf(false) }
+    LaunchedEffect(topIsPlayer) {
+        if (topIsPlayer) { delay(320); settledForPlayer = true } else settledForPlayer = false
     }
 
-    val covered = topEntry is ViewEntry.Player && settledFor is ViewEntry.Player
+    val covered = topIsPlayer && settledForPlayer
 
     LaunchedEffect(activeTab) { if (activeTab != "profile") ctl.tabBeforeProfile = activeTab }
 
-    LaunchedEffect(activeTab, ctl.viewStack.size, ctl.persisted.collectionTab) { ctl.validateSelection(activeTab) }
+    LaunchedEffect(activeTab, ctl.viewStack.size, ctl.collectionTab) { ctl.validateSelection(activeTab) }
 
     val selectTab: (String) -> Unit = remember(pagerState, scope, scrolls) {
         { t ->
@@ -221,19 +222,7 @@ private fun MainFlow(ctl: AppController) {
     ) {
         if (!covered) holder.SaveableStateProvider("main") {
         Column(Modifier.fillMaxSize()) {
-            if (activeTab == "profile") {
-                TopBar(tr.t("common.profile"), bare = true, leading = { MilkIconButton(MilkIcons.Back, { closeProfile() }) })
-            } else {
-                val title = when (activeTab) {
-                    "home" -> "Milkglass"
-                    "schedule" -> tr.t("schedule.title")
-                    else -> ctl.enumLabel("mainTab", activeTab)
-                }
-                TopBar(title, bare = false) {
-                    MilkIconButton(MilkIcons.Search, { ctl.openSearch() })
-                    AvatarButton(ctl.meName.take(1).uppercase()) { openProfile() }
-                }
-            }
+            MainTopBar(ctl, activeTab, onOpenProfile = ::openProfile, onCloseProfile = ::closeProfile)
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier.weight(1f),
@@ -255,18 +244,31 @@ private fun MainFlow(ctl: AppController) {
         }
         }
 
-        val shown = ctl.viewStack.mapIndexed { i, e -> Triple(i, e, 0) } + ctl.exitingViews.map { Triple(it.index, it.entry, it.id) }
-        shown.sortedBy { it.first }.forEach { (idx, entry, exitId) ->
-            val compKey: Any = if (exitId == 0 && entry is ViewEntry.Player) "player" else entry
+        val shown by remember(ctl) {
+            derivedStateOf {
+                val active = ctl.viewStack.mapIndexed { i, e ->
+                    val instId = ctl.viewInstanceIds.getOrNull(i) ?: -(i + 1L)
+                    ShownView(i, e, 0, instId)
+                }
+                val exiting = ctl.exitingViews.map { ShownView(it.index, it.entry, it.id, it.instanceId) }
+                (active + exiting).sortedBy { it.index }
+            }
+        }
+        shown.forEach { (idx, entry, exitId, instanceId) ->
+            val isActivePlayer = exitId == 0 && entry is ViewEntry.Player
+            val compKey: Any = if (isActivePlayer) "player" else instanceId
             key(idx, compKey) {
-
                 if (!(covered && idx != ctl.viewStack.lastIndex)) {
-
-                    val stateKey = if (exitId == 0 && entry is ViewEntry.Player) "$idx:player" else "$idx:${System.identityHashCode(entry)}"
+                    val stateKey = if (isActivePlayer) "$idx:player" else "$idx:$instanceId"
                     holder.SaveableStateProvider(stateKey) {
-
                         DisposableEffect(stateKey) {
-                            onDispose { val cur = ctl.viewStack.getOrNull(idx); if (cur !== entry && !(entry is ViewEntry.Player && cur is ViewEntry.Player)) holder.removeState(stateKey) }
+                            onDispose {
+                                val curInst = ctl.viewInstanceIds.getOrNull(idx)
+                                val cur = ctl.viewStack.getOrNull(idx)
+                                if (curInst != instanceId && !(entry is ViewEntry.Player && cur is ViewEntry.Player)) {
+                                    holder.removeState(stateKey)
+                                }
+                            }
                         }
                         PushedView(
                             isNew = exitId == 0 && idx == ctl.viewStack.lastIndex && ctl.navKind == NavKind.Push,
@@ -285,6 +287,29 @@ private fun MainFlow(ctl: AppController) {
         }
         BackHandler(enabled = ctl.viewStack.isNotEmpty() || activeTab == "profile") {
             if (ctl.viewStack.isNotEmpty()) ctl.goBack() else closeProfile()
+        }
+    }
+}
+
+@Composable
+private fun MainTopBar(
+    ctl: AppController,
+    activeTab: String,
+    onOpenProfile: () -> Unit,
+    onCloseProfile: () -> Unit,
+) {
+    val tr = ctl.tr
+    if (activeTab == "profile") {
+        TopBar(tr.t("common.profile"), bare = true, leading = { MilkIconButton(MilkIcons.Back, onCloseProfile) })
+    } else {
+        val title = when (activeTab) {
+            "home" -> "Milkglass"
+            "schedule" -> tr.t("schedule.title")
+            else -> ctl.enumLabel("mainTab", activeTab)
+        }
+        TopBar(title, bare = false) {
+            MilkIconButton(MilkIcons.Search, { ctl.openSearch() })
+            AvatarButton(ctl.meName.take(1).uppercase(), onOpenProfile)
         }
     }
 }

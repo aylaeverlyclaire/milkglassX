@@ -105,7 +105,7 @@ class MainActivity : ComponentActivity() {
         }.start()
         setContent {
             val l = loaded.value
-            val mode = if (l != null) ThemeMode.fromKey(l.controller.persisted.settings.theme) else ThemeMode.System
+            val mode = if (l != null) ThemeMode.fromKey(l.controller.themeKey) else ThemeMode.System
             MilkTheme(mode) {
                 val dark = Milk.isDark
                 DisposableEffect(dark) {
