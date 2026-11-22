@@ -138,7 +138,7 @@ class AppController(
     private val firstCatalogLoad = kotlinx.coroutines.CompletableDeferred<Unit>().also { if (initialCatalog != null || catalogRepo == null) it.complete(Unit) }
     private var lastRefreshFailed = false
     private val searchedQueries = HashSet<String>()
-    private var animasuSearchResults by mutableStateOf<Map<String, List<Anime>>>(emptyMap())
+    private var liveSearchResults by mutableStateOf<Map<String, List<Anime>>>(emptyMap())
 
     /**
      * Hasil cek ketersediaan per anime. Dihitung di thread latar (pencocokan judul mahal) dan
@@ -349,13 +349,13 @@ class AppController(
         val query = q.trim()
         if (query.length < 2) return
         val normKey = normalizeText(query)
-        val key = "animasu:$normKey"
+        val key = "live:$normKey"
         if (key in searchedQueries) return
         searchedQueries.add(key)
         val universal = repo.searchUniversal(query)
         if (universal.isNotEmpty()) {
             mergeRemote(universal)
-            animasuSearchResults = animasuSearchResults + (normKey to universal.map { it.anime })
+            liveSearchResults = liveSearchResults + (normKey to universal.map { it.anime })
         }
     }
 
@@ -681,8 +681,8 @@ class AppController(
         val qCompact = q.replace(" ", "")
         val genre = searchGenre
         val vibe = searchVibe
-        val directAnimasu = if (q.isNotEmpty()) animasuSearchResults[q] else null
-        if (directAnimasu.isNullOrEmpty()) {
+        val directLive = if (q.isNotEmpty()) liveSearchResults[q] else null
+        if (directLive.isNullOrEmpty()) {
             searchMemoKey?.let { k ->
                 if (k.catalog === cat && k.q == q && k.genre == genre && k.vibe == vibe) return searchMemo
             }
@@ -699,8 +699,8 @@ class AppController(
         val localSorted = scored.sortedWith { (a, sa), (b, sb) ->
             if (sa != sb) sb.compareTo(sa) else b.rating.compareTo(a.rating)
         }.map { it.first }
-        if (!directAnimasu.isNullOrEmpty()) {
-            val primary = directAnimasu.filter { a ->
+        if (!directLive.isNullOrEmpty()) {
+            val primary = directLive.filter { a ->
                 (genre == "all" || a.genres.isEmpty() || a.genres.contains(genre)) &&
                     (vibe == "all" || a.genres.isEmpty() || vibesOf(a.genres).contains(vibe))
             }
