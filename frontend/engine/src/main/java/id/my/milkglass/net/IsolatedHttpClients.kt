@@ -505,10 +505,18 @@ class AntiSsrfNetworkInterceptor(
 }
 
 class CrossOriginRefererInterceptor : Interceptor {
+    private fun registrableDomain(host: String): String {
+        val parts = host.lowercase().split('.').filter { it.isNotBlank() }
+        return if (parts.size >= 2) "${parts[parts.size - 2]}.${parts[parts.size - 1]}" else host.lowercase()
+    }
+
     override fun intercept(chain: Interceptor.Chain): Response {
-        val originalHost = chain.call().request().url.host
+        val origUrl = chain.call().request().url
         val hop = chain.request()
-        val cleaned = if (hop.header("Referer") != null && hop.url.host != originalHost) {
+        val hopUrl = hop.url
+        val sameBaseDomain = registrableDomain(origUrl.host) == registrableDomain(hopUrl.host)
+        val bothHttps = origUrl.isHttps && hopUrl.isHttps
+        val cleaned = if (hop.header("Referer") != null && !sameBaseDomain && !bothHttps) {
             hop.newBuilder().removeHeader("Referer").build()
         } else {
             hop
@@ -643,7 +651,7 @@ class IsolatedHttpClients(
         .dispatcher(sharedDispatcher)
         .connectionPool(sharedConnectionPool)
         .addInterceptor(UncaughtExceptionInterceptor())
-        .addInterceptor(HostRateLimitInterceptor(maxPermitsPerWindow = 4, windowMs = 1000L))
+        .addInterceptor(HostRateLimitInterceptor(maxPermitsPerWindow = 8, windowMs = 1000L))
         .cookieJar(cookieBridge)
         .addInterceptor { chain ->
             val orig = chain.request()

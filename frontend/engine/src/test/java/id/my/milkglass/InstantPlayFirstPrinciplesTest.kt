@@ -205,4 +205,13 @@ class InstantPlayFirstPrinciplesTest {
         val movie = TitleMatcher.searchQueries("Pokemon Movie 12: Arceus and the Jewel of Life")
         assertTrue(movie.any { it.contains("Arceus and the Jewel of Life", ignoreCase = true) })
     }
+
+    @Test
+    fun trustedBinaryStreamEndpointsRecognizeCdnStreamsOnly() {
+        assertTrue(EmbedMediaSniffer.isPlayableMediaUrl("https://cdn.odcloud.net/stream/ep1.mp4?token=1"))
+        assertTrue(EmbedMediaSniffer.isTrustedBinaryStreamEndpoint("https://rr2---sn-i3belnll.googlevideo.com/videoplayback?id=1"))
+        assertTrue(EmbedMediaSniffer.isTrustedBinaryStreamEndpoint("https://cdn.odcloud.net/videos/14719/1.mp4"))
+        assertTrue(EmbedMediaSniffer.isTrustedBinaryStreamEndpoint("https://pixeldrain.com/api/file/abc123"))
+        assertFalse(EmbedMediaSniffer.isTrustedBinaryStreamEndpoint("https://otakudesu.blog/episode/test-ep-1/"))
+    }
 }
