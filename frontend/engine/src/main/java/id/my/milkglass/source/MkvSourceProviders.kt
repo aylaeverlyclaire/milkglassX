@@ -50,8 +50,19 @@ abstract class BaseHtmlMkvProvider(
                 }
                 val finalUrl = resp.request.url.toString()
                 val html = resp.body?.string().orEmpty()
-                if (StreamingFirstGuards.isWafBlockedHtml(html)) {
-                    throw IllegalStateException("WAF blocked dari $finalUrl")
+                val lowFinal = finalUrl.lowercase(Locale.ROOT)
+                val isIspBlocked = lowFinal.contains("internetpositif") ||
+                    lowFinal.contains("trustpositif") ||
+                    lowFinal.contains("uzone.id") ||
+                    lowFinal.contains("kominfo.go.id/block")
+                if (isIspBlocked || StreamingFirstGuards.isWafBlockedHtml(html)) {
+                    if (remoteHtmlFetcher != null) {
+                        val remoteHtml = runCatching { remoteHtmlFetcher?.invoke(url) }.getOrNull()
+                        if (!remoteHtml.isNullOrBlank()) {
+                            return Jsoup.parse(remoteHtml, url)
+                        }
+                    }
+                    throw IllegalStateException(if (isIspBlocked) "ISP blocked dari $finalUrl" else "WAF blocked dari $finalUrl")
                 }
                 Jsoup.parse(html, finalUrl)
             }
@@ -184,11 +195,22 @@ class OtakudesuSourceProvider(
                 }
             }
             SeriesEpisodeMapCache.putAll(priority, bestAnimeUrl, parsedMap)
+            val singleMovieEpUrl = if (episodeNumber == 1 && parsedMap.isEmpty()) {
+                val nonBatchEps = orderedEpLinks
+                    .map { it.absUrl("href") }
+                    .filter { it.contains("/episode/") && !it.contains("/batch/", ignoreCase = true) }
+                    .distinct()
+                if (nonBatchEps.size == 1) nonBatchEps.first() else null
+            } else null
+            if (singleMovieEpUrl != null) {
+                parsedMap.putIfAbsent(1, singleMovieEpUrl)
+                SeriesEpisodeMapCache.putAll(priority, bestAnimeUrl, parsedMap)
+            }
             epUrl = parsedMap[episodeNumber] ?: orderedEpLinks
                 .firstOrNull { a ->
                     val href = a.absUrl("href")
                     href.contains("/episode/") && TitleMatcher.matchesEpisode(a.text(), href, episodeNumber)
-                }?.absUrl("href") ?: return emptyList()
+                }?.absUrl("href") ?: singleMovieEpUrl ?: return emptyList()
         }
 
         val epDoc = runCatching { fetchDoc(epUrl, bestAnimeUrl) }.getOrElse {
@@ -252,7 +274,8 @@ class OtakudesuSourceProvider(
         val mirrorLinks = epDoc.select("ul.m360p li a[data-content], ul.m480p li a[data-content], ul.m720p li a[data-content]")
         if (mirrorLinks.isEmpty()) return out
         val nonce = runCatching {
-            val form = okhttp3.FormBody.Builder().add("action", "aa1208d27f29ca340c92c66d1926f13f").build()
+            val nonceAction = RemoteRulesStore.globalSelectorFor(SourcePriority.OTAKUDESU, "ajax_nonce_action", "aa1208d27f29ca340c92c66d1926f13f")
+            val form = okhttp3.FormBody.Builder().add("action", nonceAction).build()
             val req = Request.Builder()
                 .url("$root/wp-admin/admin-ajax.php")
                 .post(form)
@@ -265,10 +288,24 @@ class OtakudesuSourceProvider(
             }
         }.getOrNull() ?: return out
 
-        for (a in mirrorLinks) {
+        // Prioritaskan mirror sehat & cepat (odstream -> odcdn -> filedon -> otakuwatch),
+        // dan fail-fast skip mirror rusak/jebakan iklan (vidhide, ondesuhd, moedesu, nekocloud, mega).
+        val deadOrAdMirrorTokens = listOf("vidhide", "ondesuhd", "moedesu", "nekocloud", "mega", "yourupload")
+        val rankedMirrors = mirrorLinks.sortedBy { a ->
+            val low = a.text().trim().lowercase(Locale.ROOT)
+            when {
+                low.contains("odstream") -> 0
+                low.contains("odcdn") -> 1
+                low.contains("filedon") -> 2
+                low.contains("otakuwatch") -> 3
+                else -> 10
+            }
+        }
+        for (a in rankedMirrors) {
             if (out.size >= 3) break
             val label = a.text().trim()
-            if (HosterFilter.isBlacklisted(label, label) || label.contains("nekocloud", ignoreCase = true)) continue
+            val lowLabel = label.lowercase(Locale.ROOT)
+            if (HosterFilter.isBlacklisted(label, label) || deadOrAdMirrorTokens.any { lowLabel.contains(it) }) continue
             val ulClass = a.parents().firstOrNull { it.tagName() == "ul" }?.className().orEmpty()
             val quality = MkvQuality.fromText(ulClass) ?: MkvQuality.P720
             if (quality !in targetQualities) continue
@@ -286,7 +323,7 @@ class OtakudesuSourceProvider(
                     .add("i", i)
                     .add("q", q)
                     .add("nonce", nonce)
-                    .add("action", "2a3505c93b0035d3f455df82bf976b84")
+                    .add("action", RemoteRulesStore.globalSelectorFor(SourcePriority.OTAKUDESU, "ajax_mirror_action", "2a3505c93b0035d3f455df82bf976b84"))
                     .build()
                 val req = Request.Builder()
                     .url("$root/wp-admin/admin-ajax.php")
@@ -343,12 +380,18 @@ class SamehadakuSourceProvider(
         var searchUrl = "$root/"
         if (bestAnimeUrl == null) {
             for (q in TitleMatcher.searchQueries(animeTitle)) {
-                searchUrl = "$root/?s=${encodeQuery(q)}&post_type=anime"
+                searchUrl = "$root/?s=${encodeQuery(q)}"
                 val searchDoc = fetchDoc(searchUrl, "$root/")
-                bestAnimeUrl = searchDoc.select("div.animposx > a[href], article.animpost div.animposx > a[href], article.animepost div.animposx a[href]")
+                val shSearchSel = RemoteRulesStore.globalSelectorFor(
+                    SourcePriority.SAMEHADAKU,
+                    "search_item",
+                    ".listupd .bs .bsx > a[href], article.bs .bsx a[href], div.animposx > a[href], article.animpost div.animposx > a[href], article.animepost div.animposx a[href], a[href*='/anime/']"
+                )
+                bestAnimeUrl = searchDoc.select(shSearchSel)
                     .mapNotNull { a ->
                         val href = a.absUrl("href")
-                        val title = a.selectFirst(".data .title h2")?.text()?.trim()
+                        if (!href.contains("/anime/")) return@mapNotNull null
+                        val title = a.selectFirst(".tt, h2, .data .title h2")?.text()?.trim()
                             ?.takeIf { it.isNotBlank() }
                             ?: a.attr("title").ifBlank { a.text() }.trim()
                         if (href.isBlank() || title.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
@@ -390,7 +433,8 @@ class SamehadakuSourceProvider(
             }
             slugCache?.put(priority, animeTitle, seriesUrl)
 
-            val epRows = animeDoc.select("div.lstepsiode.listeps ul li, .listeps ul li, .lstepsiode ul li, .episode-lainnya ul li")
+            val shEpSel = RemoteRulesStore.globalSelectorFor(SourcePriority.SAMEHADAKU, "episode_row", "div.eplister ul li, .eplister ul li, div.lstepsiode.listeps ul li, .listeps ul li, .lstepsiode ul li, .episode-lainnya ul li")
+            val epRows = animeDoc.select(shEpSel)
             val parsedMap = linkedMapOf<Int, String>()
             epRows.forEach { li ->
                 val badgeNum = li.selectFirst(".epsright, .epl-num, .shrink-0 a, .shrink-0 div")
@@ -413,7 +457,23 @@ class SamehadakuSourceProvider(
                 ?: animeDoc.select("a[href*='-episode-']").firstOrNull { a ->
                     TitleMatcher.matchesEpisode(a.text(), a.absUrl("href"), episodeNumber)
                 }?.absUrl("href")
-                ?: return emptyList()
+                ?: run {
+                    if (episodeNumber == 1 && parsedMap.isEmpty() && epRows.size == 1) {
+                        val singleHref = epRows.first()?.selectFirst("h4 a[href], .lchx a[href], a[href]")?.absUrl("href")
+                        if (!singleHref.isNullOrBlank() && singleHref.startsWith("http") && !singleHref.contains("/batch/", ignoreCase = true)) {
+                            return@run singleHref
+                        }
+                    }
+                    null
+                }
+                ?: run {
+                    // Fallback lintas cour: jika ep > 12 tidak ada di halaman Part 1 (mis. Tensura S2 gabungan 24 ep
+                    // dari Otakudesu jatuh ke Samehadaku yang memisah Part 2), coba cari "$animeTitle Part 2" ep - 12.
+                    if (episodeNumber > 12 && !animeTitle.contains("part", ignoreCase = true) && !animeTitle.contains("cour", ignoreCase = true)) {
+                        return findEpisodeMkvCandidates("$animeTitle Part 2", episodeNumber - 12, targetQualities)
+                    }
+                    return emptyList()
+                }
         }
 
         val epDoc = runCatching { fetchDoc(epUrl, seriesUrl) }.getOrElse {
@@ -462,7 +522,43 @@ class SamehadakuSourceProvider(
     ): List<RawMkvCandidate> {
         val seenUrls = existing.mapTo(HashSet()) { it.rawUrl }
         val out = mutableListOf<RawMkvCandidate>()
-        for (ifr in epDoc.select("#player_embed iframe[src], .player-embed iframe[src], iframe[src]")) {
+
+        // 1. Themesia/samehadaku.li Select Video Server (<select class="mirror"> dengan value base64 atau URL)
+        for (opt in epDoc.select("select.mirror option[value], select[name='mirror'] option[value], .mobius select option[value]")) {
+            val rawVal = opt.attr("value").trim()
+            if (rawVal.isBlank()) continue
+            val label = opt.text().trim()
+            if (HosterFilter.isBlacklisted(label, rawVal)) continue
+            val decodedSrc = when {
+                rawVal.startsWith("http://") || rawVal.startsWith("https://") -> rawVal
+                rawVal.length >= 16 -> runCatching {
+                    val html = String(Base64.getDecoder().decode(rawVal), Charsets.UTF_8)
+                    Jsoup.parse(html, root).selectFirst("iframe[src], source[src]")?.absUrl("src")?.trim()
+                }.getOrNull()
+                else -> null
+            }
+            if (!decodedSrc.isNullOrBlank() && decodedSrc.startsWith("http") &&
+                !HosterFilter.isBlacklisted(label, decodedSrc) && seenUrls.add(decodedSrc)
+            ) {
+                val q = MkvQuality.fromText("$label $decodedSrc") ?: MkvQuality.P720
+                if (q in targetQualities) {
+                    out.add(
+                        RawMkvCandidate(
+                            source = priority,
+                            quality = q,
+                            hosterLabel = label.ifBlank { "SamehadakuMirror" },
+                            rawUrl = decodedSrc,
+                            pageReferer = epUrl,
+                            container = MediaContainer.MP4,
+                            isStreamEmbed = true
+                        )
+                    )
+                }
+            }
+        }
+
+        // 2. Iframe embed langsung di halaman episode
+        for (ifr in epDoc.select("#embed_holder iframe[src], .video-content iframe[src], #player_embed iframe[src], .player-embed iframe[src], iframe[src]")) {
             val src = ifr.absUrl("src").trim()
             if (src.startsWith("http") && !HosterFilter.isBlacklisted("Embed", src) && seenUrls.add(src)) {
                 val q = MkvQuality.fromText(src) ?: MkvQuality.P1080

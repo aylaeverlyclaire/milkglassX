@@ -98,6 +98,7 @@ const ALLOWED_HOST_SUFFIXES = [
   'otakudesu.blog',
   'otakudesu.cloud',
   'otakudesu.best',
+  'samehadaku.li',
   'samehadaku.how',
   'samehadaku.email',
   'samehadaku.mba',

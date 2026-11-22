@@ -89,8 +89,8 @@ class SourceAvailabilityIndex(
         val fetchedBySource = linkedMapOf<SourcePriority, List<IndexedAnimeEntry>>()
         try {
             val tasks = listOf(
-                SourcePriority.SAMEHADAKU to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchSamehadakuIndex() }.getOrDefault(emptyList()) },
-                SourcePriority.OTAKUDESU to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchOtakudesuIndex() }.getOrDefault(emptyList()) }
+                SourcePriority.OTAKUDESU to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchOtakudesuIndex() }.getOrDefault(emptyList()) },
+                SourcePriority.SAMEHADAKU to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchSamehadakuIndex() }.getOrDefault(emptyList()) }
             )
             for ((src, fut) in tasks) {
                 val list = runCatching { fut.get(20, TimeUnit.SECONDS) }.getOrNull().orEmpty()

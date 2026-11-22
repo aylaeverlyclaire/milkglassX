@@ -6,12 +6,14 @@ import { fileURLToPath } from 'node:url';
 import {
   ALLOWED_CATALOG_PROVIDERS,
   applyAniListEnrichment,
+  canonicalCatalogKey,
   chunk,
   fetchWithRetry,
   isStrictIdentityMatch,
   mergeProviderCatalogs,
   minUnique,
   parseOtakudesuCatalog,
+  parseOtakudesuSchedule,
   parseSamehadakuCatalog,
   retryAfterMs,
 } from './lib/catalog-sync.mjs';
@@ -26,8 +28,8 @@ test('ALLOWED_CATALOG_PROVIDERS hanya berisi samehadaku dan otakudesu', () => {
 
 test('mergeProviderCatalogs: hanya menggabungkan Samehadaku & Otakudesu, menolak provider lain', () => {
   const same = parseSamehadakuCatalog(`
-    <a href="https://v2.samehadaku.how/anime/sousou-no-frieren/">Sousou no Frieren Sub Indo</a>
-    <a href="https://v2.samehadaku.how/anime/solo-leveling/">Solo Leveling</a>
+    <a href="https://samehadaku.li/anime/sousou-no-frieren/">Sousou no Frieren Sub Indo</a>
+    <a href="https://samehadaku.li/anime/solo-leveling/">Solo Leveling</a>
   `);
   const otaku = parseOtakudesuCatalog(`
     <a class="hodebgst" href="https://otakudesu.blog/anime/frieren-sub-indo/">Sousou no Frieren Subtitle Indonesia</a>
@@ -43,7 +45,7 @@ test('mergeProviderCatalogs: hanya menggabungkan Samehadaku & Otakudesu, menolak
   const frieren = merged.find((x) => x.title === 'Sousou no Frieren');
   assert.ok(frieren);
   assert.deepEqual(frieren.source_urls, {
-    samehadaku: 'https://v2.samehadaku.how/anime/sousou-no-frieren/',
+    samehadaku: 'https://samehadaku.li/anime/sousou-no-frieren/',
     otakudesu: 'https://otakudesu.blog/anime/frieren-sub-indo/',
   });
   assert.equal(merged.some((x) => x.title.includes('Unknown') || x.title.includes('AniList')), false);
@@ -59,7 +61,7 @@ test('isStrictIdentityMatch menegakkan Law of Identity untuk season, part, dan m
 test('applyAniListEnrichment hanya mengisi anime_id, mal_id, total eps, rating, dan poster tanpa mengubah source_urls', () => {
   const base = {
     title: 'Sousou no Frieren',
-    source_urls: { samehadaku: 'https://v2.samehadaku.how/anime/sousou-no-frieren/' },
+    source_urls: { samehadaku: 'https://samehadaku.li/anime/sousou-no-frieren/' },
   };
   const enriched = applyAniListEnrichment(base, {
     id: 154587,
@@ -142,10 +144,10 @@ test('integrasi: katalog hanya dari Samehadaku + Otakudesu, AniList hanya enrich
   let anilistQueries = 0;
 
   const providerSrv = await listen((req, res) => {
-    if (req.url.startsWith('/daftar-anime-2/')) {
+    if (req.url.startsWith('/az-list/') || req.url.startsWith('/daftar-anime-2/')) {
       res.writeHead(200, { 'Content-Type': 'text/html' }).end(`
-        <a href="https://v2.samehadaku.how/anime/frieren/">Sousou no Frieren</a>
-        <a href="https://v2.samehadaku.how/anime/solo-leveling/">Solo Leveling</a>
+        <a href="https://samehadaku.li/anime/frieren/">Sousou no Frieren</a>
+        <a href="https://samehadaku.li/anime/solo-leveling/">Solo Leveling</a>
       `);
       return;
     }
@@ -245,4 +247,114 @@ test('evaluateStatus: sehat, basi, belum pernah sinkron, terlalu sedikit', () =>
   assert.match(evaluateStatus({ ...ok, stale: true, age_sec: null, synced_at: null }, 300)[0], /belum pernah/);
   assert.match(evaluateStatus({ ...ok, total: 120 }, 300)[0], /terlalu sedikit: 120 < 300/);
   assert.equal(evaluateStatus(null, 300).length, 1);
+});
+
+test('parseOtakudesuCatalog & parseOtakudesuSchedule: buang suffix On-Going, set status 1/2, dan petakan jadwal Senin-Minggu', () => {
+  const list = parseOtakudesuCatalog(`
+    <a class="hodebgst" href="https://otakudesu.blog/anime/black-clover-s2-sub-indo/">Black Clover Season 2 On-Going</a>
+    <a class="hodebgst" href="https://otakudesu.blog/anime/frieren-sub-indo/">Sousou no Frieren</a>
+  `);
+  assert.equal(list[0].title, 'Black Clover Season 2');
+  assert.equal(list[0].status, 1);
+  assert.equal(list[1].title, 'Sousou no Frieren');
+  assert.equal(list[1].status, 2);
+
+  const sched = parseOtakudesuSchedule(`
+    <h2>Minggu</h2><ul><li><a href="https://otakudesu.blog/anime/black-clover-s2-sub-indo/">Black Clover Season 2</a></li></ul>
+    <h2>Jumat</h2><ul><li><a href="https://otakudesu.blog/anime/one-piece-sub-indo/">One Piece</a></li></ul>
+  `);
+  const merged = mergeProviderCatalogs([list], sched);
+  assert.equal(merged[0].schedule_day, 7);
+  assert.equal(merged[0].status, 1);
+  assert.equal(merged[1].schedule_day, undefined);
+  assert.equal(merged[1].status, 2);
+});
+
+test('Law of Identity: Date A Live Romawi/+OVA, Tensura side-story, dan Mushoku Tensei multi-cour', () => {
+  assert.equal(isStrictIdentityMatch('Date A Live Season 2', 'Date A Live II'), true);
+  assert.equal(isStrictIdentityMatch('Date A Live BD (Episode 1 – 12) Subtitle Indonesia + OVA', 'Date A Live'), true);
+  assert.equal(isStrictIdentityMatch('Date A Live II BD (Episode 1 – 10) Subtitle Indonesia + OVA', 'Date A Live II'), true);
+  assert.equal(isStrictIdentityMatch('Date A Live', 'Date A Bullet: Dead or Bullet'), false);
+  assert.equal(isStrictIdentityMatch('Tensei shitara Slime Datta Ken', 'Tensura Nikki: Tensei shitara Slime Datta Ken'), false);
+  assert.equal(isStrictIdentityMatch('Tensei shitara Slime Datta Ken', 'Tensei shitara Slime Datta Ken: Coleus no Yume'), false);
+  assert.equal(isStrictIdentityMatch('Mushoku Tensei II: Isekai Ittara Honki Dasu', 'Mushoku Tensei II: Isekai Ittara Honki Dasu Part 2'), false);
+  assert.equal(isStrictIdentityMatch('Mushoku Tensei Season 2 Part 2', 'Mushoku Tensei II: Isekai Ittara Honki Dasu Part 2'), true);
+});
+
+test('canonicalCatalogKey menyatukan Date A Live II & Season 2 tanpa duplikat, tapi memisahkan S1 & side story', () => {
+  assert.equal(canonicalCatalogKey('Date A Live II BD (Episode 1 – 10) Subtitle Indonesia + OVA'), canonicalCatalogKey('Date A Live Season 2'));
+  assert.equal(canonicalCatalogKey('Date A Live 2nd Season'), canonicalCatalogKey('Date A Live Season 2'));
+  assert.notEqual(canonicalCatalogKey('Date A Live'), canonicalCatalogKey('Date A Live II'));
+  assert.notEqual(canonicalCatalogKey('Date A Live'), canonicalCatalogKey('Date A Bullet'));
+
+  const merged = mergeProviderCatalogs([
+    [{ title: 'Date A Live II BD (Episode 1 – 10) Subtitle Indonesia + OVA', url: 'https://otakudesu.blog/anime/dal-s2/', provider: 'otakudesu', status: 2 }],
+    [{ title: 'Date A Live Season 2', url: 'https://samehadaku.li/anime/date-a-live-s2/', provider: 'samehadaku' }],
+  ]);
+  assert.equal(merged.length, 1);
+  assert.ok(merged[0].source_urls.otakudesu);
+  assert.ok(merged[0].source_urls.samehadaku);
+});
+
+test('integrasi: hasil scrape di bawah MIN_UNIQUE tidak boleh mengirim prune=true (lindungi katalog existing)', async () => {
+  const posts = [];
+  const providerSrv = await listen((req, res) => {
+    if (req.url.startsWith('/anime-list/')) {
+      res.writeHead(200, { 'Content-Type': 'text/html' }).end('<a class="hodebgst" href="https://otakudesu.blog/anime/only-one/">Only One Anime</a>');
+      return;
+    }
+    res.writeHead(503).end('down');
+  });
+  const workerSrv = await listen(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/v1/internal/catalog-list') {
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ status: 'ok', data: [] }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/v1/internal/sync-source-catalog') {
+      const body = JSON.parse(await readBody(req));
+      posts.push(body);
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ status: 'ok', updated: 0, inserted: body.items.length, pruned: body.prune }));
+      return;
+    }
+    res.writeHead(404).end('not found');
+  });
+  try {
+    const r = await runScript({
+      WORKER_URL: workerSrv.url,
+      ADMIN_SECRET: 'x'.repeat(20),
+      SAMEHADAKU_BASE_URL: providerSrv.url,
+      OTAKUDESU_BASE_URL: providerSrv.url,
+      ANILIST_URL: providerSrv.url,
+      SCOPE: 'ongoing',
+      MIN_UNIQUE: '10',
+      MAX_ENRICH: '0',
+    });
+    assert.equal(r.code, 1, r.out);
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].prune, false);
+  } finally {
+    providerSrv.srv.close();
+    workerSrv.srv.close();
+  }
+});
+
+test('applyAniListEnrichment mempertahankan anime_id wadah yang sudah ada agar riwayat tonton tidak putus', () => {
+  const existingRow = {
+    anime_id: 912345678,
+    title: 'Sousou no Frieren',
+    source_urls: { otakudesu: 'https://otakudesu.blog/anime/frieren-sub-indo/' },
+  };
+  const enriched = applyAniListEnrichment(existingRow, {
+    id: 154587,
+    idMal: 52991,
+    title: { romaji: 'Sousou no Frieren', english: "Frieren: Beyond Journey's End" },
+    episodes: 28,
+    averageScore: 91,
+    genres: ['Adventure', 'Fantasy'],
+    coverImage: { large: 'https://s4.anilist.co/frieren.jpg' },
+  });
+  assert.equal(enriched.anime_id, 912345678);
+  assert.equal(enriched.mal_id, 52991);
+  assert.equal(enriched.score, 9.1);
+  assert.equal(enriched.poster_url, 'https://s4.anilist.co/frieren.jpg');
 });

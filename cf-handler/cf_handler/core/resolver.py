@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from html.parser import HTMLParser
 import re
 import time
@@ -17,12 +18,15 @@ IP_AGNOSTIC_HOSTS = (
 IP_LOCKED_HOSTS = (
     "gofile.io",
     "odfiles.",
+    "odstream.",
+    "odcdn.",
+    "otakuwatch",
     "desustream.",
     "ondesu.",
     "desudrive.",
+    "icefile.web.id",
     "mp4upload.",
     "filemoon.",
-    "vidhide.",
     "streamwish.",
     "blogger.com",
 )
@@ -39,11 +43,17 @@ BLACKLIST_HOSTS = (
     "youtu.be",
     "saweria.co",
     "trakteer.id",
+    "vidhide.",
+    "ondesuhd.",
+    "moedesu.",
+    "nekocloud",
+    "otakufiles.",
+    "vikingfile.",
 )
 
 DEFAULT_SOURCE_ORDER: Tuple[str, ...] = (
-    "samehadaku",
     "otakudesu",
+    "samehadaku",
 )
 
 _RESOLVE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -71,10 +81,14 @@ class _AnchorIframeParser(HTMLParser):
         super().__init__()
         self.anchors: List[Tuple[str, str, str]] = []
         self.iframes: List[str] = []
+        self.options: List[Tuple[str, str]] = []
         self._in_a = False
         self._cur_href = ""
         self._cur_title = ""
         self._cur_text: List[str] = []
+        self._in_opt = False
+        self._cur_opt_val = ""
+        self._cur_opt_text: List[str] = []
         self._ctx_text: List[str] = []
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
@@ -85,6 +99,10 @@ class _AnchorIframeParser(HTMLParser):
             self._cur_href = attr_map.get("href", "").strip()
             self._cur_title = attr_map.get("title", "").strip()
             self._cur_text = []
+        elif t == "option":
+            self._in_opt = True
+            self._cur_opt_val = attr_map.get("value", "").strip()
+            self._cur_opt_text = []
         elif t == "iframe":
             src = (attr_map.get("src") or attr_map.get("data-src") or "").strip()
             if src:
@@ -98,12 +116,15 @@ class _AnchorIframeParser(HTMLParser):
             return
         if self._in_a:
             self._cur_text.append(clean)
+        elif self._in_opt:
+            self._cur_opt_text.append(clean)
         else:
             if len(self._ctx_text) < 8:
                 self._ctx_text.append(clean)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "a" and self._in_a:
+        tl = tag.lower()
+        if tl == "a" and self._in_a:
             text = " ".join(self._cur_text).strip() or self._cur_title
             ctx = " ".join(self._ctx_text).strip()
             if self._cur_href:
@@ -112,6 +133,12 @@ class _AnchorIframeParser(HTMLParser):
             self._cur_href = ""
             self._cur_title = ""
             self._cur_text = []
+        elif tl == "option" and self._in_opt:
+            if self._cur_opt_val:
+                self.options.append((self._cur_opt_val, " ".join(self._cur_opt_text).strip()))
+            self._in_opt = False
+            self._cur_opt_val = ""
+            self._cur_opt_text = []
 
 
 def _extract_season(raw: str) -> Optional[int]:
@@ -278,7 +305,7 @@ async def _resolve_from_source(
     cf_handler: Any,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     root = base_url.rstrip("/")
-    search_url = f"{root}/?s={quote_plus(title)}&post_type=anime" if source_id in ("otakudesu", "samehadaku") else f"{root}/?s={quote_plus(title)}"
+    search_url = f"{root}/?s={quote_plus(title)}&post_type=anime" if source_id == "otakudesu" else f"{root}/?s={quote_plus(title)}"
     search_html = await _fetch_html(session, search_url, f"{root}/", cf_handler)
     if not search_html:
         return ([], [])
@@ -304,11 +331,18 @@ async def _resolve_from_source(
     ep_parser = _AnchorIframeParser()
     ep_parser.feed(series_html)
     ep_url: Optional[str] = None
+    single_ep_candidates: List[str] = []
     for href, text, _ in ep_parser.anchors:
         abs_url = urljoin(best_series, href)
-        if abs_url.startswith("http") and _matches_episode(text, abs_url, ep):
+        if not abs_url.startswith("http"):
+            continue
+        if "/episode/" in abs_url.lower() and "/batch/" not in abs_url.lower() and abs_url not in single_ep_candidates:
+            single_ep_candidates.append(abs_url)
+        if _matches_episode(text, abs_url, ep):
             ep_url = abs_url
             break
+    if not ep_url and ep == 1 and len(single_ep_candidates) == 1:
+        ep_url = single_ep_candidates[0]
     if not ep_url:
         return ([], [])
 
@@ -347,6 +381,40 @@ async def _resolve_from_source(
                     "ip_locked": True,
                 }
             )
+
+    ep_host = (urlparse(ep_url).hostname or "").lower()
+    for opt_val, opt_label in cand_parser.options:
+        decoded_src: Optional[str] = None
+        if opt_val.startswith("http://") or opt_val.startswith("https://"):
+            oh = (urlparse(opt_val).hostname or "").lower()
+            if oh == ep_host or "/episode/" in opt_val.lower() or "/anime/" in opt_val.lower() or "subtitle-indonesia" in opt_val.lower():
+                continue
+            decoded_src = opt_val
+        elif len(opt_val) >= 16 and re.fullmatch(r"[A-Za-z0-9+/=]+", opt_val):
+            try:
+                raw_html = base64.b64decode(opt_val).decode("utf-8", errors="ignore")
+                m = re.search(r"""(?:src|data-src)=["'](https?://[^"']+)["']""", raw_html, re.I)
+                if m:
+                    decoded_src = m.group(1).strip()
+            except Exception:
+                decoded_src = None
+        if not decoded_src or decoded_src in seen:
+            continue
+        oh = (urlparse(decoded_src).hostname or "").lower()
+        if any(b in oh for b in BLACKLIST_HOSTS):
+            continue
+        seen.add(decoded_src)
+        ip_locked_list.append(
+            {
+                "source": source_id,
+                "quality": _detect_quality(f"{opt_label} {decoded_src}", decoded_src),
+                "hoster": opt_label or oh or "MirrorEmbed",
+                "raw_url": decoded_src,
+                "referer": ep_url,
+                "container": "MP4",
+                "ip_locked": True,
+            }
+        )
 
     for iframe_src in cand_parser.iframes:
         abs_src = urljoin(ep_url, iframe_src)

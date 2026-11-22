@@ -113,6 +113,7 @@ const ENRICH_MEDIA_FIELDS = `
   averageScore
   episodes
   genres
+  synonyms
   coverImage {
     extraLarge
     large
@@ -184,10 +185,11 @@ const ENRICH_ANIME_SQL = `
     title_alt = COALESCE(NULLIF(?3, ''), title_alt),
     score = CASE WHEN ?4 > 0 THEN ?4 ELSE score END,
     poster_url = COALESCE(NULLIF(?5, ''), poster_url),
-    episodes_total = CASE WHEN ?6 > 0 THEN ?6 ELSE episodes_total END,
+    episodes_total = CASE WHEN ?6 > episodes_total THEN ?6 ELSE episodes_total END,
     genres_json = CASE WHEN ?7 != '[]' THEN ?7 ELSE genres_json END,
-    updated_at = ?8
-  WHERE id = ?9
+    synonyms_json = CASE WHEN ?8 != '[]' THEN ?8 ELSE synonyms_json END,
+    updated_at = ?9
+  WHERE id = ?10
     AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
 `;
 
@@ -205,6 +207,9 @@ export function bindAnimeEnrichOnly(
   const genres = Array.isArray(item.genres)
     ? item.genres.filter((g): g is string => typeof g === 'string' && g.trim().length > 0)
     : [];
+  const synonyms = Array.isArray(item.synonyms)
+    ? item.synonyms.filter((x): x is string => typeof x === 'string' && x.trim().length > 1).slice(0, 12)
+    : [];
   return db
     .prepare(ENRICH_ANIME_SQL)
     .bind(
@@ -215,6 +220,7 @@ export function bindAnimeEnrichOnly(
       posterUrl,
       episodesTotal,
       JSON.stringify(genres),
+      JSON.stringify(synonyms),
       nowSec,
       targetAnimeId
     );
@@ -311,12 +317,17 @@ function normalizeIdentityTitle(raw: string): string {
     .replace(/\s+/g, ' ');
 }
 
-function extractSeasonTag(norm: string): number {
+const ROMAN_SEASON_MAP: Record<string, number> = { ii: 2, iii: 3, iv: 4, v: 5 };
+
+function extractSeasonTag(rawTitle: string, norm: string): number {
   const m =
     norm.match(/\bseason\s*(\d+)\b/) ||
     norm.match(/\bs(\d+)\b/) ||
-    norm.match(/\b(\d+)(?:nd|rd|th)\s+season\b/);
-  return m ? Number.parseInt(m[1], 10) : 1;
+    norm.match(/\b(\d+)(?:st|nd|rd|th)\s+season\b/);
+  if (m) return Number.parseInt(m[1], 10);
+  const roman = rawTitle.match(/\b(II|III|IV|V)\b/);
+  if (roman) return ROMAN_SEASON_MAP[roman[1].toLowerCase()] ?? 1;
+  return 1;
 }
 
 function extractPartTag(norm: string): number {
@@ -324,23 +335,47 @@ function extractPartTag(norm: string): number {
   return m ? Number.parseInt(m[1], 10) : 0;
 }
 
+function extractFormatKind(norm: string): string {
+  if (/\b(?:movie|gekijouban|film)\b/.test(norm)) return 'MOVIE';
+  if (/\b(?:ova|oad)\b/.test(norm)) return 'OVA';
+  if (/\b(?:side\s*story|gaiden|spin\s*off|nikki|diaries|coleus|bullet)\b/.test(norm)) return 'SIDE_STORY';
+  if (/\b(?:special|recap)\b/.test(norm)) return 'SPECIAL';
+  return 'TV';
+}
+
+function stripSeasonAndPart(norm: string): string {
+  return norm
+    .replace(/\bseason\s*\d+\b/g, ' ')
+    .replace(/\bs\d+\b/g, ' ')
+    .replace(/\b\d+(?:st|nd|rd|th)\s+season\b/g, ' ')
+    .replace(/\b(?:ii|iii|iv|v)\b/g, ' ')
+    .replace(/\b(?:part|cour)\s*\d+\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function isStrictTitleMatch(sourceTitle: string, candidateTitle: string): boolean {
-  const a = normalizeIdentityTitle(sourceTitle);
-  const b = normalizeIdentityTitle(candidateTitle);
+  const cleanA = sourceTitle.replace(/\+\s*(?:ova|oad|special)\b/gi, ' ');
+  const cleanB = candidateTitle.replace(/\+\s*(?:ova|oad|special)\b/gi, ' ');
+  const a = normalizeIdentityTitle(cleanA);
+  const b = normalizeIdentityTitle(cleanB);
   if (!a || !b) return false;
-  if (extractSeasonTag(a) !== extractSeasonTag(b)) return false;
+  if (extractFormatKind(a) !== extractFormatKind(b)) return false;
+  if (extractSeasonTag(cleanA, a) !== extractSeasonTag(cleanB, b)) return false;
   if (extractPartTag(a) !== extractPartTag(b)) return false;
-  const isMovieA = /\bmovie\b|\bgekijouban\b/.test(a);
-  const isMovieB = /\bmovie\b|\bgekijouban\b/.test(b);
-  if (isMovieA !== isMovieB) return false;
-  if (a === b) return true;
-  const tokA = new Set(a.split(' ').filter((t) => t.length >= 2));
-  const tokB = new Set(b.split(' ').filter((t) => t.length >= 2));
+  const baseA = stripSeasonAndPart(a);
+  const baseB = stripSeasonAndPart(b);
+  if (!baseA || !baseB) return false;
+  if (baseA === baseB) return true;
+  const tokA = new Set(baseA.split(' ').filter((t) => t.length >= 2));
+  const tokB = new Set(baseB.split(' ').filter((t) => t.length >= 2));
   if (tokA.size === 0 || tokB.size === 0) return false;
   let overlap = 0;
   for (const t of tokA) if (tokB.has(t)) overlap++;
   const jaccard = overlap / (tokA.size + tokB.size - overlap);
-  return jaccard >= 0.72;
+  const minSize = Math.min(tokA.size, tokB.size);
+  const containment = minSize >= 2 ? overlap / minSize : 0;
+  return jaccard >= 0.72 || (containment >= 1.0 && minSize >= 2);
 }
 
 /**
@@ -353,7 +388,7 @@ export async function backfillIncompleteAnime(db: D1Database, limit = 50): Promi
       `SELECT id, title FROM animes
        WHERE (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
          AND (poster_url IS NULL OR poster_url = '' OR score = 0 OR episodes_total = 0 OR genres_json IS NULL OR genres_json = '' OR genres_json = '[]')
-       ORDER BY RANDOM()
+       ORDER BY (CASE WHEN status = 1 THEN 0 ELSE 1 END) ASC, updated_at ASC
        LIMIT ?1`
     )
     .bind(limit)
@@ -407,6 +442,9 @@ export async function backfillIncompleteAnime(db: D1Database, limit = 50): Promi
       );
       if (match) {
         stmts.push(bindAnimeEnrichOnly(db, row.id, match, nowSec));
+      } else {
+        // Rotasi baris miss ke belakang antrean agar tidak memblokir baris lain di cron berikutnya
+        stmts.push(db.prepare(`UPDATE animes SET updated_at = ?1 WHERE id = ?2`).bind(nowSec, row.id));
       }
     } catch {
       // Lewati baris yang gagal di-enrich agar tidak memblokir antrean lain

@@ -113,14 +113,14 @@ class StreamResolver(
         clients = clients,
         slugCache = slugCache,
         providers = listOf(
-            SamehadakuSourceProvider(
-                clients,
-                sourceBaseUrls[SourcePriority.SAMEHADAKU] ?: SourcePriority.SAMEHADAKU.defaultBaseUrl,
-                slugCache = slugCache
-            ),
             OtakudesuSourceProvider(
                 clients,
                 sourceBaseUrls[SourcePriority.OTAKUDESU] ?: SourcePriority.OTAKUDESU.defaultBaseUrl,
+                slugCache = slugCache
+            ),
+            SamehadakuSourceProvider(
+                clients,
+                sourceBaseUrls[SourcePriority.SAMEHADAKU] ?: SourcePriority.SAMEHADAKU.defaultBaseUrl,
                 slugCache = slugCache
             )
         )

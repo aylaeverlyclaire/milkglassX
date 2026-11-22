@@ -7,6 +7,7 @@ import {
   enrichSingleAnimeFromAniListAsync,
   importAniListMedia,
   ensureAnimeExistsFastInD1,
+  invalidateSourceBaseUrlsCache,
 } from '../services/anilist.service';
 import {
   purgeEdgeCacheForIngest,
@@ -106,7 +107,7 @@ const ingestEpisodeBodySchema = z
     anime_id: z.number().int().positive(),
     anime_title: z.string().optional(),
     mal_id: z.number().int().positive().optional(),
-    episode_number: z.number().int().positive(),
+    episode_number: z.number().int().nonnegative(),
     name: z.string().min(1).max(255),
     op_start: z.number().int().nonnegative().nullable().optional(),
     op_end: z.number().int().nonnegative().nullable().optional(),
@@ -317,6 +318,7 @@ ingestRoutes.post('/source-domain', zValidator('json', sourceDomainSchema), asyn
   )
     .bind(key, cleanUrl, now)
     .run();
+  invalidateSourceBaseUrlsCache();
   await purgeSourcesCache(c.req.url);
   return c.json({ status: 'ok', source, key, base_url: cleanUrl });
 });
@@ -347,7 +349,7 @@ const syncHostersSchema = z.object({
         episodes: z
           .array(
             z.object({
-              ep: z.number().int().min(1).max(2000),
+              ep: z.number().int().min(0).max(2000),
               hosters: z
                 .array(
                   z.object({
@@ -468,7 +470,9 @@ const syncSourceCatalogSchema = z.object({
         score: z.number().min(0).max(10).optional(),
         episodes_total: z.number().int().min(0).max(5000).optional(),
         genres: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+        synonyms: z.array(z.string().trim().min(2).max(120)).max(12).optional(),
         status: z.number().int().min(1).max(5).optional(),
+        schedule_day: z.number().int().min(0).max(7).optional(),
         source_urls: z.record(z.string(), z.string().url().max(1024)),
       })
     )
@@ -525,7 +529,9 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
         ? item.episodes_total
         : 0;
     const genresJson = JSON.stringify(item.genres ?? []);
+    const synonymsJson = JSON.stringify(item.synonyms ?? []);
     const statusVal = item.status ?? 1;
+    const scheduleDay = item.schedule_day ?? 0;
     const compact = item.title.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 120);
     const targetId = item.anime_id ?? sourceCatalogStableId(item.title);
 
@@ -535,16 +541,19 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
            id, mal_id, title, title_alt, synopsis, score, type, status, schedule_day,
            duration, studio, release_season, poster_url, genres_json, popularity,
            updated_at, episodes_total, next_airing_at, next_airing_ep,
-           has_live_source, norm_compact, source_urls_json
-         ) VALUES (?1, ?2, ?3, ?4, '', ?5, 'TV', ?6, 0, '24 min', '-', '-', ?7, ?8, 100, ?9, ?10, 0, 0, 1, ?11, ?12)
+           has_live_source, norm_compact, source_urls_json, synonyms_json
+         ) VALUES (?1, ?2, ?3, ?4, '', ?5, 'TV', ?6, ?13, '24 min', '-', '-', ?7, ?8, 100, ?9, ?10, 0, 0, 1, ?11, ?12, ?14)
          ON CONFLICT(id) DO UPDATE SET
            mal_id = COALESCE(excluded.mal_id, animes.mal_id),
            title = COALESCE(NULLIF(excluded.title, ''), animes.title),
            title_alt = COALESCE(NULLIF(excluded.title_alt, ''), animes.title_alt),
+           status = excluded.status,
+           schedule_day = CASE WHEN excluded.schedule_day > 0 THEN excluded.schedule_day ELSE animes.schedule_day END,
            score = CASE WHEN excluded.score > 0 THEN excluded.score ELSE animes.score END,
            poster_url = COALESCE(NULLIF(excluded.poster_url, ''), animes.poster_url),
            genres_json = CASE WHEN excluded.genres_json != '[]' THEN excluded.genres_json ELSE animes.genres_json END,
-           episodes_total = CASE WHEN excluded.episodes_total > 0 THEN excluded.episodes_total ELSE animes.episodes_total END,
+           synonyms_json = CASE WHEN excluded.synonyms_json != '[]' THEN excluded.synonyms_json ELSE animes.synonyms_json END,
+           episodes_total = CASE WHEN excluded.episodes_total > animes.episodes_total THEN excluded.episodes_total ELSE animes.episodes_total END,
            source_urls_json = excluded.source_urls_json,
            has_live_source = 1,
            updated_at = excluded.updated_at`
@@ -560,7 +569,9 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
         now,
         episodesTotal,
         compact,
-        urlsJson
+        urlsJson,
+        scheduleDay,
+        synonymsJson
       )
     );
     if (item.anime_id) updated++;

@@ -106,7 +106,7 @@ export function edgeCache(
       for (const [key, rawValue] of normalizedUrl.searchParams.entries()) {
         if (allowedSet.has(key)) {
           const value =
-            options.normalizeTitleParam && key === 'title'
+            options.normalizeTitleParam && (key === 'title' || key === 'q')
               ? normalizeCacheTitle(rawValue)
               : rawValue.trim();
           if (value.length > 0) {

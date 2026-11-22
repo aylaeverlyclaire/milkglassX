@@ -22,6 +22,7 @@ class EpisodeMetaTest {
             "S1":{"image":"https://x/s.jpg"},"0":{"image":"https://x/0.jpg"}}}"""
         assertEquals(
             mapOf(
+                0 to EpisodeMeta(null, "https://x/0.jpg"),
                 1 to EpisodeMeta("Cruelty", "https://x/1.jpg"),
                 2 to EpisodeMeta("Nihongo", "https://x/2.jpg"),
                 5 to EpisodeMeta("Romaji", null),

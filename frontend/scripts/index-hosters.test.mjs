@@ -107,10 +107,10 @@ test('buildSourceFirstCatalog binds source_urls to matched anime and keeps sourc
   const providerIndices = [
     {
       provider: 'samehadaku',
-      base: 'https://v2.samehadaku.how',
+      base: 'https://samehadaku.li',
       list: [
-        { title: 'Hunter x Hunter (2011)', url: 'https://v2.samehadaku.how/anime/hunter-x-hunter-2011/', provider: 'samehadaku' },
-        { title: 'Classroom of the Elite Season 4', url: 'https://v2.samehadaku.how/anime/classroom-of-the-elite-season-4/', provider: 'samehadaku' },
+        { title: 'Hunter x Hunter (2011)', url: 'https://samehadaku.li/anime/hunter-x-hunter-2011/', provider: 'samehadaku' },
+        { title: 'Classroom of the Elite Season 4', url: 'https://samehadaku.li/anime/classroom-of-the-elite-season-4/', provider: 'samehadaku' },
       ],
     },
     {
@@ -125,8 +125,73 @@ test('buildSourceFirstCatalog binds source_urls to matched anime and keeps sourc
   assert.equal(matched.length, 1);
   assert.equal(syncItems.length, 2);
   assert.equal(syncItems[0].anime_id, 11061);
-  assert.equal(syncItems[0].source_urls.samehadaku, 'https://v2.samehadaku.how/anime/hunter-x-hunter-2011/');
+  assert.equal(syncItems[0].source_urls.samehadaku, 'https://samehadaku.li/anime/hunter-x-hunter-2011/');
   assert.equal(syncItems[1].anime_id, undefined);
-  assert.equal(syncItems[1].source_urls.samehadaku, 'https://v2.samehadaku.how/anime/classroom-of-the-elite-season-4/');
+  assert.equal(syncItems[1].source_urls.samehadaku, 'https://samehadaku.li/anime/classroom-of-the-elite-season-4/');
   assert.equal(syncItems[1].source_urls.otakudesu, 'https://otakudesu.blog/anime/cote-s4/');
+});
+
+test('parseEpisodeHostersFromHtml ignores Otakudesu episode navigation dropdown options', () => {
+  const html = `
+    <select id="select-ep">
+      <option value="https://otakudesu.blog/episode/yscnd-episode-26-sub-indo/">Episode 26</option>
+      <option value="https://otakudesu.blog/episode/yscnd-episode-25-sub-indo/">Episode 25</option>
+    </select>
+    <iframe src="https://odstream.xyz/embed/abc123"></iframe>
+  `;
+  const res = parseEpisodeHostersFromHtml(html, 'https://otakudesu.blog/episode/yscnd-episode-27-sub-indo/', 'otakudesu');
+  assert.equal(res.some((r) => r.url.includes('otakudesu.blog/episode/')), false);
+  assert.equal(res.some((r) => r.url.includes('odstream.xyz/embed/abc123')), true);
+});
+
+test('parseEpisodeHostersFromHtml keeps Otakudesu desustream safelink for fast hosters and drops blacklisted labels', () => {
+  const html = `
+    <li>
+      <strong>Mp4 1080p</strong>
+      <a href="https://desustream.com/safelink/link/?id=eX1">Filedon</a>
+      <a href="https://desustream.com/safelink/link/?id=eX2">Pdrain</a>
+      <a href="https://desustream.com/safelink/link/?id=eX3">GoFile</a>
+      <a href="https://desustream.com/safelink/link/?id=eX4">Mega</a>
+      <a href="https://desustream.com/safelink/link/?id=eX5">Acefile</a>
+    </li>
+  `;
+  const res = parseEpisodeHostersFromHtml(html, 'https://otakudesu.blog/episode/blkclv-s2-episode-9-sub-indo/', 'otakudesu');
+  const hosters = res.map((r) => r.hoster);
+  assert.deepEqual(hosters.sort(), ['Filedon', 'GoFile', 'Pdrain']);
+});
+
+test('parseEpisodeHostersFromHtml harvests Samehadaku standalone GoFile button alongside mirror select embeds', () => {
+  const b64 = Buffer.from('<iframe src="https://icefile.web.id/e/hd2"></iframe>').toString('base64');
+  const html = `
+    <select class="mirror">
+      <option value="">Select Video Server</option>
+      <option value="${b64}">HD-2</option>
+    </select>
+    <a class="download-btn" href="https://gofile.io/d/MYZtgPQN">Download</a>
+  `;
+  const res = parseEpisodeHostersFromHtml(html, 'https://samehadaku.li/black-clover-2nd-season-episode-9-subtitle-indonesia/', 'samehadaku');
+  assert.equal(res.some((r) => r.isEmbed && r.url === 'https://icefile.web.id/e/hd2'), true);
+  assert.equal(res.some((r) => !r.isEmbed && r.url === 'https://gofile.io/d/MYZtgPQN'), true);
+});
+
+test('parseOtakudesuEpisodes maps single-episode Movie link without episode number to ep 1', () => {
+  const html = `
+    <div class="episodelist">
+      <ul>
+        <li><a href="https://otakudesu.blog/episode/kimi-na-wa-sub-indo/">Kimi no Na Wa BD Subtitle Indonesia</a></li>
+      </ul>
+    </div>
+  `;
+  const eps = parseOtakudesuEpisodes(html);
+  assert.deepEqual(eps, [{ ep: 1, url: 'https://otakudesu.blog/episode/kimi-na-wa-sub-indo/' }]);
+});
+
+test('parseEpisodeHostersFromHtml recognizes Samehadaku MP4HD (720p) and FULLHD (1080p) labels', () => {
+  const html = `
+    <li><strong>MP4HD</strong> <a href="https://pixeldrain.com/u/mp4hd720">PDrain</a></li>
+    <li><strong>FULLHD</strong> <a href="https://filedon.co/view/fullhd1080">Filedon</a></li>
+  `;
+  const res = parseEpisodeHostersFromHtml(html, 'https://v2.samehadaku.how/tensura-nikki-episode-12-end/', 'samehadaku');
+  assert.equal(res.some((r) => r.quality === '720p' && r.url.includes('mp4hd720')), true);
+  assert.equal(res.some((r) => r.quality === '1080p' && r.url.includes('fullhd1080')), true);
 });
