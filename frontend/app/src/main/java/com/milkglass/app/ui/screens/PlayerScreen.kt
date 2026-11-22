@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.only
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -39,6 +40,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -58,6 +60,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
@@ -108,6 +111,11 @@ import androidx.compose.ui.geometry.Size as ComposeSize
 
 private val TOP_SCRIM_GRADIENT = cssLinearGradient(180f, listOf(Color.Black.copy(alpha = .4f), CssTransparent))
 private val BOTTOM_SCRIM_GRADIENT = cssLinearGradient(180f, listOf(CssTransparent, Color.Black.copy(alpha = .75f)))
+
+// Tinggi bar kontrol bawah. Fullscreen sedikit lebih tinggi supaya seekbar tidak menempel ke tepi
+// bawah (zona gestur sistem) saat landscape.
+private val BAR_HEIGHT = 96.dp
+private val BAR_HEIGHT_FULLSCREEN = 108.dp
 
 @Composable
 fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
@@ -240,11 +248,20 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
         }
     }
 
-    FullscreenOrientationEffect(e.isFullscreen)
+    PlayerOrientationEffect(e.isFullscreen) { e.isFullscreen = it }
+    KeepScreenOnEffect(e.isPlaying || e.nativeBuffering)
     BoxWithConstraints(Modifier.fillMaxSize().background(c.surface)) {
         val vh = maxHeight
         if (e.isFullscreen) {
-            VideoArea(ctl, e, playerManager, Modifier.fillMaxSize(), fullscreen = true)
+            Box(Modifier.fillMaxSize()) {
+                VideoArea(ctl, e, playerManager, Modifier.fillMaxSize(), fullscreen = true)
+                // Sebelumnya error pemutar tidak terlihat sama sekali di fullscreen.
+                Box(
+                    Modifier.align(Alignment.TopCenter)
+                        .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
+                        .padding(top = 48.dp).widthIn(max = 480.dp).clip(RoundedCornerShape(8.dp)),
+                ) { PlayerErrorBanner(playerManager) }
+            }
         } else {
             Column(Modifier.fillMaxSize()) {
 
@@ -306,6 +323,15 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
     val cutout = if (fullscreen) Modifier.windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)) else Modifier
     val buffering = e.nativeBuffering && !e.isOffline
     val bufferingActive = e.nativeBuffering || e.isOffline
+    // Saat kontrol tampil di fullscreen, subtitle & tombol Skip/Next naik di atas bar kontrol (tidak saling menimpa).
+    val subtitleBottom = animateDpAsState(
+        if (fullscreen && !e.faded) BAR_HEIGHT_FULLSCREEN + 4.dp else if (fullscreen) 28.dp else 10.dp,  // grid-exempt: 10dp sengaja (kontrol pemutar)
+        tween(200, easing = MilkEasing.Ease), label = "subtitleBottom",
+    )
+    val overlayBottom = animateDpAsState(
+        if (!fullscreen) 56.dp else if (e.faded) 24.dp else BAR_HEIGHT_FULLSCREEN + 4.dp,
+        tween(200, easing = MilkEasing.Ease), label = "overlayBottom",
+    )
 
     Box(
 
@@ -335,6 +361,7 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
             playerManager = playerManager,
             active = e.nativeStreamActive,
             fullscreen = fullscreen,
+            bottomPadding = subtitleBottom,
             modifier = Modifier.align(Alignment.BottomCenter)
         )
         Box(
@@ -395,6 +422,7 @@ private fun VideoArea(ctl: AppController, e: PlayerEngine, playerManager: Player
             ctl = ctl,
             e = e,
             cutout = cutout,
+            bottomInset = overlayBottom,
             modifier = Modifier.align(Alignment.BottomEnd),
         )
 
@@ -445,6 +473,7 @@ private fun PlayerSubtitleOverlay(
     playerManager: PlayerManager,
     active: Boolean,
     fullscreen: Boolean,
+    bottomPadding: State<Dp>,
     modifier: Modifier = Modifier
 ) {
     if (!active) return
@@ -455,7 +484,7 @@ private fun PlayerSubtitleOverlay(
         modifier = modifier.padding(
             start = 16.dp,
             end = 16.dp,
-            bottom = if (fullscreen) 28.dp else 10.dp  // grid-exempt: 10dp sengaja (kontrol pemutar)
+            bottom = bottomPadding.value
         ),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -486,6 +515,7 @@ private fun PlayerSkipAndUpNextOverlays(
     ctl: AppController,
     e: PlayerEngine,
     cutout: Modifier,
+    bottomInset: State<Dp>,
     modifier: Modifier = Modifier,
 ) {
     val ty = Milk.type
@@ -497,7 +527,7 @@ private fun PlayerSkipAndUpNextOverlays(
     val upNext = if (showUpNext) ctl.nextPlayableEpisode(a, e.episode) else null
     if (!showSkip && upNext == null) return
     Column(
-        modifier.then(cutout).padding(end = 12.dp, bottom = 56.dp),
+        modifier.then(cutout).padding(end = 12.dp, bottom = bottomInset.value),
         horizontalAlignment = Alignment.End,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -557,9 +587,9 @@ private fun PlayerStateOverlays(ctl: AppController, e: PlayerEngine) {
 }
 
 @Composable
-private fun PlayerTimeDisplay(ctl: AppController, e: PlayerEngine) {
+private fun PlayerTimeDisplay(ctl: AppController, e: PlayerEngine, scrubSec: Double?) {
     val dur = e.duration
-    val posSec = e.positionWholeSecond
+    val posSec = scrubSec?.toInt()?.coerceIn(0, dur.coerceAtLeast(0)) ?: e.positionWholeSecond
     val durLabel = if (dur > 0) ctl.time.formatDuration(dur.toDouble()) else "--:--"
     MilkText("${ctl.time.formatDuration(posSec.toDouble())} / $durLabel", Milk.type.style(12f, 400, mono = true), Color.White)
 }
@@ -592,14 +622,16 @@ private fun PlayerBottomControls(
     cutout: Modifier,
     modifier: Modifier = Modifier
 ) {
+    var scrubSec by remember(e) { mutableStateOf<Double?>(null) }
+    val edge = if (fullscreen) 24.dp else 12.dp  // fullscreen: jauhi zona gestur back di tepi layar
     Box(
-        modifier.fillMaxWidth().height(96.dp)
+        modifier.fillMaxWidth().height(if (fullscreen) BAR_HEIGHT_FULLSCREEN else BAR_HEIGHT)
             .graphicsLayer { this.alpha = alphaProvider() }
             .background(BOTTOM_SCRIM_GRADIENT)
             .pointerInput(e.faded) { if (!e.faded) detectTapGestures { } },
     ) {
-        Row(Modifier.then(cutout).padding(start = 12.dp, end = 12.dp).offset(y = 24.dp).fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
-            PlayerTimeDisplay(ctl, e)
+        Row(Modifier.then(cutout).padding(start = edge, end = edge).offset(y = 24.dp).fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
+            PlayerTimeDisplay(ctl, e, scrubSec)
             Spacer(Modifier.weight(1f))
             PlayerQualityChip(ctl, e, playerManager)
             Box(
@@ -607,7 +639,18 @@ private fun PlayerBottomControls(
                 contentAlignment = Alignment.Center,
             ) { MilkIcon(MilkIcons.Fs, size = 20.dp, tint = Color.White) }
         }
-        SeekBar({ e.position }, e.duration, fullscreen, { e.seekTo(it) }, Modifier.then(cutout).padding(horizontal = 8.dp).offset(y = 60.dp).fillMaxWidth())
+        SeekBar(
+            positionProvider = { e.position },
+            max = e.duration,
+            fullscreen = fullscreen,
+            onSeek = { e.seekTo(it) },
+            modifier = Modifier.then(cutout).padding(horizontal = edge - 4.dp).offset(y = 60.dp).fillMaxWidth(),
+            onScrub = { sec ->
+                scrubSec = sec
+                // Selama digeser, kontrol tidak boleh memudar.
+                if (sec != null) e.setControls(true)
+            },
+        )
     }
 }
 

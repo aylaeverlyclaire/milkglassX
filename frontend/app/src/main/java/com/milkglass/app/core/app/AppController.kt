@@ -882,6 +882,8 @@ class AppController(
             )
             return
         }
+        // Ganti episode dari pemutar yang sedang fullscreen tidak boleh menjatuhkan mode fullscreen.
+        val keepFullscreen = (viewStack.lastOrNull() as? ViewEntry.Player)?.engine?.isFullscreen == true
         (viewStack.lastOrNull() as? ViewEntry.Player)?.let {
             it.engine.onLeave()
             val idx = viewStack.lastIndex
@@ -891,7 +893,7 @@ class AppController(
         val sp = resumePosition(a, ep)
         val start = pos ?: if (sp > 0 && !isWatched(a, ep)) smartResume(sp, lastWatchedAt(a), now()) else 0.0
         val rec = catalog.filter { it.id != a.id }.shuffled().take(10).map { it.id }
-        pushView(ViewEntry.Player(PlayerEngine(this, a, ep, start), rec))
+        pushView(ViewEntry.Player(PlayerEngine(this, a, ep, start).also { it.isFullscreen = keepFullscreen }, rec))
     }
 
     fun effectiveQuality(): String = preferredQuality.let { if (it == "Auto") tr.t("player.automaticQuality") else it }
