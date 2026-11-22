@@ -278,13 +278,25 @@ class PlayerManager(
                 friendly.reason == FailureReason.HTTP_403 ||
                 friendly.reason == FailureReason.EXPIRED ||
                 isMidStreamNotFound
-            if (req != null && friendly.reason == FailureReason.CODEC && !req.preferCompatibleContainer) {
+            val badDirectUrl = activeStreamSession?.candidates?.firstOrNull()?.directUrl
+                ?: activeStreamSession?.localHttpUrl
+            if (!badDirectUrl.isNullOrBlank()) {
+                id.my.milkglass.source.DeadCandidateCache.markDead(badDirectUrl)
+            }
+            if (req != null && friendly.reason == FailureReason.CODEC && (!req.preferCompatibleContainer || req.urlRefreshAttempts < 1)) {
+                val keysToClear = activeCacheKeys.toList()
+                activeCacheKeys.clear()
+                evictStreamCacheKeys(appContext, keysToClear)
                 resolver.invalidateCache(req.slug)
                 val resumeMs = getCurrentPosition().takeIf { it > 0L } ?: _snapshot.value.positionMs
-                load(req.copy(preferCompatibleContainer = true, startPositionMs = resumeMs, autoPlay = wasPlaying))
+                val nextAttempts = if (req.preferCompatibleContainer) req.urlRefreshAttempts + 1 else req.urlRefreshAttempts
+                load(req.copy(preferCompatibleContainer = true, urlRefreshAttempts = nextAttempts, startPositionMs = resumeMs, autoPlay = wasPlaying))
                 return
             }
             if (req != null && isTransportError && req.urlRefreshAttempts < 2) {
+                val keysToClear = activeCacheKeys.toList()
+                activeCacheKeys.clear()
+                evictStreamCacheKeys(appContext, keysToClear)
                 resolver.invalidateCache(req.slug)
                 val resumeMs = getCurrentPosition().takeIf { it > 0L } ?: _snapshot.value.positionMs
                 load(req.copy(urlRefreshAttempts = req.urlRefreshAttempts + 1, startPositionMs = resumeMs, autoPlay = wasPlaying))
