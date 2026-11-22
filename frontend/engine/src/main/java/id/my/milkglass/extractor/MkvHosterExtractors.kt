@@ -1152,26 +1152,24 @@ class MkvHosterExtractorRegistry(
                 if (ct.contains("text/html") || ct.contains("application/json")) {
                     return@use false
                 }
-                val headBytes = runCatching {
-                    val maxPeek = if (media.isHls) 512 else 16
-                    val buf = ByteArray(maxPeek)
+                val maxPeek = if (media.isHls) 512 else 16
+                val rawBuf = ByteArray(maxPeek)
+                var totalRead = 0
+                runCatching {
                     val stream = resp.body?.byteStream()
-                    var total = 0
-                    while (stream != null && total < maxPeek) {
-                        val n = stream.read(buf, total, maxPeek - total)
+                    while (stream != null && totalRead < maxPeek) {
+                        val n = stream.read(rawBuf, totalRead, maxPeek - totalRead)
                         if (n <= 0) break
-                        total += n
+                        totalRead += n
                     }
-                    if (total > 0) String(buf, 0, total, Charsets.UTF_8) else ""
-                }.getOrDefault("")
+                }
+                if (totalRead < 4) return@use false
+                val headBytes = String(rawBuf, 0, totalRead, Charsets.UTF_8)
                 if (media.isHls) {
                     return@use headBytes.contains("#EXTM3U")
                 }
                 if (ct.contains("text/plain")) return@use false
-                val trimmed = headBytes.trimStart().lowercase()
-                if (trimmed.startsWith("<!doc") || trimmed.startsWith("<html") ||
-                    trimmed.startsWith("<?xml") || trimmed.startsWith("{\"err")
-                ) {
+                if (!isSupportedMediaMagicBytes(rawBuf, totalRead, ct)) {
                     return@use false
                 }
                 true
@@ -1195,8 +1193,44 @@ class MkvHosterExtractorRegistry(
             }
         }.getOrNull()
     }
+    companion object {
+        internal fun isSupportedMediaMagicBytes(buf: ByteArray, len: Int, contentType: String = ""): Boolean {
+            if (len < 4) return false
+            val b0 = buf[0].toInt() and 0xFF
+            val b1 = buf[1].toInt() and 0xFF
+            val b2 = buf[2].toInt() and 0xFF
+            val b3 = buf[3].toInt() and 0xFF
+            // Tolak RAR ("Rar!"), ZIP ("PK\x03\x04"), 7z ("7z\xBC\xAF"), GZIP (1F 8B), PDF ("%PDF")
+            if (b0 == 0x52 && b1 == 0x61 && b2 == 0x72 && b3 == 0x21) return false
+            if (b0 == 0x50 && b1 == 0x4B && (b2 == 0x03 || b2 == 0x05 || b2 == 0x07)) return false
+            if (b0 == 0x37 && b1 == 0x7A && b2 == 0xBC && b3 == 0xAF) return false
+            if (b0 == 0x1F && b1 == 0x8B) return false
+            if (b0 == 0x25 && b1 == 0x50 && b2 == 0x44 && b3 == 0x46) return false
+            val textHead = String(buf, 0, minOf(len, 16), Charsets.UTF_8).trimStart().lowercase()
+            if (textHead.startsWith("<!doc") || textHead.startsWith("<html") ||
+                textHead.startsWith("<?xml") || textHead.startsWith("{\"") ||
+                textHead.startsWith("error") || textHead.startsWith("not found")
+            ) {
+                return false
+            }
+            if (textHead.startsWith("#extm3u")) return true
+            // EBML / Matroska / WebM: 1A 45 DF A3
+            if (b0 == 0x1A && b1 == 0x45 && b2 == 0xDF && b3 == 0xA3) return true
+            // MP4 / ISO BMFF: bytes 4..7 == "ftyp" / "moov" / "mdat" / "styp" / "free" / "wide"
+            if (len >= 8) {
+                val box = String(buf, 4, 4, Charsets.US_ASCII)
+                if (box == "ftyp" || box == "moov" || box == "mdat" || box == "styp" || box == "free" || box == "wide") {
+                    return true
+                }
+            }
+            // MPEG-TS sync byte 0x47, FLV "FLV", Ogg "OggS"
+            if (b0 == 0x47) return true
+            if (b0 == 0x46 && b1 == 0x4C && b2 == 0x56) return true
+            if (b0 == 0x4F && b1 == 0x67 && b2 == 0x67 && b3 == 0x53) return true
+            return contentType.startsWith("video/") || contentType.startsWith("audio/")
+        }
+    }
 }
-
 
 object JsUnpacker {
     private val wordRegex = Regex("""\b([0-9A-Za-z]+)\b""")
