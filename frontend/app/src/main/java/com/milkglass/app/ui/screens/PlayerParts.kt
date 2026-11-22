@@ -103,6 +103,7 @@ fun SeekBar(
     onSeek: (Double) -> Unit,
     modifier: Modifier = Modifier,
     onScrub: (Double?) -> Unit = {},
+    bufferedProvider: () -> Float = { 0f },
 ) {
     val fill = com.milkglass.app.core.design.Milk.colors.primary
     val rest = Color.White.copy(alpha = if (fullscreen) .3f else .35f)
@@ -143,6 +144,9 @@ fun SeekBar(
         val cy = size.height / 2f
         val th = 4.dp.toPx()
         drawRect(rest, Offset(0f, cy - th / 2f), Size(size.width, th))
+        // Segmen yang sudah ter-buffer: terlihat jelas sejauh mana bisa di-seek tanpa menunggu.
+        val bufferedX = 8.dp.toPx() + bufferedProvider().coerceIn(0f, 1f) * (size.width - 16.dp.toPx())
+        drawRect(Color.White.copy(alpha = .35f), Offset(0f, cy - th / 2f), Size(bufferedX, th))
         val thumbX = 8.dp.toPx() + p * (size.width - 16.dp.toPx())
         drawRect(fill, Offset(0f, cy - th / 2f), Size(thumbX, th))
         drawCircle(fill, (if (scrubbing) 12.dp else 8.dp).toPx(), Offset(thumbX, cy))
@@ -185,7 +189,7 @@ fun FireworksCanvas(modifier: Modifier = Modifier, iterations: Int = Int.MAX_VAL
 }
 
 
-private tailrec fun Context.findActivity(): Activity? = when (this) {
+internal tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null

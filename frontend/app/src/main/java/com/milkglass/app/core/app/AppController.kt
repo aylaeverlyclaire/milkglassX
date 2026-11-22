@@ -853,6 +853,9 @@ class AppController(
 
     var onQualityChanged: ((String) -> Unit)? = null
     var availablePlayerQualities by mutableStateOf(listOf("Auto", "1080p", "720p", "480p"))
+    /** Kecepatan putar & mode isi-layar bertahan selama sesi app (juga antar-episode). */
+    var playerSpeed by mutableStateOf(1f)
+    var playerFill by mutableStateOf(false)
 
     fun nextPlayableEpisode(a: Anime, ep: Int): Int? =
         if (ep < a.totalEpisodes && episodeAccess(a, ep + 1) == Access.Ok) ep + 1 else null
