@@ -8,6 +8,7 @@ import { cfRoutes } from './routes/cf.routes';
 import { playRoutes } from './routes/play.routes';
 import { aggregateSourceHealthCron } from './services/health.service';
 import { backfillIncompleteAnime } from './services/anilist.service';
+import { ensureCuratedCatalogPatchApplied } from './services/curatedPatch.service';
 
 export interface AppBindings {
   DB: D1Database;
@@ -94,6 +95,7 @@ export default {
   async scheduled(_event: ScheduledEvent, env: AppBindings, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       (async () => {
+        await ensureCuratedCatalogPatchApplied(env.DB);
         await aggregateSourceHealthCron(env.DB);
 
         // Katalog bersumber eksklusif dari YLnime & Otakudesu;

@@ -9,6 +9,7 @@ import { recheckAfterSec } from '../services/sync-schedule';
 import { getSourceBaseUrls } from '../services/anilist.service';
 import { AppBindings } from '../index';
 import { readDb } from '../utils/db';
+import { ensureCuratedCatalogPatchApplied } from '../services/curatedPatch.service';
 
 
 const ALLOWED_CATALOG_PROVIDERS = new Set(['ylnime', 'otakudesu']);
@@ -85,6 +86,7 @@ function escapeSqlLike(input: string): string {
 }
 
 catalogRoutes.get('/home', edgeCache(300, 600, false), async (c) => {
+  await ensureCuratedCatalogPatchApplied(c.env.DB);
   const db = readDb(c.env);
   const [ongoingRes, popularRes, completedRes, metaRes] = await db.batch([
     db.prepare(
