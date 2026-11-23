@@ -669,7 +669,13 @@ async function main() {
     fetchJson(`${workerUrl}/v1/catalog/sources`).catch(() => ({ sources: [] })),
   ]);
 
-  const catalog = (catJson.data || []).slice(0, maxAnimes);
+  const allCatalog = Array.isArray(catJson.data) ? catJson.data : [];
+  const incompleteCatalog = allCatalog.filter((a) => !a.episodes_total || Number(a.episodes_total) <= 0);
+  const completeCatalog = allCatalog.filter((a) => Number(a.episodes_total) > 0);
+  const catalog = [...incompleteCatalog, ...completeCatalog].slice(0, maxAnimes);
+  console.log(
+    `Catalog queue: ${catalog.length} anime (${Math.min(incompleteCatalog.length, catalog.length)} incomplete episodes_total=0 prioritized)`
+  );
   const sourcesMap = new Map((srcJson.sources || []).map((s) => [s.id, s.base_url]));
   const ylBase = (sourcesMap.get('ylnime') || 'https://ylnime.com').replace(/\/+$/, '');
   const otakuBase = (sourcesMap.get('otakudesu') || 'https://otakudesu.blog').replace(/\/+$/, '');
@@ -718,6 +724,36 @@ async function main() {
   }
 
   const { matched, syncItems } = buildSourceFirstCatalog(catalog, providerIndices);
+  const matchedById = new Map(matched.map((m) => [m.anime.id, m]));
+  for (const anime of catalog) {
+    let existingSources = {};
+    try {
+      existingSources =
+        typeof anime.source_urls_json === 'string' && anime.source_urls_json.trim()
+          ? JSON.parse(anime.source_urls_json)
+          : anime.source_urls && typeof anime.source_urls === 'object'
+            ? anime.source_urls
+            : {};
+    } catch {}
+    const directHits = [];
+    for (const [prov, rawUrl] of Object.entries(existingSources)) {
+      const provider = prov.trim().toLowerCase();
+      if (!ALLOWED_CATALOG_PROVIDERS.has(provider) || typeof rawUrl !== 'string' || !rawUrl.startsWith('https://')) continue;
+      directHits.push({ provider, base: provider === 'ylnime' ? ylBase : otakuBase, url: rawUrl.trim() });
+    }
+    if (directHits.length === 0) continue;
+    const entry = matchedById.get(anime.id);
+    if (entry) {
+      const seenHitUrls = new Set(entry.hits.map((h) => h.url));
+      for (const h of directHits) {
+        if (!seenHitUrls.has(h.url)) entry.hits.push(h);
+      }
+    } else {
+      const added = { anime, hits: directHits };
+      matched.push(added);
+      matchedById.set(anime.id, added);
+    }
+  }
   console.log(
     `Matched ${matched.length}/${catalog.length} anime + ${syncItems.length - matched.length} source-only anime across ${providerIndices.length} provider(s)`
   );
@@ -777,25 +813,59 @@ async function main() {
     );
   }
 
-  await runPool(matched, concurrency, async ({ anime, hits }) => {
+  await runPool(matched, concurrency, async ({ anime, hits }, itemIdx) => {
     const epHostersMap = new Map();
+    let discoveredMaxEp = 0;
+    let isCompleted = false;
+    const epBudget = itemIdx < 150 ? maxEps : Math.min(maxEps, 2);
 
     for (const source of hits) {
       try {
-        const animeHtml = await fetchText(source.url, `${source.base}/`, 15000);
-        const rawEps =
+        let usedUrl = source.url;
+        let animeHtml = await fetchText(usedUrl, `${source.base}/`, 15000);
+        let rawEps =
           source.provider === 'otakudesu'
             ? parseOtakudesuEpisodes(animeHtml)
             : source.provider === 'ylnime'
               ? parseYlnimeEpisodes(animeHtml, source.base)
               : parseGenericEpisodes(animeHtml, source.base);
-        const eps = selectEpisodesToIndex(rawEps, maxEps);
+        if (rawEps.length === 0 && source.provider === 'ylnime' && /(?:%2f|\/+)$/i.test(usedUrl)) {
+          const cleanedUrl = usedUrl.replace(/(?:%2f|\/)+$/i, '');
+          if (cleanedUrl && cleanedUrl !== usedUrl) {
+            usedUrl = cleanedUrl;
+            animeHtml = await fetchText(usedUrl, `${source.base}/`, 15000);
+            rawEps = parseYlnimeEpisodes(animeHtml, source.base);
+          }
+        }
+        if (rawEps.length > 0) {
+          const localMax = rawEps.reduce((m, e) => (e.ep > m ? e.ep : m), 0);
+          if (localMax > discoveredMaxEp) discoveredMaxEp = localMax;
+        }
+        if (/\b(?:completed|tamat|finished)\b/i.test(animeHtml)) {
+          isCompleted = true;
+        }
+        const eps = selectEpisodesToIndex(rawEps, epBudget);
         if (eps.length === 0) continue;
 
         for (const epItem of eps) {
           try {
-            const epHtml = await fetchText(epItem.url, source.url, 15000);
+            const epHtml = await fetchText(epItem.url, usedUrl, 15000);
             const hosters = parseEpisodeHostersFromHtml(epHtml, epItem.url, source.provider);
+            if (hosters.length === 0 && source.provider === 'ylnime' && epItem.url.startsWith('http')) {
+              const no1080 = /1080p tidak tersedia/i.test(epHtml);
+              const playerUrl =
+                no1080 && !/reso=/i.test(epItem.url)
+                  ? `${epItem.url}${epItem.url.includes('?') ? '&' : '?'}reso=720p`
+                  : epItem.url;
+              hosters.push({
+                url: playerUrl,
+                quality: '720p',
+                hoster: 'YLnimePlayer',
+                provider: 'ylnime',
+                container: 'mp4',
+                referer: usedUrl,
+              });
+            }
             if (hosters.length > 0) {
               const existing = epHostersMap.get(epItem.ep) || [];
               const existingUrls = new Set(existing.map((x) => x.url));
@@ -814,7 +884,7 @@ async function main() {
             }
           }
         }
-        if (epHostersMap.size >= 2) break;
+        if (epHostersMap.size >= Math.min(epBudget, 4)) break;
       } catch (err) {
         if (diagLogs < 6) {
           diagLogs++;
@@ -823,7 +893,7 @@ async function main() {
       }
     }
 
-    if (epHostersMap.size > 0) {
+    if (epHostersMap.size > 0 || discoveredMaxEp > 0) {
       const epPayloads = Array.from(epHostersMap.entries())
         .sort((a, b) => a[0] - b[0])
         .map(([ep, hosters]) => {
@@ -836,6 +906,8 @@ async function main() {
         anime_id: anime.id,
         title: anime.title,
         title_alt: anime.title_alt || null,
+        episodes_total: discoveredMaxEp > 0 ? discoveredMaxEp : undefined,
+        is_completed: isCompleted || undefined,
         episodes: epPayloads,
       });
       if (batchBuffer.length >= 12) {
