@@ -69,7 +69,7 @@ class StreamingEndToEndTest {
             {
               "status": "ok",
               "sources": [
-                {"rank": 1, "id": "samehadaku", "base_url": "https://samehadaku.li"},
+                {"rank": 1, "id": "ylnime", "base_url": "https://ylnime.com"},
                 {"rank": 2, "id": "otakudesu", "base_url": "https://otakudesu.best/"},
                 {"rank": 3, "id": "unknown", "base_url": "http://insecure.example.com"}
               ]
@@ -77,7 +77,7 @@ class StreamingEndToEndTest {
         """.trimIndent()
         val parsed = SourceConfigStore.parseSourcesJson(json)
         assertEquals("https://otakudesu.best", parsed[SourcePriority.OTAKUDESU])
-        assertEquals("https://samehadaku.li", parsed[SourcePriority.SAMEHADAKU])
+        assertEquals("https://ylnime.com", parsed[SourcePriority.YLNIME])
         assertEquals(2, parsed.size)
     }
 
@@ -109,7 +109,7 @@ class StreamingEndToEndTest {
     fun sourcePriorityOrderMatchesTwoSourceCascade() {
         assertEquals(2, SourcePriority.entries.size)
         assertEquals(1, SourcePriority.OTAKUDESU.rank)
-        assertEquals(2, SourcePriority.SAMEHADAKU.rank)
+        assertEquals(2, SourcePriority.YLNIME.rank)
     }
 
     @Test
@@ -196,13 +196,13 @@ class StreamingEndToEndTest {
     @Test
     fun circuitBreakerOpensAfterTwoFailuresAndResetsOnSuccess() {
         SourceCircuitBreaker.resetAll()
-        assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.SAMEHADAKU, 1000L))
-        SourceCircuitBreaker.recordFailure(SourcePriority.SAMEHADAKU, 1000L)
-        assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.SAMEHADAKU, 1000L))
-        SourceCircuitBreaker.recordFailure(SourcePriority.SAMEHADAKU, 1000L)
-        assertTrue(SourceCircuitBreaker.isOpen(SourcePriority.SAMEHADAKU, 2000L))
-        SourceCircuitBreaker.recordSuccess(SourcePriority.SAMEHADAKU)
-        assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.SAMEHADAKU, 2000L))
+        assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.YLNIME, 1000L))
+        SourceCircuitBreaker.recordFailure(SourcePriority.YLNIME, 1000L)
+        assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.YLNIME, 1000L))
+        SourceCircuitBreaker.recordFailure(SourcePriority.YLNIME, 1000L)
+        assertTrue(SourceCircuitBreaker.isOpen(SourcePriority.YLNIME, 2000L))
+        SourceCircuitBreaker.recordSuccess(SourcePriority.YLNIME)
+        assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.YLNIME, 2000L))
     }
 
     @Test
@@ -257,11 +257,11 @@ class StreamingEndToEndTest {
                 )
             ) + (1..15).map { i ->
                 IndexedAnimeEntry(
-                    source = SourcePriority.SAMEHADAKU,
+                    source = SourcePriority.YLNIME,
                     title = "Dummy Anime $i",
                     normalizedTitle = "dummy anime $i",
                     tokens = TitleMatcher.tokenize("Dummy Anime $i"),
-                    url = "https://samehadaku.li/anime/dummy-$i/"
+                    url = "https://ylnime.com/anime/dummy-$i/"
                 )
             }
         )
@@ -272,9 +272,9 @@ class StreamingEndToEndTest {
     @Test
     fun endpointHealthScorerTracksSourceAndHosterScores() {
         EndpointHealthScorer.reset()
-        EndpointHealthScorer.recordSourceSuccess("samehadaku", 400L)
+        EndpointHealthScorer.recordSourceSuccess("ylnime", 400L)
         EndpointHealthScorer.recordSourceFailure("otakudesu")
-        assertTrue(EndpointHealthScorer.sourceScore("samehadaku") > EndpointHealthScorer.sourceScore("otakudesu"))
+        assertTrue(EndpointHealthScorer.sourceScore("ylnime") > EndpointHealthScorer.sourceScore("otakudesu"))
         EndpointHealthScorer.reset()
     }
 

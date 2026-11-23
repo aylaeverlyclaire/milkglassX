@@ -90,7 +90,7 @@ class SourceAvailabilityIndex(
         try {
             val tasks = listOf(
                 SourcePriority.OTAKUDESU to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchOtakudesuIndex() }.getOrDefault(emptyList()) },
-                SourcePriority.SAMEHADAKU to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchSamehadakuIndex() }.getOrDefault(emptyList()) }
+                SourcePriority.YLNIME to executor.submit<List<IndexedAnimeEntry>> { runCatching { fetchYlnimeIndex() }.getOrDefault(emptyList()) }
             )
             for ((src, fut) in tasks) {
                 val list = runCatching { fut.get(20, TimeUnit.SECONDS) }.getOrNull().orEmpty()
@@ -214,13 +214,28 @@ class SourceAvailabilityIndex(
         }
     }
 
-    private fun fetchSamehadakuIndex(): List<IndexedAnimeEntry> {
-        val base = baseUrlProvider(SourcePriority.SAMEHADAKU).trimEnd('/')
-        val html = fetchHtml("$base/daftar-anime-2/?list", "$base/") ?: return emptyList()
-        val doc = Jsoup.parse(html, base)
-        return doc.select(".listpst a[href], .animposx a[href], .jdlbar a[href]").mapNotNull { a ->
-            val title = a.attr("title").ifBlank { a.text() }
-            buildEntry(SourcePriority.SAMEHADAKU, title, a.absUrl("href"))
+    private fun fetchYlnimeIndex(): List<IndexedAnimeEntry> {
+        val base = baseUrlProvider(SourcePriority.YLNIME).trimEnd('/')
+        val letters = listOf("") + ('A'..'Z').map { it.toString() }
+        val pool = Executors.newFixedThreadPool(4)
+        return try {
+            val futures = letters.map { ch ->
+                pool.submit<List<IndexedAnimeEntry>> {
+                    val url = if (ch.isEmpty()) "$base/anime-list.php" else "$base/anime-list.php?l=$ch"
+                    val html = fetchHtml(url, "$base/") ?: return@submit emptyList()
+                    val doc = Jsoup.parse(html, base)
+                    doc.select("a[href*='?series=']").mapNotNull { a ->
+                        val title = a.attr("title").ifBlank { a.text() }.trim()
+                        if (title.startsWith("[INFO]", ignoreCase = true)) null
+                        else buildEntry(SourcePriority.YLNIME, title, a.absUrl("href"))
+                    }
+                }
+            }
+            val seen = HashSet<String>()
+            futures.flatMap { f -> runCatching { f.get(15, TimeUnit.SECONDS) }.getOrDefault(emptyList()) }
+                .filter { seen.add(it.url) }
+        } finally {
+            pool.shutdownNow()
         }
     }
 

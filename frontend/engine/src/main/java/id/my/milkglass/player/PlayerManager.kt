@@ -427,7 +427,7 @@ class PlayerManager(
             try {
                 val session = resolver.resolveAndStartStream(
                     slug = request.slug,
-                    preferredRes = if (request.preferredResolution == "Auto") "1080p" else request.preferredResolution,
+                    preferredRes = if (request.preferredResolution == "Auto") "720p" else request.preferredResolution,
                     title = request.title,
                     romajiTitle = request.romajiTitle,
                     anilistId = request.anilistId,
@@ -882,7 +882,7 @@ class PlayerManager(
         val resolveEnd = resolveCompletedElapsedMs.takeIf { it > 0L } ?: nowElapsed
         val resolveMs = if (startElapsed > 0L) (resolveEnd - startElapsed).coerceAtLeast(0L) else 0L
         val sess = activeStreamSession
-        val ep = resolver.extractEpisodeNumber(req.slug).coerceAtLeast(1)
+        val ep = resolver.extractEpisodeNumber(req.slug).coerceAtLeast(0)
         val title = req.romajiTitle.ifBlank { req.title }.ifBlank { req.slug }
         val versionName = runCatching {
             appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName.orEmpty()

@@ -95,7 +95,8 @@ internal object StreamingFirstGuards {
                             it != url &&
                             (sLow.contains("blogger.com") || sLow.contains("ondesu") ||
                                 sLow.contains("googlevideo.com") || sLow.contains("desustream") ||
-                                sLow.contains("vidhide") || sLow.contains("filemoon") || sLow.contains("yourupload"))
+                                sLow.contains("filedon") || sLow.contains("odcdn") || sLow.contains("otakuwatch") ||
+                                sLow.contains("filemoon"))
                     }
                 }
             }

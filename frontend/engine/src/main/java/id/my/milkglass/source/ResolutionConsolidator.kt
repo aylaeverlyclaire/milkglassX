@@ -20,7 +20,7 @@ class ResolutionConsolidator(
 
     private val cache = ConcurrentHashMap<String, ConsolidatedEntry>()
 
-    // Hanya Samehadaku dan Otakudesu.
+    // Hanya Otakudesu dan YLnime.
     private val providers: List<MkvSourceProvider> by lazy {
         listOf(
             OtakudesuSourceProvider(
@@ -28,9 +28,9 @@ class ResolutionConsolidator(
                 sourceBaseUrls[SourcePriority.OTAKUDESU] ?: SourcePriority.OTAKUDESU.defaultBaseUrl,
                 slugCache = slugCache
             ),
-            SamehadakuSourceProvider(
+            YlnimeSourceProvider(
                 clients,
-                sourceBaseUrls[SourcePriority.SAMEHADAKU] ?: SourcePriority.SAMEHADAKU.defaultBaseUrl,
+                sourceBaseUrls[SourcePriority.YLNIME] ?: SourcePriority.YLNIME.defaultBaseUrl,
                 slugCache = slugCache
             )
         )

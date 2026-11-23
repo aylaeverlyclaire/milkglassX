@@ -39,8 +39,8 @@ class InstantPlayReliabilityTest {
                 "https://pixeldrain.com/u/abc123", "https://otakudesu.blog/episode/x", "320 MB", false, MediaContainer.MKV
             ),
             RawMkvCandidate(
-                SourcePriority.SAMEHADAKU, MkvQuality.P720, "Krakenfiles",
-                "https://krakenfiles.com/view/zzz/file.html", "https://v2.samehadaku.how/x", null, false, MediaContainer.MP4
+                SourcePriority.YLNIME, MkvQuality.P720, "Krakenfiles",
+                "https://krakenfiles.com/view/zzz/file.html", "https://ylnime.com/x", null, false, MediaContainer.MP4
             )
         )
         val arr = RawCandidateStore.encodeList(original)
@@ -58,7 +58,7 @@ class InstantPlayReliabilityTest {
             clients = IsolatedHttpClients(null),
             providers = listOf(
                 SleepyProvider(SourcePriority.OTAKUDESU, 8_000),
-                SleepyProvider(SourcePriority.SAMEHADAKU, 8_000)
+                SleepyProvider(SourcePriority.YLNIME, 8_000)
             )
         )
         // Lebih dari FAIL_THRESHOLD (2): dulu setiap pembatalan dihitung sebagai kegagalan sumber.
@@ -76,6 +76,6 @@ class InstantPlayReliabilityTest {
             assertEquals("Dibatalkan", (r as CascadeResult.Failure).reason)
         }
         assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.OTAKUDESU))
-        assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.SAMEHADAKU))
+        assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.YLNIME))
     }
 }

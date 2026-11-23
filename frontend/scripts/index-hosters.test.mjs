@@ -9,6 +9,9 @@ import {
   isBlacklistedUrl,
   parseOtakudesuAnimeList,
   parseOtakudesuEpisodes,
+  parseGenericEpisodes,
+  parseYlnimeAnimeList,
+  parseYlnimeEpisodes,
   parseEpisodeHostersFromHtml,
   selectEpisodesToIndex,
 } from './index-hosters.mjs';
@@ -106,11 +109,11 @@ test('buildSourceFirstCatalog binds source_urls to matched anime and keeps sourc
   const catalog = [{ id: 11061, title: 'Hunter x Hunter (2011)', title_alt: 'Hunter x Hunter' }];
   const providerIndices = [
     {
-      provider: 'samehadaku',
-      base: 'https://samehadaku.li',
+      provider: 'ylnime',
+      base: 'https://ylnime.com',
       list: [
-        { title: 'Hunter x Hunter (2011)', url: 'https://samehadaku.li/anime/hunter-x-hunter-2011/', provider: 'samehadaku' },
-        { title: 'Classroom of the Elite Season 4', url: 'https://samehadaku.li/anime/classroom-of-the-elite-season-4/', provider: 'samehadaku' },
+        { title: 'Hunter x Hunter (2011)', url: 'https://ylnime.com/?series=hunter-x-hunter-2011', provider: 'ylnime' },
+        { title: 'Classroom of the Elite Season 4', url: 'https://ylnime.com/?series=classroom-of-the-elite-season-4', provider: 'ylnime' },
       ],
     },
     {
@@ -125,9 +128,9 @@ test('buildSourceFirstCatalog binds source_urls to matched anime and keeps sourc
   assert.equal(matched.length, 1);
   assert.equal(syncItems.length, 2);
   assert.equal(syncItems[0].anime_id, 11061);
-  assert.equal(syncItems[0].source_urls.samehadaku, 'https://samehadaku.li/anime/hunter-x-hunter-2011/');
+  assert.equal(syncItems[0].source_urls.ylnime, 'https://ylnime.com/?series=hunter-x-hunter-2011');
   assert.equal(syncItems[1].anime_id, undefined);
-  assert.equal(syncItems[1].source_urls.samehadaku, 'https://samehadaku.li/anime/classroom-of-the-elite-season-4/');
+  assert.equal(syncItems[1].source_urls.ylnime, 'https://ylnime.com/?series=classroom-of-the-elite-season-4');
   assert.equal(syncItems[1].source_urls.otakudesu, 'https://otakudesu.blog/anime/cote-s4/');
 });
 
@@ -160,7 +163,7 @@ test('parseEpisodeHostersFromHtml keeps Otakudesu desustream safelink for fast h
   assert.deepEqual(hosters.sort(), ['Filedon', 'GoFile', 'Pdrain']);
 });
 
-test('parseEpisodeHostersFromHtml harvests Samehadaku standalone GoFile button alongside mirror select embeds', () => {
+test('parseEpisodeHostersFromHtml harvests YLnime standalone GoFile button alongside mirror select embeds', () => {
   const b64 = Buffer.from('<iframe src="https://icefile.web.id/e/hd2"></iframe>').toString('base64');
   const html = `
     <select class="mirror">
@@ -169,7 +172,7 @@ test('parseEpisodeHostersFromHtml harvests Samehadaku standalone GoFile button a
     </select>
     <a class="download-btn" href="https://gofile.io/d/MYZtgPQN">Download</a>
   `;
-  const res = parseEpisodeHostersFromHtml(html, 'https://samehadaku.li/black-clover-2nd-season-episode-9-subtitle-indonesia/', 'samehadaku');
+  const res = parseEpisodeHostersFromHtml(html, 'https://ylnime.com/black-clover-2nd-season-episode-9-subtitle-indonesia/', 'ylnime');
   assert.equal(res.some((r) => r.isEmbed && r.url === 'https://icefile.web.id/e/hd2'), true);
   assert.equal(res.some((r) => !r.isEmbed && r.url === 'https://gofile.io/d/MYZtgPQN'), true);
 });
@@ -186,12 +189,43 @@ test('parseOtakudesuEpisodes maps single-episode Movie link without episode numb
   assert.deepEqual(eps, [{ ep: 1, url: 'https://otakudesu.blog/episode/kimi-na-wa-sub-indo/' }]);
 });
 
-test('parseEpisodeHostersFromHtml recognizes Samehadaku MP4HD (720p) and FULLHD (1080p) labels', () => {
+test('parseEpisodeHostersFromHtml recognizes YLnime MP4HD (720p) and FULLHD (1080p) labels', () => {
   const html = `
     <li><strong>MP4HD</strong> <a href="https://pixeldrain.com/u/mp4hd720">PDrain</a></li>
     <li><strong>FULLHD</strong> <a href="https://filedon.co/view/fullhd1080">Filedon</a></li>
   `;
-  const res = parseEpisodeHostersFromHtml(html, 'https://v2.samehadaku.how/tensura-nikki-episode-12-end/', 'samehadaku');
+  const res = parseEpisodeHostersFromHtml(html, 'https://ylnime.com/tensura-nikki-episode-12-end/', 'ylnime');
   assert.equal(res.some((r) => r.quality === '720p' && r.url.includes('mp4hd720')), true);
   assert.equal(res.some((r) => r.quality === '1080p' && r.url.includes('fullhd1080')), true);
+});
+
+test('parseGenericEpisodes maps YLnime Movie link inside eplister/lstepsiode without /episode/ to ep 1', () => {
+  const html = `
+    <div class="lstepsiode listeps">
+      <ul>
+        <li>
+          <span class="eps">Movie</span>
+          <a href="https://ylnime.com/black-clover-mahou-tei-no-ken-sword-of-the-wizard-king/">Black Clover: Mahou Tei no Ken</a>
+        </li>
+      </ul>
+    </div>
+  `;
+  const eps = parseGenericEpisodes(html, 'https://ylnime.com');
+  assert.deepEqual(eps, [{ ep: 1, url: 'https://ylnime.com/black-clover-mahou-tei-no-ken-sword-of-the-wizard-king/' }]);
+});
+
+test('parseYlnimeAnimeList and parseYlnimeEpisodes handle index.php?series= and Episode 0 (al-24930-0)', () => {
+  const listHtml = `<a href="index.php?series=mushoku-tensei-honki-dasu">Mushoku Tensei II</a>`;
+  const list = parseYlnimeAnimeList(listHtml, 'https://ylnime.com');
+  assert.deepEqual(list, [{ title: 'Mushoku Tensei II', url: 'https://ylnime.com/index.php?series=mushoku-tensei-honki-dasu', provider: 'ylnime' }]);
+
+  const epHtml = `
+    <a href="index.php?series=mushoku-tensei-honki-dasu&episode=al-24930-0">Episode 0</a>
+    <a href="index.php?series=mushoku-tensei-honki-dasu&episode=al-24930-1">Episode 1</a>
+  `;
+  const eps = parseYlnimeEpisodes(epHtml, 'https://ylnime.com');
+  assert.deepEqual(eps, [
+    { ep: 0, url: 'https://ylnime.com/index.php?series=mushoku-tensei-honki-dasu&episode=al-24930-0' },
+    { ep: 1, url: 'https://ylnime.com/index.php?series=mushoku-tensei-honki-dasu&episode=al-24930-1' },
+  ]);
 });

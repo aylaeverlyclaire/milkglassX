@@ -57,8 +57,12 @@ object HosterFilter {
     }
 
     fun isFastFallbackHoster(hosterLabel: String, url: String): Boolean {
-        val combined = "${hosterLabel.lowercase()} ${url.lowercase()}"
-        return !isBlacklisted(hosterLabel, url) && fastFallbackTokens.any { combined.contains(it) }
+        val lowUrl = url.lowercase()
+        val combined = "${hosterLabel.lowercase()} $lowUrl"
+        if (isBlacklisted(hosterLabel, url)) return false
+        return fastFallbackTokens.any { combined.contains(it) } ||
+            hosterLabel.equals("Animeverse", ignoreCase = true) ||
+            lowUrl.contains(".mp4") || lowUrl.contains(".m3u8") || lowUrl.contains(".mkv")
     }
 
     fun rank(hosterLabel: String, url: String): Int {
@@ -294,9 +298,12 @@ class LinkUnshortener(
 
     private fun isTerminalHoster(lowerUrl: String): Boolean {
         return lowerUrl.contains("pixeldrain.com") ||
+            lowerUrl.contains("pixeldrain.net") ||
             lowerUrl.contains("pixeldrain.lu") ||
+            lowerUrl.contains("pdrain.com") ||
             lowerUrl.contains("krakenfiles.com") ||
             lowerUrl.contains("filedon.co") ||
+            lowerUrl.contains("odfiles.com") ||
             lowerUrl.contains("gofile.io") ||
             lowerUrl.contains("wibufile.com") ||
             lowerUrl.contains("mediafire.com") ||
@@ -351,11 +358,11 @@ class MkvHosterExtractorRegistry(
     private val clients: IsolatedHttpClients
 ) {
     private val pixeldrainIdRegex = Regex(
-        """pixeldrain\.(?:com|lu)/(?:u|d|l|api/file|api/filesystem)/([a-zA-Z0-9_-]+)""",
+        """(?:pixeldrain\.(?:com|net|lu)|pdrain\.com)/(?:u|d|l|api/file|api/filesystem)/([a-zA-Z0-9_-]+)""",
         RegexOption.IGNORE_CASE
     )
     private val filedoSlugRegex = Regex(
-        """filedon\.co/(?:view|embed|d|f)/([a-zA-Z0-9_-]+)""",
+        """(?:filedon\.co|odfiles\.com)/(?:view|embed|d|f)/([a-zA-Z0-9_-]+)""",
         RegexOption.IGNORE_CASE
     )
     private val gofileIdRegex = Regex("""gofile\.io/(?:d|w)/([a-zA-Z0-9]+)""", RegexOption.IGNORE_CASE)
@@ -386,7 +393,7 @@ class MkvHosterExtractorRegistry(
         }
 
         val isLandingPageHost = low.contains("mediafire.com") || low.contains("krakenfiles.com") ||
-            low.contains("filedon.co") || low.contains("gofile.io") || low.contains("buzzheavier.com") ||
+            low.contains("filedon.co") || low.contains("odfiles.com") || low.contains("gofile.io") || low.contains("buzzheavier.com") ||
             low.contains("1fichier.com") || low.contains("racaty") || low.contains("send.now")
         if (!isLandingPageHost && (low.contains(".mkv") || low.contains("wibufile.com") || low.contains("uqni.net") ||
                 low.contains(".workers.dev") || low.contains(".r2.dev") || low.contains("storage.googleapis.com")) &&
@@ -417,8 +424,8 @@ class MkvHosterExtractorRegistry(
         }
 
         return when {
-            low.contains("pixeldrain.com") || low.contains("pixeldrain.lu") -> extractPixeldrain(resolvedUrl)
-            low.contains("filedon.co") -> extractFiledon(resolvedUrl)
+            low.contains("pixeldrain.com") || low.contains("pixeldrain.net") || low.contains("pixeldrain.lu") || low.contains("pdrain.com") -> extractPixeldrain(resolvedUrl)
+            low.contains("filedon.co") || low.contains("odfiles.com") -> extractFiledon(resolvedUrl)
             low.contains("krakenfiles.com") -> extractKrakenfiles(resolvedUrl)
             low.contains("gofile.io") -> extractGoFile(resolvedUrl)
             low.contains("mediafire.com") -> extractMediaFire(resolvedUrl)

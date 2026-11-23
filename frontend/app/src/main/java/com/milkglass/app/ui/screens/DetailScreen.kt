@@ -100,7 +100,9 @@ fun DetailScreen(ctl: AppController, id: Int) {
     val resume = ctl.continueInfo(a)
     val released = time.releasedEpisodeCount(a)
     val mx = minOf(a.totalEpisodes, released + if (time.isOngoing(a)) 1 else 0)
-    val eps = remember(mx, ctl.episodesDescending) { (1..mx).toList().let { if (ctl.episodesDescending) it.reversed() else it } }
+    val hasEp0 = ctl.hasEpisodeZero(a)
+    val startEp = if (hasEp0) 0 else 1
+    val eps = remember(startEp, mx, ctl.episodesDescending) { (startEp..mx).toList().let { if (ctl.episodesDescending) it.reversed() else it } }
     val n = time.nextReleaseAt(a)
     var detailTab by rememberSaveable(id) { mutableStateOf("episodes") }
     var synopsisExpanded by rememberSaveable(id) { mutableStateOf(false) }

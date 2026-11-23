@@ -16,7 +16,7 @@ import id.my.milkglass.source.OtakudesuSourceProvider
 import id.my.milkglass.source.RawMkvCandidate
 import id.my.milkglass.source.ResolutionConsolidator
 import id.my.milkglass.source.ResolvedMkvMedia
-import id.my.milkglass.source.SamehadakuSourceProvider
+import id.my.milkglass.source.YlnimeSourceProvider
 import id.my.milkglass.source.SourcePriority
 import id.my.milkglass.source.SourceSlugCache
 import kotlinx.coroutines.CoroutineScope
@@ -46,7 +46,7 @@ data class LocalStreamSession(
     val expectedSizeBytes: Long,
     val availableResolutions: List<String> = listOf("1080p", "720p", "480p"),
     val activeResolution: String = "1080p",
-    val resolvedSourceId: String = SourcePriority.SAMEHADAKU.id,
+    val resolvedSourceId: String = SourcePriority.YLNIME.id,
     val resolvedHoster: String = "Pixeldrain",
     val isHls: Boolean = false,
     val headers: Map<String, String> = emptyMap(),
@@ -73,7 +73,7 @@ data class PlaybackTelemetryReport(
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("title", title.trim().ifBlank { "unknown" }.take(160))
-        put("ep", ep.coerceIn(1, 2000))
+        put("ep", ep.coerceIn(0, 2000))
         if (animeId != null && animeId > 0) put("anime_id", animeId)
         put("status", status)
         put("resolve_ms", resolveMs.coerceIn(0L, 120_000L))
@@ -118,9 +118,9 @@ class StreamResolver(
                 sourceBaseUrls[SourcePriority.OTAKUDESU] ?: SourcePriority.OTAKUDESU.defaultBaseUrl,
                 slugCache = slugCache
             ),
-            SamehadakuSourceProvider(
+            YlnimeSourceProvider(
                 clients,
-                sourceBaseUrls[SourcePriority.SAMEHADAKU] ?: SourcePriority.SAMEHADAKU.defaultBaseUrl,
+                sourceBaseUrls[SourcePriority.YLNIME] ?: SourcePriority.YLNIME.defaultBaseUrl,
                 slugCache = slugCache
             )
         )
@@ -154,7 +154,7 @@ class StreamResolver(
 
     fun reportDeadDirectUrl(title: String, ep: Int, directUrl: String, httpCode: Int) {
         if (!directUrl.startsWith("https://")) return
-        if (title.trim().length < 2 || ep <= 0) return
+        if (title.trim().length < 2 || ep < 0) return
         val statusStr = when (httpCode) {
             403 -> "403"
             404 -> "404"
@@ -200,7 +200,7 @@ class StreamResolver(
         if (now < serverResolverDisabledUntilMs) return
         val title = cacheKey.substringBeforeLast('#', "").trim()
         val ep = cacheKey.substringAfterLast('#', "").toIntOrNull() ?: return
-        if (title.length < 2 || ep <= 0) return
+        if (title.length < 2 || ep < 0) return
         val reportSignature = "${cacheKey}#${candidates.map { "${it.source.id}:${it.quality.label}" }.distinct().sorted().joinToString(",")}"
         val last = hintReportedAt[reportSignature]
         if (last != null && now - last < 30L * 60L * 1000L) return
@@ -250,7 +250,7 @@ class StreamResolver(
     private val directReportedAt = ConcurrentHashMap<String, Long>()
 
     fun reportDirect(title: String, ep: Int, list: List<ResolvedMkvMedia>) {
-        if (list.isEmpty() || ep <= 0 || title.trim().length < 2) return
+        if (list.isEmpty() || ep < 0 || title.trim().length < 2) return
         val now = System.currentTimeMillis()
         if (now < serverResolverDisabledUntilMs) return
         val key = "${title.lowercase().trim()}#$ep#${list.first().quality.label}"
@@ -894,7 +894,7 @@ class StreamResolver(
         val searchTitle = romajiTitle.ifBlank { title }.ifBlank {
             slug.replace(Regex("-ep-\\d+$", RegexOption.IGNORE_CASE), "").replace('-', ' ')
         }
-        if (searchTitle.isBlank() || episodeNum <= 0) return@launch
+        if (searchTitle.isBlank() || episodeNum < 0) return@launch
         val existingQualities = currentResolutions.mapNotNull { MkvQuality.fromText(it) }.toSet()
 
         var waitedMs = 0L
