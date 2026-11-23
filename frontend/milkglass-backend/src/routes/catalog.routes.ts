@@ -637,23 +637,57 @@ catalogRoutes.get(
         const html = await resp.text();
         const items: Array<Record<string, unknown>> = [];
         const seenUrls = new Set<string>();
-        const re =
-          sourceId === 'otakudesu'
-            ? /<h2[^>]*>\s*<a[^>]+href="(https?:\/\/[^"]+\/anime\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
-            : /<a[^>]+href="((?:https?:\/\/[^"]+\/|\/)?(?:index\.php)?\?series=[^"&]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(html)) !== null && items.length < 12) {
-          const rawHref = m[1].trim();
-          const url = rawHref.startsWith('http') ? rawHref : `${root}/${rawHref.replace(/^\/+/, '')}`;
-          const rawTitle = m[2]
+        const cleanLiveTitle = (raw: string) =>
+          raw
             .replace(/<[^>]+>/g, ' ')
             .replace(/&amp;/gi, '&')
             .replace(/&#8211;|&ndash;/gi, '-')
+            .replace(/&#8217;|&#039;/gi, "'")
+            .replace(/^\s*\((?:HD|Uncen|Uncensored|BD|Sub Indo)\)\s*/i, '')
             .replace(/\(Episode[^)]*\)/gi, '')
             .replace(/\b(?:Subtitle Indonesia|Sub Indo|BD)\b/gi, '')
             .replace(/\s+/g, ' ')
             .trim();
-          if (!url || !rawTitle || seenUrls.has(url)) continue;
+        const re =
+          sourceId === 'otakudesu'
+            ? /<h2[^>]*>\s*<a[^>]+href=(["'])(https?:\/\/[^"']+\/anime\/[^"']+)\1[^>]*>([\s\S]*?)<\/a>/gi
+            : /<a\b[^>]*\bhref=(["'])([^"']+)\1[^>]*>([\s\S]*?)<\/a>/gi;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(html)) !== null && items.length < 12) {
+          const rawHref = m[2].trim().replace(/&amp;/g, '&');
+          if (sourceId === 'ylnime' && (!/[?&]series=[^&#]+/i.test(rawHref) || /[?&]episode=/i.test(rawHref))) {
+            continue;
+          }
+          const url = rawHref.startsWith('http')
+            ? rawHref
+            : rawHref.startsWith('?')
+              ? `${root}/${rawHref}`
+              : `${root}/${rawHref.replace(/^\/+/, '')}`;
+          let rawTitle = cleanLiveTitle(m[3]);
+          let posterUrl = '';
+          const beforeSlice = html.slice(Math.max(0, m.index - 450), m.index);
+          const afterSlice = html.slice(m.index + m[0].length, m.index + m[0].length + 450);
+          if (sourceId === 'ylnime') {
+            if (rawTitle.length < 2) {
+              // Kartu Bootstrap YLnime memakai <a href="index.php?series=..." class="stretched-link"></a> kosong
+              const cardTitleMatch = afterSlice.match(
+                /<(?:h[1-6]|div|span)[^>]*class=(["'])[^"']*card-title[^"']*\1[^>]*>([\s\S]*?)<\/(?:h[1-6]|div|span)>/i
+              );
+              const imgAlts = [...beforeSlice.matchAll(/<img\b[^>]*\balt=(["'])([^"']+)\1/gi)];
+              const nearestAlt = imgAlts.length > 0 ? imgAlts[imgAlts.length - 1][2] : '';
+              rawTitle = cleanLiveTitle(cardTitleMatch?.[2] || nearestAlt || '');
+            }
+            const imgSrcs = [...beforeSlice.matchAll(/<img\b[^>]*\bsrc=(["'])(https?:\/\/[^"']+)\1/gi)];
+            const nearestSrc = imgSrcs.length > 0 ? imgSrcs[imgSrcs.length - 1][2] : '';
+            if (nearestSrc.startsWith('https://')) posterUrl = nearestSrc;
+          } else {
+            const imgSrcs = [...beforeSlice.matchAll(/<img\b[^>]*\bsrc=(["'])(https?:\/\/[^"']+)\1/gi)];
+            const nearestSrc = imgSrcs.length > 0 ? imgSrcs[imgSrcs.length - 1][2] : '';
+            if (nearestSrc.startsWith('https://')) posterUrl = nearestSrc;
+          }
+          if (!url || rawTitle.length < 2 || /^\[?info\]?/i.test(rawTitle) || /^\(live\s*action\)/i.test(rawTitle) || seenUrls.has(url)) {
+            continue;
+          }
           seenUrls.add(url);
           let hash = 2166136261;
           const seed = `${sourceId}:${url.toLowerCase()}`;
@@ -677,7 +711,7 @@ catalogRoutes.get(
             duration: '24 min',
             studio: sourceId === 'ylnime' ? 'YLnime' : 'Otakudesu',
             release_season: '-',
-            poster_url: '',
+            poster_url: posterUrl,
             popularity: 0,
             updated_at: Math.floor(Date.now() / 1000),
             genres: [],
