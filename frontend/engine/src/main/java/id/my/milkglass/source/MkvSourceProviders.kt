@@ -430,7 +430,9 @@ class YlnimeSourceProvider(
                     }
                 }
             }
-            if (episodeNumber == 1 && parsedMap.isEmpty() && distinctUrls.size == 1) {
+            val epIdRe = Regex("[?&]episode=([^&#]+)", RegexOption.IGNORE_CASE)
+            val distinctEpIds = distinctUrls.mapNotNull { epIdRe.find(it)?.groupValues?.getOrNull(1)?.lowercase(Locale.ROOT) }.toSet()
+            if (episodeNumber == 1 && parsedMap.isEmpty() && (distinctUrls.size == 1 || distinctEpIds.size == 1)) {
                 parsedMap[1] = distinctUrls.first()
             }
             SeriesEpisodeMapCache.putAll(priority, bestAnimeUrl, parsedMap)
@@ -539,12 +541,19 @@ class YlnimeSourceProvider(
         // 3. Fallback WebView EmbedMediaSniffer untuk player HTML5 YLnime yang memuat stream via JavaScript
         //    (mis. Movie tanpa link download terpisah atau saat 1080p auto-fallback ke 720p di sisi klien).
         if (results.isEmpty() && epUrlWithReso.startsWith("http")) {
+            val no1080 = epDoc.text().contains("1080p tidak tersedia", ignoreCase = true)
+            val sniffUrl = if (no1080 && epUrlWithReso.contains("reso=1080p", ignoreCase = true)) {
+                epUrlWithReso.replace("reso=1080p", "reso=720p", ignoreCase = true)
+            } else {
+                epUrlWithReso
+            }
+            val sniffQuality = if (no1080 && qDefault == MkvQuality.P1080) MkvQuality.P720 else qDefault
             results.add(
                 RawMkvCandidate(
                     source = priority,
-                    quality = qDefault,
+                    quality = sniffQuality,
                     hosterLabel = "YLnimePlayer",
-                    rawUrl = epUrlWithReso,
+                    rawUrl = sniffUrl,
                     pageReferer = bestAnimeUrl,
                     container = MediaContainer.MP4,
                     isStreamEmbed = true

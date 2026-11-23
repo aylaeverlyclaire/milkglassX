@@ -140,4 +140,41 @@ class InstantPlayReliabilityTest {
             emptyMap()
         ))
     }
+
+    @Test
+    fun hybridIdentitySafeTitleMatcherHandlesTyposSwapsRomajiAndLocksSubtitlesAndSeasons() {
+        // Lapis 1 & 4: ejaan UK/US + format override (Movie vs TV) + simbol/tag noise
+        assertTrue(
+            TitleMatcher.score("Date A Live Movie: Mayuri Judgement", "Date A Live: Mayuri Judgment (Sub Indo)") >= 0.85
+        )
+        assertTrue(
+            TitleMatcher.score("Date A Bullet: Nightmare or Queen", "Date A Bullet - Nightmare or Queen [BD]") >= 0.85
+        )
+        // Lapis 1: normalisasi Romaji (ou -> o)
+        assertTrue(
+            TitleMatcher.score("Toukyou Ghoul", "Tokyo Ghoul [Sub Indo]") >= 0.85
+        )
+        // Lapis 2: urutan kata/subjudul dibalik tetap cocok
+        assertTrue(
+            TitleMatcher.score("Mayuri Judgment: Date A Live Movie", "Date A Live Movie: Mayuri Judgment") >= 0.80
+        )
+        // Lapis 3: kunci identitas subjudul (Dead or Bullet tidak boleh tertukar Nightmare or Queen)
+        assertTrue(
+            TitleMatcher.score("Date A Bullet: Dead or Bullet", "Date A Bullet: Nightmare or Queen") < 0.30
+        )
+        // Lapis 3: kunci identitas season & spin-off & TV vs Movie tanpa subjudul
+        assertTrue(
+            TitleMatcher.score("Date A Live", "Date A Live IV") < 0.40
+        )
+        assertTrue(
+            TitleMatcher.score("Date A Live", "Date A Bullet: Dead or Bullet") < 0.40
+        )
+        assertTrue(
+            TitleMatcher.score("Date A Live", "Date A Live Movie: Mayuri Judgment") < 0.40
+        )
+        // Lapis 4: proteksi episode desimal recap (12.5 tidak membajak 12)
+        assertEquals(null, SeriesEpisodeMapCache.extractEpisodeNumber("Episode 12.5", "https://example.com/ep/12.5"))
+        assertFalse(TitleMatcher.matchesEpisode("Episode 12.5", "https://example.com/ep/12.5", 12))
+        assertTrue(TitleMatcher.matchesEpisode("Episode 12", "https://example.com/ep/12", 12))
+    }
 }

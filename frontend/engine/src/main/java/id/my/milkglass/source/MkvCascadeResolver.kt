@@ -269,6 +269,90 @@ internal object TitleMatcher {
     }
 
     private val trailingYearRegex = Regex("""(?:19|20)\d{2}$""")
+    private val parenBracketStripRegex = Regex("""(?:\([^)]*\)|\[[^\]]*\])""")
+    private val noiseWordsRegex = Regex(
+        """\b(?:movie|gekijouban|film|ova|oad|special|sub|indo|subtitle|indonesia|batch|bd|bluray|uncensored|full|1080p|720p|480p|360p|the|tv)\b""",
+        RegexOption.IGNORE_CASE
+    )
+    private val romajiOuRegex = Regex("""ou""")
+    private val romajiUuRegex = Regex("""uu""")
+    private val romajiOoRegex = Regex("""oo""")
+
+    /**
+     * Lapis 1: Normalisasi kanonis + fonetik/Romaji (tahan simbol, tag noise, ejaan UK/US, & Romaji).
+     */
+    internal fun normalizePhoneticTokens(raw: String): List<String> {
+        val cleaned = parenBracketStripRegex.replace(raw.replace('\u00D7', 'x'), " ")
+            .lowercase(Locale.ROOT)
+            .replace("judgement", "judgment")
+            .replace("colour", "color")
+            .replace("theatre", "theater")
+        val withoutNoise = noiseWordsRegex.replace(cleaned, " ")
+        val words = nonWord.replace(withoutNoise, " ")
+            .split(" ")
+            .map { w ->
+                var t = w.trim()
+                if (t.length >= 4) {
+                    t = romajiOuRegex.replace(t, "o")
+                    t = romajiUuRegex.replace(t, "u")
+                    t = romajiOoRegex.replace(t, "o")
+                }
+                t
+            }
+            .filter { it.isNotEmpty() && !trailingYearRegex.matches(it) && (it.length >= 2 || it[0].isDigit()) }
+        return words
+    }
+
+    internal fun extractDistinctiveSubtitle(raw: String): String {
+        val noTags = parenBracketStripRegex.replace(raw, " ").trim()
+        val after = when {
+            noTags.contains(":") -> noTags.substringAfter(":").trim()
+            noTags.contains(" - ") -> noTags.substringAfter(" - ").trim()
+            else -> ""
+        }
+        if (after.isBlank()) return ""
+        val subCompact = normalizePhoneticTokens(after).joinToString("")
+        return if (subCompact.length >= 4) subCompact else ""
+    }
+
+    /**
+     * Lapis 2a: Kemiripan Bigram Karakter (Dice) — simetris, tahan typo 2 arah & urutan kata tertukar.
+     */
+    internal fun bigramDice(a: String, b: String): Double {
+        if (a.length < 2 || b.length < 2) return if (a == b && a.isNotEmpty()) 1.0 else 0.0
+        val counts = HashMap<String, Int>(a.length)
+        for (i in 0 until a.length - 1) {
+            val bg = a.substring(i, i + 2)
+            counts[bg] = (counts[bg] ?: 0) + 1
+        }
+        var inter = 0
+        for (i in 0 until b.length - 1) {
+            val bg = b.substring(i, i + 2)
+            val rem = counts[bg] ?: 0
+            if (rem > 0) {
+                inter++
+                counts[bg] = rem - 1
+            }
+        }
+        return (2.0 * inter) / ((a.length - 1) + (b.length - 1)).toDouble()
+    }
+
+    /**
+     * Lapis 2b: Rasio subsequence berurutan (mengabaikan spasi, simbol, dan teks tambahan).
+     */
+    internal fun orderedSubsequenceRatio(needle: String, haystack: String): Double {
+        if (needle.isEmpty() || haystack.isEmpty()) return 0.0
+        var matched = 0
+        var hIdx = 0
+        for (ch in needle) {
+            while (hIdx < haystack.length && haystack[hIdx] != ch) hIdx++
+            if (hIdx < haystack.length) {
+                matched++
+                hIdx++
+            }
+        }
+        return matched.toDouble() / needle.length.toDouble()
+    }
 
     fun score(query: String, candidate: String): Double {
         val pq = parse(query)
@@ -286,15 +370,63 @@ internal object TitleMatcher {
         val cCompact = pc.canonicalBase.replace(" ", "")
         val qNoYear = trailingYearRegex.replace(qCompact, "")
         val cNoYear = trailingYearRegex.replace(cCompact, "")
-        if (qCompact.length >= 4 && cCompact.length >= 4) {
+
+        val qCoreTokens = normalizePhoneticTokens(query).toSet()
+        val cCoreTokens = normalizePhoneticTokens(candidate).toSet()
+        val coreTokenJaccard = if (qCoreTokens.isNotEmpty() && cCoreTokens.isNotEmpty()) {
+            val cInter = qCoreTokens.count { it in cCoreTokens }.toDouble()
+            cInter / (qCoreTokens.size + cCoreTokens.size - cInter)
+        } else 0.0
+        val qCore = qCoreTokens.sorted().joinToString("")
+        val cCore = cCoreTokens.sorted().joinToString("")
+        val qCoreOrdered = normalizePhoneticTokens(query).joinToString("")
+        val cCoreOrdered = normalizePhoneticTokens(candidate).joinToString("")
+
+        val dice = if (qCoreOrdered.length >= 4 && cCoreOrdered.length >= 4) {
+            maxOf(bigramDice(qCoreOrdered, cCoreOrdered), bigramDice(qCore, cCore))
+        } else 0.0
+
+        val subseqRatio = if (qCoreOrdered.length >= 5 && cCoreOrdered.length >= 5) {
+            val shorter = if (qCoreOrdered.length <= cCoreOrdered.length) qCoreOrdered else cCoreOrdered
+            val longer = if (qCoreOrdered.length <= cCoreOrdered.length) cCoreOrdered else qCoreOrdered
+            val lenRatio = shorter.length.toDouble() / longer.length.toDouble()
+            val forward = orderedSubsequenceRatio(shorter, longer)
+            if (forward >= 0.88 && lenRatio >= 0.58) forward else 0.0
+        } else 0.0
+
+        // Lapis 3: Kunci Identitas Subjudul/Arc (mencegah Dead or Bullet tertukar Nightmare or Queen)
+        val qSub = extractDistinctiveSubtitle(query)
+        val cSub = extractDistinctiveSubtitle(candidate)
+        val subtitleConflict = if (qSub.length >= 4 && cSub.length >= 4 && coreTokenJaccard < 0.80) {
+            val shortSub = if (qSub.length <= cSub.length) qSub else cSub
+            val longSub = if (qSub.length <= cSub.length) cSub else qSub
+            val subLenRatio = shortSub.length.toDouble() / longSub.length.toDouble()
+            val subSubseq = if (subLenRatio >= 0.55) orderedSubsequenceRatio(shortSub, longSub) else 0.0
+            val subSim = maxOf(bigramDice(qSub, cSub), subSubseq)
+            subSim < 0.45
+        } else false
+
+        if (qCompact.length >= 4 && cCompact.length >= 4 && !subtitleConflict) {
             when {
-                qCompact == cCompact || (qNoYear.length >= 4 && qNoYear == cNoYear) -> sc = maxOf(sc, 0.95)
+                qCompact == cCompact || (qNoYear.length >= 4 && qNoYear == cNoYear) ||
+                    (qCoreOrdered.length >= 5 && qCoreOrdered == cCoreOrdered) ->
+                    sc = maxOf(sc, 0.95)
+                coreTokenJaccard >= 0.85 || dice >= 0.84 ->
+                    sc = maxOf(sc, 0.86)
                 cCompact.contains(qCompact) || qCompact.contains(cCompact) ||
                     (qNoYear.length >= 4 && cNoYear.length >= 4 && (cNoYear.contains(qNoYear) || qNoYear.contains(cNoYear))) ->
                     sc = maxOf(sc, 0.72)
+                subseqRatio >= 0.88 ->
+                    sc = maxOf(sc, 0.78)
             }
         }
-        if (pq.formatKind != pc.formatKind) {
+        if (subtitleConflict) {
+            sc -= 0.90
+        }
+        // Lapis 4: Format Override jika inti judul/subjudul cocok kuat dan tidak ada konflik subjudul
+        val strongCoreMatch = !subtitleConflict && qCoreOrdered.length >= 10 && cCoreOrdered.length >= 10 &&
+            (qCoreOrdered == cCoreOrdered || coreTokenJaccard >= 0.85 || dice >= 0.84 || subseqRatio >= 0.90)
+        if (pq.formatKind != pc.formatKind && !strongCoreMatch) {
             sc -= 0.95
         }
         sc += StreamingFirstGuards.seasonAndPartDelta(pq, pc)
@@ -305,7 +437,7 @@ internal object TitleMatcher {
         val trimmed = text.trim()
         if (trimmed.toIntOrNull() == episodeNumber) return true
         if (SeriesEpisodeMapCache.extractEpisodeNumber(trimmed, href) == episodeNumber) return true
-        val epRegex = Regex("""(?:episode|eps|ep)[\s\-_]*0*($episodeNumber)(?!\d)""", RegexOption.IGNORE_CASE)
+        val epRegex = Regex("""(?:episode|eps|ep)[\s\-_]*0*($episodeNumber)(?!(?:\.\d|\d))""", RegexOption.IGNORE_CASE)
         return epRegex.containsMatchIn(trimmed) || epRegex.containsMatchIn(href)
     }
 
@@ -439,8 +571,8 @@ object SeriesEpisodeMapCache {
         map.clear()
     }
 
-    private val EP_TEXT_REGEX = Regex("(?:episode|eps?|ep)\\s*0*(\\d{1,4})(?!\\d)", RegexOption.IGNORE_CASE)
-    private val EP_HREF_REGEX = Regex("(?:episode|eps?|ep)[-_\\s]*0*(\\d{1,4})(?!\\d)", RegexOption.IGNORE_CASE)
+    private val EP_TEXT_REGEX = Regex("(?:episode|eps?|ep)\\s*0*(\\d{1,4})(?!(?:\\.\\d|\\d))", RegexOption.IGNORE_CASE)
+    private val EP_HREF_REGEX = Regex("(?:episode|eps?|ep)[-_\\s]*0*(\\d{1,4})(?!(?:\\.\\d|\\d))", RegexOption.IGNORE_CASE)
     private val YLNIME_EP_HREF_REGEX = Regex("[?&]episode=[a-z0-9_-]+-0*(\\d{1,4})(?:[&#]|$)", RegexOption.IGNORE_CASE)
     private val MOVIE_EP_TEXT_REGEX = Regex("^(?:episode\\s+)?(?:movie|film|ova|special)$", RegexOption.IGNORE_CASE)
     private val SLUG_EP_REGEX = Regex("-ep-(\\d+)$", RegexOption.IGNORE_CASE)
@@ -822,7 +954,7 @@ class MkvCascadeResolver(
                 )
             }
             try {
-                val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(8L)
+                val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(13L)
                 repeat(fanOutCount) {
                     val remainingNs = deadlineNs - System.nanoTime()
                     if (remainingNs <= 0L) return@repeat
@@ -920,7 +1052,7 @@ class MkvCascadeResolver(
         maxResults: Int = 3,
         preferStreamingEmbeds: Boolean = true
     ): List<ResolvedMkvMedia> {
-        val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(7L)
+        val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(11L)
         val embeds = candidates.filter { it.isStreamEmbed }.distinctBy { it.rawUrl }
         val wants1080p = qualityOrder.firstOrNull() == MkvQuality.P1080
         val embedHas1080p = embeds.any { it.quality == MkvQuality.P1080 }
@@ -932,7 +1064,7 @@ class MkvCascadeResolver(
             } else {
                 embeds.take(4)
             }
-            val embedWin = raceExtractCandidates(embedBatch, maxResults = maxResults, timeoutMs = 2_800L)
+            val embedWin = raceExtractCandidates(embedBatch, maxResults = maxResults, timeoutMs = 6_800L)
             if (embedWin.isNotEmpty()) return embedWin
         }
 
@@ -959,7 +1091,7 @@ class MkvCascadeResolver(
         if (preferStreamingEmbeds && embeds.isNotEmpty() && wants1080p && !embedHas1080p) {
             val remainingMs = TimeUnit.NANOSECONDS.toMillis(totalDeadlineNs - System.nanoTime())
             if (remainingMs > 500L) {
-                val embedFallback = raceExtractCandidates(embeds.take(4), maxResults = maxResults, timeoutMs = remainingMs.coerceAtMost(4_000L))
+                val embedFallback = raceExtractCandidates(embeds.take(4), maxResults = maxResults, timeoutMs = remainingMs.coerceAtMost(6_800L))
                 if (embedFallback.isNotEmpty()) return embedFallback
             }
         }
