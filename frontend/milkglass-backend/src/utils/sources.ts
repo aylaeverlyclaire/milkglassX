@@ -9,7 +9,8 @@ export interface SourceBaseUrls {
 
 /**
  * Prioritas kanonik lintas Backend, Indexer, dan Android Engine:
- * Rank 1 = Otakudesu, Rank 2 = YLnime (menggantikan samehadaku.li; A-Z sync aktif).
+ * Rank 1 = Otakudesu, Rank 2 = YLnime (menggantikan samehadaku.li).
+ * Katalog disinkronkan secara eksklusif dari kedua sumber ini.
  */
 export const SOURCE_CASCADE_ORDER: readonly SourceId[] = [
   'otakudesu',

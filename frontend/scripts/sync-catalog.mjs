@@ -128,6 +128,17 @@ async function enrichFromAniList(title) {
 
 const YLNIME_LETTERS = ['', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')];
 
+let ylDiagSummary = '';
+
+function emitNotice(title, msg) {
+  const safe = String(msg || '')
+    .replace(/%/g, '%25')
+    .replace(/\r/g, '%0D')
+    .replace(/\n/g, '%0A')
+    .slice(0, 3200);
+  console.log(`::notice title=${title}::${safe}`);
+}
+
 async function fetchYlnimeCatalogAllLetters(ylBase) {
   const all = [];
   const seen = new Set();
@@ -141,7 +152,12 @@ async function fetchYlnimeCatalogAllLetters(ylBase) {
         const html = await fetchHtml(url, `${ylBase}/`);
         const items = parseYlnimeCatalog(html, ylBase);
         if (items.length === 0 && !firstEmptySample) {
-          firstEmptySample = `${url} len=${html.length} head=${html.slice(0, 140).replace(/\s+/g, ' ')}`;
+          const hrefs = [...html.matchAll(/href=(["'])([^"']+)\1/gi)]
+            .map((m) => m[2])
+            .filter((h) => !h.startsWith('#') && !h.endsWith('.css') && !h.endsWith('.png') && !h.endsWith('.ico'))
+            .slice(0, 12)
+            .join(', ');
+          firstEmptySample = `${url} len=${html.length} head=${html.slice(0, 160).replace(/\s+/g, ' ')} hrefs=[${hrefs}]`;
         }
         return items;
       })
@@ -160,7 +176,8 @@ async function fetchYlnimeCatalogAllLetters(ylBase) {
     }
   }
   if (all.length === 0) {
-    console.warn(`[ylnime-diag] 0 judul dari A-Z. firstErr=${firstErr || 'none'} sample=${firstEmptySample || 'none'}`);
+    ylDiagSummary = `firstErr=${firstErr || 'none'} sample=${firstEmptySample || 'none'}`;
+    console.warn(`[ylnime-diag] 0 judul dari A-Z. ${ylDiagSummary}`);
   }
   return all;
 }
@@ -177,9 +194,10 @@ const providerResults = await Promise.allSettled([
 const otakuList = providerResults[0].status === 'fulfilled' ? providerResults[0].value : [];
 const ylOngoingRaw = providerResults[3].status === 'fulfilled' ? providerResults[3].value : [];
 const ylOngoingUrls = new Set(ylOngoingRaw.map((x) => x.url));
-const ylAllRaw = providerResults[1].status === 'fulfilled' ? providerResults[1].value : [];
-const ylBaseList = ylAllRaw.length > 0 ? ylAllRaw : ylOngoingRaw;
-const ylList = ylBaseList.map((x) => (ylOngoingUrls.has(x.url) ? { ...x, status: 1 } : x));
+const ylBaseList = providerResults[1].status === 'fulfilled' ? providerResults[1].value : [];
+const ylList = (ylBaseList.length > 0 ? ylBaseList : ylOngoingRaw.map((x) => ({ ...x, status: 1 }))).map((x) =>
+  ylOngoingUrls.has(x.url) ? { ...x, status: 1 } : x
+);
 const scheduleMap = new Map(providerResults[2].status === 'fulfilled' ? providerResults[2].value : []);
 const ylScheduleMap = providerResults[4].status === 'fulfilled' ? providerResults[4].value : new Map();
 for (const [k, day] of ylScheduleMap.entries()) {
@@ -194,7 +212,10 @@ console.log(
 );
 
 const merged = mergeProviderCatalogs([otakuList, ylList], scheduleMap);
+const otakuMsg = providerResults[0].status === 'fulfilled' ? `${otakuList.length}` : `ERR:${providerResults[0].reason?.message}`;
+const ylOnMsg = providerResults[3].status === 'fulfilled' ? `${ylOngoingRaw.length}` : `ERR:${providerResults[3].reason?.message}`;
 if (merged.length === 0) {
+  emitNotice('sync-diag', `0 items! bases=${JSON.stringify(bases)} otaku=${otakuMsg} ylAZ=${ylBaseList.length} ylOngoing=${ylOnMsg} ${ylDiagSummary}`);
   console.error('0 item dari YLnime & Otakudesu — batalkan sinkronisasi');
   process.exit(1);
 }
@@ -248,7 +269,9 @@ for (let i = 0; i < batches.length; i++) {
     { attempts: 3, baseDelayMs: RETRY_BASE_MS }
   );
   if (!r.ok) {
-    console.error(`sync-source-catalog batch ${i + 1} gagal: HTTP ${r.last.status} ${r.last.body}`);
+    const errMsg = `sync-source-catalog batch ${i + 1} gagal: HTTP ${r.last.status} ${r.last.body}`;
+    emitNotice('sync-diag', errMsg);
+    console.error(errMsg);
     importFailed = true;
     break;
   }
@@ -258,19 +281,19 @@ for (let i = 0; i < batches.length; i++) {
   console.log(`batch ${i + 1}/${batches.length}: updated=${j.updated ?? 0} inserted=${j.inserted ?? 0} pruned=${j.pruned ?? false}`);
 }
 
-console.log(
-  `SUMMARY ${JSON.stringify({
-    scope: SCOPE,
-    ylnime: ylList.length,
-    otakudesu: otakuList.length,
-    unique: merged.length,
-    enriched: enrichedCount,
-    updated: totalUpdated,
-    inserted: totalInserted,
-    min: MIN_UNIQUE,
-    enough,
-  })}`
-);
+const summaryStr = JSON.stringify({
+  scope: SCOPE,
+  ylnime: ylList.length,
+  otakudesu: otakuList.length,
+  unique: merged.length,
+  enriched: enrichedCount,
+  updated: totalUpdated,
+  inserted: totalInserted,
+  min: MIN_UNIQUE,
+  enough,
+});
+console.log(`SUMMARY ${summaryStr}`);
+emitNotice('sync-diag', `SUMMARY ${summaryStr}`);
 
 if (importFailed) process.exit(1);
 if (!enough) {
