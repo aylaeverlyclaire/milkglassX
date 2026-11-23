@@ -1,32 +1,32 @@
 import { z } from 'zod';
 
-export type SourceId = 'samehadaku' | 'otakudesu';
+export type SourceId = 'ylnime' | 'otakudesu';
 
 export interface SourceBaseUrls {
-  samehadaku: string;
+  ylnime: string;
   otakudesu: string;
 }
 
 /**
  * Prioritas kanonik lintas Backend, Indexer, dan Android Engine:
- * Hanya Samehadaku dan Otakudesu yang aktif.
+ * Rank 1 = Otakudesu, Rank 2 = YLnime (menggantikan samehadaku.li).
  */
 export const SOURCE_CASCADE_ORDER: readonly SourceId[] = [
   'otakudesu',
-  'samehadaku',
+  'ylnime',
 ] as const;
 
 export const DEFAULT_SOURCE_URLS: Readonly<SourceBaseUrls> = {
-  samehadaku: 'https://samehadaku.li',
+  ylnime: 'https://ylnime.com',
   otakudesu: 'https://otakudesu.blog',
 };
 
 export const SOURCE_WATERMARK_TIER: Readonly<Record<SourceId, number>> = {
-  samehadaku: 0,
+  ylnime: 0,
   otakudesu: 2,
 };
 
-export const SOURCE_ID_SCHEMA = z.enum(['samehadaku', 'otakudesu']);
+export const SOURCE_ID_SCHEMA = z.enum(['ylnime', 'otakudesu']);
 
 export const QUALITY_SCHEMA = z.enum(['1080p', '720p', '480p', '360p']);
 export const TARGET_RESOLUTIONS = ['1080p', '720p', '480p'] as const;

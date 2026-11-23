@@ -96,7 +96,7 @@ export default {
       (async () => {
         await aggregateSourceHealthCron(env.DB);
 
-        // Katalog bersumber eksklusif dari Samehadaku & Otakudesu;
+        // Katalog bersumber eksklusif dari YLnime & Otakudesu;
         // AniList hanya bertugas melengkapi metadata (total eps, rating, poster).
         try {
           await backfillIncompleteAnime(env.DB, 50);
