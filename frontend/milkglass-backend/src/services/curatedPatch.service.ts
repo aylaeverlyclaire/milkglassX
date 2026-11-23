@@ -1,6 +1,11 @@
 import curatedPatch from '../../data/curated_catalog_patch.json';
 
-const META_KEY = 'curated_patch_version';
+const META_VERSION_KEY = 'curated_patch_version';
+const META_CURSOR_KEY = 'curated_patch_cursor';
+const META_TARGET_KEY = 'curated_patch_target';
+const BATCH_SIZE = 100;
+const MAX_ROWS_PER_PASS = 1000;
+
 let appliedInIsolateVersion = 0;
 
 export interface CuratedPatchEntry {
@@ -13,11 +18,14 @@ export interface CuratedPatchEntry {
 }
 
 const rawEntries = (curatedPatch.entries ?? []) as unknown as CuratedPatchEntry[];
+export const CURATED_PATCH_VERSION: number = Number(curatedPatch?.version ?? 0) || 0;
+
+const validEntries: CuratedPatchEntry[] = rawEntries.filter((e) =>
+  Boolean(e && Number.isInteger(e.id) && e.id > 0)
+);
 
 export const CURATED_PATCH_MAP: ReadonlyMap<number, CuratedPatchEntry> = new Map(
-  rawEntries
-    .filter((e) => Boolean(e && Number.isInteger(e.id) && e.id > 0))
-    .map((e) => [e.id, e])
+  validEntries.map((e) => [e.id, e])
 );
 
 export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<void> {
@@ -26,19 +34,34 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
   if (appliedInIsolateVersion >= targetVersion) return;
 
   try {
-    const row = await db
-      .prepare(`SELECT value FROM catalog_meta WHERE key = ?1`)
-      .bind(META_KEY)
-      .first<{ value: string }>();
-    const dbVersion = Number(row?.value ?? '0');
+    const metaRows = await db
+      .prepare(
+        `SELECT key, value FROM catalog_meta WHERE key IN (?1, ?2, ?3)`
+      )
+      .bind(META_VERSION_KEY, META_CURSOR_KEY, META_TARGET_KEY)
+      .all<{ key: string; value: string }>();
+
+    const meta = new Map<string, string>();
+    for (const r of metaRows.results ?? []) {
+      meta.set(r.key, r.value);
+    }
+
+    const dbVersion = Number(meta.get(META_VERSION_KEY) ?? '0');
     if (Number.isFinite(dbVersion) && dbVersion >= targetVersion) {
       appliedInIsolateVersion = dbVersion;
       return;
     }
 
+    const activeTarget = Number(meta.get(META_TARGET_KEY) ?? '0');
+    let cursor = activeTarget === targetVersion ? Number(meta.get(META_CURSOR_KEY) ?? '0') : 0;
+    if (!Number.isFinite(cursor) || cursor < 0) cursor = 0;
+
+    const end = Math.min(cursor + MAX_ROWS_PER_PASS, validEntries.length);
+    const slice = validEntries.slice(cursor, end);
     const nowSec = Math.floor(Date.now() / 1000);
+
     const stmts: D1PreparedStatement[] = [];
-    for (const entry of CURATED_PATCH_MAP.values()) {
+    for (const entry of slice) {
       const urlsJson = entry.source_urls ? JSON.stringify(entry.source_urls) : null;
       stmts.push(
         db
@@ -62,20 +85,31 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
       );
     }
 
-    stmts.push(
+    const upsertMeta = (key: string, value: string) =>
       db
         .prepare(
           `INSERT INTO catalog_meta (key, value, updated_at)
            VALUES (?1, ?2, ?3)
            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
         )
-        .bind(META_KEY, String(targetVersion), nowSec)
-    );
+        .bind(key, value, nowSec);
 
-    for (let i = 0; i < stmts.length; i += 80) {
-      await db.batch(stmts.slice(i, i + 80));
+    if (end >= validEntries.length) {
+      stmts.push(upsertMeta(META_VERSION_KEY, String(targetVersion)));
+      stmts.push(upsertMeta(META_TARGET_KEY, String(targetVersion)));
+      stmts.push(upsertMeta(META_CURSOR_KEY, '0'));
+    } else {
+      stmts.push(upsertMeta(META_TARGET_KEY, String(targetVersion)));
+      stmts.push(upsertMeta(META_CURSOR_KEY, String(end)));
     }
-    appliedInIsolateVersion = targetVersion;
+
+    for (let i = 0; i < stmts.length; i += BATCH_SIZE) {
+      await db.batch(stmts.slice(i, i + BATCH_SIZE));
+    }
+
+    if (end >= validEntries.length) {
+      appliedInIsolateVersion = targetVersion;
+    }
   } catch (err: unknown) {
     console.error('[curatedPatch] failed to apply', {
       error: err instanceof Error ? err.message : String(err),
