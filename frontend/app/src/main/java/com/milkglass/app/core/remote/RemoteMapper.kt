@@ -23,16 +23,17 @@ object RemoteMapper {
 
     fun toAnime(r: RemoteAnime): Anime {
         val ongoing = r.status == STATUS_RELEASING
+        val hasLive = r.sourceUrls.isNotEmpty()
         val released = when {
-            ongoing && r.nextAiringEp > 0 -> r.nextAiringEp - 1
+            ongoing && r.nextAiringEp > 0 -> (r.nextAiringEp - 1).coerceAtLeast(if (hasLive) 1 else 0)
             !ongoing && r.episodesTotal > 0 -> r.episodesTotal
-            else -> 0
+            else -> if (hasLive) 1 else 0
         }
 
         val total = when {
             r.episodesTotal > 0 -> maxOf(r.episodesTotal, released)
             ongoing -> released + 1
-            else -> released
+            else -> if (hasLive) released.coerceAtLeast(1) else released
         }
 
         val hasAir = r.nextAiringAt > 0
