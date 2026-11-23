@@ -249,7 +249,7 @@ class AppController(
 
     suspend fun loadEpisodeMeta(a: Anime) {
         val src = metaSource ?: return
-        if (a.id in seedIds || !metaRequested.add(a.id)) return
+        if (a.id in seedIds || a.id >= SYNTHETIC_SOURCE_ID_MIN || !metaRequested.add(a.id)) return
         try {
             val m = src.load(a.id)
             if (m == null) metaRequested.remove(a.id)
@@ -267,7 +267,7 @@ class AppController(
 
     suspend fun loadExtras(a: Anime) {
         val src = extrasSource ?: return
-        if (a.id in seedIds || !extrasRequested.add(a.id)) return
+        if (a.id in seedIds || a.id >= SYNTHETIC_SOURCE_ID_MIN || !extrasRequested.add(a.id)) return
         try {
             val x = src.load(a.id)
             if (x == null) extrasRequested.remove(a.id)
@@ -1176,3 +1176,4 @@ private const val BROWSE_PAGE_SIZE = 24
 private const val MAX_CATALOG_PAGES = 25
 
 private const val BOOT_BUDGET_MS = 3_500L
+private const val SYNTHETIC_SOURCE_ID_MIN = 900_000_000

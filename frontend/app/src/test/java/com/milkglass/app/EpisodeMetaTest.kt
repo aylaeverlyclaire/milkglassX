@@ -9,6 +9,13 @@ import com.milkglass.app.core.remote.parseAniSkip
 import com.milkglass.app.core.remote.parseAniZipEpisodes
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import com.milkglass.app.core.app.AppController
+import com.milkglass.app.core.model.Anime
+import com.milkglass.app.core.poster.PosterStore
+import com.milkglass.app.core.remote.AniListExtras
+import com.milkglass.app.core.remote.AniListExtrasSource
+import com.milkglass.app.core.remote.EpisodeMetaSource
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 
 class EpisodeMetaTest {
@@ -79,5 +86,43 @@ class EpisodeMetaTest {
         assertEquals(SkipKind.Ending, p.update(t, 101.0, .25))
         p.dismiss()
         assertNull(p.update(t, 101.25, .25))
+    }
+
+    @Test fun loadEpisodeMetaAndExtrasSkipSyntheticSourceIds() = runBlocking {
+        val metaCalls = mutableListOf<Int>()
+        val extrasCalls = mutableListOf<Int>()
+        val ctl = AppController(
+            TestSupport.data,
+            PosterStore(emptyMap()),
+            store = null,
+            metaSource = object : EpisodeMetaSource {
+                override suspend fun load(anilistId: Int): Map<Int, EpisodeMeta>? {
+                    metaCalls.add(anilistId)
+                    return emptyMap()
+                }
+            },
+            extrasSource = object : AniListExtrasSource {
+                override suspend fun load(anilistId: Int): AniListExtras? {
+                    extrasCalls.add(anilistId)
+                    return AniListExtras(emptyList(), emptyMap())
+                }
+            },
+        )
+        val base = Anime(
+            id = 900_000_001, title = "Synthetic", altTitle = "", genres = emptyList(),
+            colorFrom = "#000000", colorTo = "#111111", totalEpisodes = 12, releasedEpisodes = 1,
+            rating = 0.0, voteCount = 0, studio = "", year = 2026, ageRating = "",
+            episodeMinutes = 24, openingRange = emptyList(), synopsis = "", similarIds = emptyList(),
+        )
+        ctl.loadEpisodeMeta(base)
+        ctl.loadExtras(base)
+        assertEquals(emptyList<Int>(), metaCalls)
+        assertEquals(emptyList<Int>(), extrasCalls)
+
+        val real = base.copy(id = 987_654)
+        ctl.loadEpisodeMeta(real)
+        ctl.loadExtras(real)
+        assertEquals(listOf(987_654), metaCalls)
+        assertEquals(listOf(987_654), extrasCalls)
     }
 }
