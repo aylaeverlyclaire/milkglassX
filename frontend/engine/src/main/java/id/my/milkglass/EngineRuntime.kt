@@ -439,14 +439,18 @@ class EngineRuntime private constructor(private val appContext: Context) {
                             val html = fetchSeriesHtmlForProbe(priority, seriesUrl)
                             var parsed = if (html != null) parseLiveEpisodeMap(priority, html, seriesUrl) else emptyMap()
                             var usedUrl = seriesUrl
-                            if (parsed.isEmpty() && priority == SourcePriority.YLNIME &&
-                                Regex("(?:%2[fF]|/)+$").containsMatchIn(seriesUrl)
-                            ) {
-                                val cleanedUrl = seriesUrl.replace(Regex("(?:%2[fF]|/)+$"), "")
-                                val retryHtml = fetchSeriesHtmlForProbe(priority, cleanedUrl)
-                                if (retryHtml != null) {
-                                    parsed = parseLiveEpisodeMap(priority, retryHtml, cleanedUrl)
-                                    usedUrl = cleanedUrl
+                            if (parsed.isEmpty() && priority == SourcePriority.YLNIME) {
+                                val altUrl = if (Regex("(?:%2[fF]|/)+$").containsMatchIn(seriesUrl)) {
+                                    seriesUrl.replace(Regex("(?:%2[fF]|/)+$"), "")
+                                } else {
+                                    "$seriesUrl%2F"
+                                }
+                                if (altUrl != seriesUrl) {
+                                    val retryHtml = fetchSeriesHtmlForProbe(priority, altUrl)
+                                    if (retryHtml != null) {
+                                        parsed = parseLiveEpisodeMap(priority, retryHtml, altUrl)
+                                        usedUrl = altUrl
+                                    }
                                 }
                             }
                             if (parsed.isNotEmpty()) {
@@ -550,15 +554,22 @@ class EngineRuntime private constructor(private val appContext: Context) {
                     doc.select(".episodelist ul li a[href]")
                 }
                 val nonBatch = linkedSetOf<String>()
+                val bonusCandidates = mutableListOf<Pair<Int, String>>()
                 orderedEpLinks.forEach { a ->
                     val href = a.absUrl("href").trim()
                     if (href.contains("/episode/") && !href.contains("/batch/", ignoreCase = true)) {
                         nonBatch.add(href)
-                        SeriesEpisodeMapCache.extractEpisodeNumber(a.text(), href)?.let { num ->
-                            parsedMap.putIfAbsent(num, href)
+                        val txt = a.text()
+                        SeriesEpisodeMapCache.extractEpisodeNumber(txt, href)?.let { num ->
+                            if (SeriesEpisodeMapCache.isBonusOrSpecialLink(txt, href)) {
+                                bonusCandidates.add(num to href)
+                            } else {
+                                parsedMap.putIfAbsent(num, href)
+                            }
                         }
                     }
                 }
+                bonusCandidates.forEach { (num, href) -> parsedMap.putIfAbsent(num, href) }
                 if (parsedMap.isEmpty() && nonBatch.size == 1) {
                     parsedMap[1] = nonBatch.first()
                 }
