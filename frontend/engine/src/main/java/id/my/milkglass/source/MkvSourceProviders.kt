@@ -388,18 +388,19 @@ class YlnimeSourceProvider(
                     "search_item",
                     "a[href*='?series=']"
                 )
+                val genericLabels = setOf("cover", "poster", "thumbnail", "thumb", "image", "img", "logo", "banner", "watch", "tonton", "nonton", "detail")
                 bestAnimeUrl = searchDoc.select(ylSearchSel)
                     .mapNotNull { a ->
-                        val href = a.absUrl("href")
-                        if (!href.contains("series=")) return@mapNotNull null
+                        val href = a.absUrl("href").trim()
+                        if (!href.contains("series=") || href.contains("episode=", ignoreCase = true)) return@mapNotNull null
                         val card = a.closest(".card")
-                        val title = a.selectFirst(".tt, h2, h3, .title, .card-title, h6, h5")?.text()?.trim()
-                            ?.takeIf { it.isNotBlank() }
-                            ?: a.attr("title")
-                                .ifBlank { a.text() }
-                                .ifBlank { card?.selectFirst(".card-title, h6, h5")?.text().orEmpty() }
-                                .ifBlank { card?.selectFirst("img[alt]")?.attr("alt").orEmpty() }
-                                .trim()
+                        val title = listOf(
+                            a.selectFirst(".tt, h2, h3, .title, .card-title, h6, h5")?.text().orEmpty(),
+                            a.attr("title"),
+                            a.text(),
+                            card?.selectFirst(".card-title, h6, h5")?.text().orEmpty(),
+                            card?.selectFirst("img[alt]")?.attr("alt").orEmpty()
+                        ).map { it.trim() }.firstOrNull { it.length >= 2 && it.lowercase(Locale.ROOT) !in genericLabels }.orEmpty()
                         if (href.isBlank() || title.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
                     }
                     .maxByOrNull { it.first }
@@ -459,20 +460,73 @@ class YlnimeSourceProvider(
         val qDefault = MkvQuality.fromText(targetReso) ?: MkvQuality.P720
 
         // 1. Pemutar HTML5 <video><source src="..."> (server Animeverse YLnime)
+        val fallbackVideoCandidates = mutableListOf<RawMkvCandidate>()
         epDoc.select("video source[src], video[src]").forEach { el ->
             val src = el.absUrl("src").trim()
             if (src.startsWith("http") && !HosterFilter.isBlacklisted("Animeverse", src) && seenUrls.add(src)) {
                 val q = MkvQuality.fromText(src) ?: qDefault
+                val cand = RawMkvCandidate(
+                    source = priority,
+                    quality = q,
+                    hosterLabel = "Animeverse",
+                    rawUrl = src,
+                    pageReferer = epUrlWithReso,
+                    container = if (src.contains(".m3u8", ignoreCase = true)) MediaContainer.HLS else MediaContainer.MP4,
+                    isStreamEmbed = true
+                )
                 if (q in targetQualities) {
+                    results.add(cand)
+                } else {
+                    fallbackVideoCandidates.add(cand)
+                }
+            }
+        }
+        if (results.isEmpty() && fallbackVideoCandidates.isNotEmpty()) {
+            results.addAll(fallbackVideoCandidates)
+        }
+
+        // 1b. Ekstrak URL video/Pixeldrain dari atribut data-src/data-video/data-url dan inline <script> YLnime
+        epDoc.select("[data-src], [data-video], [data-url]").forEach { el ->
+            val raw = el.attr("data-src").ifBlank { el.attr("data-video") }.ifBlank { el.attr("data-url") }.trim()
+            if (raw.startsWith("http") && !HosterFilter.isBlacklisted("Animeverse", raw) && seenUrls.add(raw)) {
+                val low = raw.lowercase(Locale.ROOT)
+                if (low.contains(".mp4") || low.contains(".m3u8") || low.contains("pixeldrain.")) {
+                    val q = MkvQuality.fromText("${el.text()} $raw") ?: qDefault
                     results.add(
                         RawMkvCandidate(
                             source = priority,
                             quality = q,
-                            hosterLabel = "Animeverse",
-                            rawUrl = src,
+                            hosterLabel = if (low.contains("pixeldrain.")) "Pixeldrain" else "Animeverse",
+                            rawUrl = raw,
                             pageReferer = epUrlWithReso,
-                            container = if (src.contains(".m3u8", ignoreCase = true)) MediaContainer.HLS else MediaContainer.MP4,
-                            isStreamEmbed = true
+                            container = if (low.contains(".m3u8")) MediaContainer.HLS else MediaContainer.MP4,
+                            isStreamEmbed = !low.contains("pixeldrain.")
+                        )
+                    )
+                }
+            }
+        }
+        val scriptMediaRe = Regex(
+            """["'](https?://(?:[^"'\s<>]+\.(?:mp4|m3u8)(?:\?[^"'\s<>]*)?|(?:www\.)?pixeldrain\.(?:com|lu)/(?:u|api/file)/[A-Za-z0-9_-]+))["']""",
+            RegexOption.IGNORE_CASE
+        )
+        epDoc.select("script").forEach { sc ->
+            val body = sc.data()
+            if (body.isBlank()) return@forEach
+            scriptMediaRe.findAll(body).forEach { m ->
+                val raw = m.groupValues[1].replace("\\/", "/").trim()
+                if (raw.startsWith("http") && !HosterFilter.isBlacklisted("Animeverse", raw) && seenUrls.add(raw)) {
+                    val low = raw.lowercase(Locale.ROOT)
+                    val q = MkvQuality.fromText(raw) ?: qDefault
+                    results.add(
+                        RawMkvCandidate(
+                            source = priority,
+                            quality = q,
+                            hosterLabel = if (low.contains("pixeldrain.")) "Pixeldrain" else "Animeverse",
+                            rawUrl = raw,
+                            pageReferer = epUrlWithReso,
+                            container = if (low.contains(".m3u8")) MediaContainer.HLS else MediaContainer.MP4,
+                            isStreamEmbed = !low.contains("pixeldrain.")
                         )
                     )
                 }
@@ -481,6 +535,22 @@ class YlnimeSourceProvider(
 
         // 2. Tautan Pixeldrain & hoster cepat langsung di halaman YLnime
         results.addAll(harvestFallbackCandidates(epDoc, epUrlWithReso, results))
+
+        // 3. Fallback WebView EmbedMediaSniffer untuk player HTML5 YLnime yang memuat stream via JavaScript
+        //    (mis. Movie tanpa link download terpisah atau saat 1080p auto-fallback ke 720p di sisi klien).
+        if (results.isEmpty() && epUrlWithReso.startsWith("http")) {
+            results.add(
+                RawMkvCandidate(
+                    source = priority,
+                    quality = qDefault,
+                    hosterLabel = "YLnimePlayer",
+                    rawUrl = epUrlWithReso,
+                    pageReferer = bestAnimeUrl,
+                    container = MediaContainer.MP4,
+                    isStreamEmbed = true
+                )
+            )
+        }
         return results
     }
 }

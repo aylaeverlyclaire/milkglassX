@@ -112,6 +112,34 @@ object EmbedMediaSniffer {
             low.contains("pixeldrain.lu/api/file/")
     }
 
+    /**
+     * Validasi URL yang dibaca langsung dari elemen DOM `<video>.currentSrc` / `<source>.src`.
+     * Mendukung stream proxy `.php` atau CDN tanpa ekstensi file (mis. server Animeverse YLnime),
+     * sementara tetap menolak iklan, aset statis, dan halaman HTML/JS.
+     */
+    internal fun isDomVideoElementSourceUrl(url: String): Boolean {
+        if (!url.startsWith("https://", ignoreCase = true) && !url.startsWith("http://", ignoreCase = true)) {
+            return false
+        }
+        val low = url.lowercase(Locale.ROOT)
+        if (adAndTrackerTokens.any { low.contains(it) }) return false
+        if (nonMediaHints.any { low.contains(it) }) return false
+        val pathOnly = low.substringBefore('?').substringBefore('#')
+        if (blockedAssetExtensions.any { pathOnly.endsWith(it) }) return false
+        if (pathOnly.endsWith(".html") || pathOnly.endsWith(".htm") || pathOnly.endsWith(".js") ||
+            pathOnly.endsWith(".mjs") || pathOnly.endsWith(".json") || pathOnly.endsWith(".xml")
+        ) return false
+        return true
+    }
+
+    internal fun isRangeBackedMediaRequest(url: String, headers: Map<String, String>): Boolean {
+        val hasRange = headers.entries.any { (k, v) ->
+            k.equals("Range", ignoreCase = true) && v.lowercase(Locale.ROOT).startsWith("bytes=")
+        }
+        if (!hasRange) return false
+        return isDomVideoElementSourceUrl(url)
+    }
+
     internal fun isHlsUrl(url: String): Boolean {
         val low = url.lowercase(Locale.ROOT)
         val pathOnly = low.substringBefore('?').substringBefore('#')
@@ -211,8 +239,8 @@ object EmbedMediaSniffer {
                             val reqUrl = request?.url?.toString()?.trim().orEmpty()
                             if (reqUrl.isBlank()) return null
 
-                            if (isPlayableMediaUrl(reqUrl)) {
-                                val reqHeaders = request?.requestHeaders.orEmpty()
+                            val reqHeaders = request?.requestHeaders.orEmpty()
+                            if (isPlayableMediaUrl(reqUrl) || isRangeBackedMediaRequest(reqUrl, reqHeaders)) {
                                 val ref = reqHeaders["Referer"]
                                     ?: reqHeaders["referer"]
                                     ?: embedUrl
@@ -294,7 +322,7 @@ object EmbedMediaSniffer {
                                 ) { raw ->
                                     if (finished.get()) return@evaluateJavascript
                                     val cleaned = id.my.milkglass.net.SilentWebViewCfHandler.unescapeJsString(raw)?.trim().orEmpty()
-                                    if (isPlayableMediaUrl(cleaned)) {
+                                    if (isPlayableMediaUrl(cleaned) || isDomVideoElementSourceUrl(cleaned)) {
                                         val cookie = runCatching {
                                             CookieManager.getInstance().getCookie(cleaned)
                                                 ?: CookieManager.getInstance().getCookie(embedUrl)

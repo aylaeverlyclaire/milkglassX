@@ -1,5 +1,6 @@
 package id.my.milkglass
 
+import id.my.milkglass.extractor.EmbedMediaSniffer
 import id.my.milkglass.net.IsolatedHttpClients
 import id.my.milkglass.source.CascadeResult
 import id.my.milkglass.source.MediaContainer
@@ -9,7 +10,9 @@ import id.my.milkglass.source.MkvSourceProvider
 import id.my.milkglass.source.RawCandidateStore
 import id.my.milkglass.source.RawMkvCandidate
 import id.my.milkglass.source.SourceCircuitBreaker
+import id.my.milkglass.source.SeriesEpisodeMapCache
 import id.my.milkglass.source.SourcePriority
+import id.my.milkglass.source.TitleMatcher
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -103,5 +106,38 @@ class InstantPlayReliabilityTest {
         val otakuMap = EngineRuntime.parseLiveEpisodeMap(SourcePriority.OTAKUDESU, otakuHtml, "https://otakudesu.blog/anime/test/")
         assertEquals(14, otakuMap.keys.maxOrNull())
         assertEquals("https://otakudesu.blog/episode/test-episode-14-sub-indo/", otakuMap[14])
+    }
+
+    @Test
+    fun ylnimeMovieEpisodeLinkIsRecognizedEvenWithMultipleAnchors() {
+        val epUrl = "https://ylnime.com/index.php?series=date-a-live-movie-mayuri-judgment&episode=al-149330-1"
+        assertEquals(1, SeriesEpisodeMapCache.extractEpisodeNumber("Episode Movie", epUrl))
+        assertTrue(TitleMatcher.matchesEpisode("Episode Movie", epUrl, 1))
+
+        val html = """
+            <a href="index.php?series=date-a-live-movie-mayuri-judgment&episode=al-149330-1">Tonton Sekarang</a>
+            <a href="index.php?series=date-a-live-movie-mayuri-judgment&episode=al-149330-1&reso=720p">Episode Movie</a>
+        """.trimIndent()
+        val parsed = EngineRuntime.parseLiveEpisodeMap(
+            SourcePriority.YLNIME,
+            html,
+            "https://ylnime.com/index.php?series=date-a-live-movie-mayuri-judgment"
+        )
+        assertEquals(epUrl, parsed[1])
+    }
+
+    @Test
+    fun embedMediaSnifferAcceptsYlnimeDomProxyVideoAndRangeBackedStreams() {
+        assertTrue(EmbedMediaSniffer.isDomVideoElementSourceUrl("https://ylnime.com/stream.php?id=al-149330-1&reso=720p"))
+        assertTrue(EmbedMediaSniffer.isRangeBackedMediaRequest(
+            "https://cdn.animeverse.example/video/149330",
+            mapOf("Range" to "bytes=0-65535")
+        ))
+        assertFalse(EmbedMediaSniffer.isDomVideoElementSourceUrl("https://doubleclick.net/ads/video.mp4"))
+        assertFalse(EmbedMediaSniffer.isDomVideoElementSourceUrl("https://ylnime.com/assets/app.js"))
+        assertFalse(EmbedMediaSniffer.isRangeBackedMediaRequest(
+            "https://cdn.animeverse.example/video/149330",
+            emptyMap()
+        ))
     }
 }

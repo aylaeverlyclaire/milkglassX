@@ -251,6 +251,17 @@ class CloudflareInterceptor(
         response.close()
         cookieBridge.clearHostCookies(request.url)
 
+        // Prioritas 1: On-device silent WebView CF handler (zero server cost, IP residensial pengguna asli).
+        if (resolveSilentSingleFlight(host, urlStr)) {
+            val silentRetry = chain.proceed(request)
+            if (!isCloudflareChallenge(silentRetry)) {
+                return silentRetry
+            }
+            silentRetry.close()
+            cookieBridge.clearHostCookies(request.url)
+        }
+
+        // Prioritas 2: Fallback remote CF handler hanya jika mode hybrid/remote tersedia.
         val remote = resolveRemoteSingleFlight(host, urlStr)
         if (remote != null && remote.cookies.isNotEmpty()) {
             cookieBridge.injectCookies(request.url, remote.cookies)
@@ -266,14 +277,6 @@ class CloudflareInterceptor(
             }
             retryResp.close()
             cookieBridge.clearHostCookies(request.url)
-        }
-
-        if (resolveSilentSingleFlight(host, urlStr)) {
-            val silentRetry = chain.proceed(request)
-            if (!isCloudflareChallenge(silentRetry)) {
-                return silentRetry
-            }
-            silentRetry.close()
         }
 
         val verified = try {

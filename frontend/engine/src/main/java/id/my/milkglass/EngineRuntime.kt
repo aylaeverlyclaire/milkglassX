@@ -300,40 +300,40 @@ class EngineRuntime private constructor(private val appContext: Context) {
     }
 
     private fun fetchRemoteHtml(targetUrl: String): String? {
-        val now = System.currentTimeMillis()
-        val remoteHtml = if (now >= remoteCfDisabledUntilMs && sessionStore.hasActiveSession()) {
-            val endpoint = "${MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL}/v1/cf/html?url=${URLEncoder.encode(targetUrl, "UTF-8")}"
-            val req = Request.Builder()
-                .url(endpoint)
-                .header("Accept", "application/json")
-                .build()
-
-            runCatching {
-                clients.cfSolverClient.newCall(req).execute().use { resp ->
-                    if (resp.code == 503 || resp.code == 429) {
-                        remoteCfDisabledUntilMs = System.currentTimeMillis() + 5L * 60L * 1000L
-                        return@use null
-                    }
-                    if (!resp.isSuccessful) return@use null
-                    val raw = resp.body?.string().orEmpty()
-                    if (!sessionStore.verifyServerSignature(raw, resp.header("X-Milkglass-Server-Sig"))) {
-                        return@use null
-                    }
-                    val root = JSONObject(raw)
-                    if (root.optString("status") != "ok") return@use null
-                    root.optJSONObject("data")?.optString("html")?.takeIf { it.length >= 64 }
-                }
-            }.getOrNull()
-        } else {
-            null
-        }
-        if (remoteHtml != null) return remoteHtml
-        return id.my.milkglass.net.SilentWebViewCfHandler.fetchHtmlSilently(
+        // Prioritas 1: On-device silent WebView CF handler terlebih dahulu agar tidak membuang round-trip 503.
+        val localHtml = id.my.milkglass.net.SilentWebViewCfHandler.fetchHtmlSilently(
             context = appContext,
             url = targetUrl,
             userAgent = clients.webViewUserAgent,
             timeoutMs = 3_500L
         )
+        if (localHtml != null) return localHtml
+
+        // Prioritas 2: Fallback remote /v1/cf/html hanya jika on-device gagal dan sesi/remote aktif.
+        val now = System.currentTimeMillis()
+        if (now < remoteCfDisabledUntilMs || !sessionStore.hasActiveSession()) return null
+        val endpoint = "${MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL}/v1/cf/html?url=${URLEncoder.encode(targetUrl, "UTF-8")}"
+        val req = Request.Builder()
+            .url(endpoint)
+            .header("Accept", "application/json")
+            .build()
+
+        return runCatching {
+            clients.cfSolverClient.newCall(req).execute().use { resp ->
+                if (resp.code == 503 || resp.code == 429) {
+                    remoteCfDisabledUntilMs = System.currentTimeMillis() + 5L * 60L * 1000L
+                    return@use null
+                }
+                if (!resp.isSuccessful) return@use null
+                val raw = resp.body?.string().orEmpty()
+                if (!sessionStore.verifyServerSignature(raw, resp.header("X-Milkglass-Server-Sig"))) {
+                    return@use null
+                }
+                val root = JSONObject(raw)
+                if (root.optString("status") != "ok") return@use null
+                root.optJSONObject("data")?.optString("html")?.takeIf { it.length >= 64 }
+            }
+        }.getOrNull()
     }
 
     fun prewarmCloudflareEdge() {

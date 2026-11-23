@@ -304,6 +304,7 @@ internal object TitleMatcher {
     fun matchesEpisode(text: String, href: String, episodeNumber: Int): Boolean {
         val trimmed = text.trim()
         if (trimmed.toIntOrNull() == episodeNumber) return true
+        if (SeriesEpisodeMapCache.extractEpisodeNumber(trimmed, href) == episodeNumber) return true
         val epRegex = Regex("""(?:episode|eps|ep)[\s\-_]*0*($episodeNumber)(?!\d)""", RegexOption.IGNORE_CASE)
         return epRegex.containsMatchIn(trimmed) || epRegex.containsMatchIn(href)
     }
@@ -440,6 +441,8 @@ object SeriesEpisodeMapCache {
 
     private val EP_TEXT_REGEX = Regex("(?:episode|eps?|ep)\\s*0*(\\d{1,4})(?!\\d)", RegexOption.IGNORE_CASE)
     private val EP_HREF_REGEX = Regex("(?:episode|eps?|ep)[-_\\s]*0*(\\d{1,4})(?!\\d)", RegexOption.IGNORE_CASE)
+    private val YLNIME_EP_HREF_REGEX = Regex("[?&]episode=[a-z0-9_-]+-0*(\\d{1,4})(?:[&#]|$)", RegexOption.IGNORE_CASE)
+    private val MOVIE_EP_TEXT_REGEX = Regex("^(?:episode\\s+)?(?:movie|film|ova|special)$", RegexOption.IGNORE_CASE)
     private val SLUG_EP_REGEX = Regex("-ep-(\\d+)$", RegexOption.IGNORE_CASE)
 
     fun extractEpisodeNumberFromSlug(slug: String): Int =
@@ -448,7 +451,12 @@ object SeriesEpisodeMapCache {
     fun extractEpisodeNumber(text: String, href: String): Int? {
         val fromText = EP_TEXT_REGEX.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
         if (fromText != null) return fromText
-        return EP_HREF_REGEX.find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val fromHref = EP_HREF_REGEX.find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        if (fromHref != null) return fromHref
+        val fromYlnime = YLNIME_EP_HREF_REGEX.find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        if (fromYlnime != null) return fromYlnime
+        if (MOVIE_EP_TEXT_REGEX.matches(text.trim())) return 1
+        return null
     }
 }
 

@@ -224,21 +224,30 @@ class SourceAvailabilityIndex(
                     val url = if (ch.isEmpty()) "$base/anime-list.php" else "$base/anime-list.php?l=$ch"
                     val html = fetchHtml(url, "$base/") ?: return@submit emptyList()
                     val doc = Jsoup.parse(html, base)
+                    val genericLabels = setOf("cover", "poster", "thumbnail", "thumb", "image", "img", "logo", "banner", "watch", "tonton", "nonton", "detail")
                     doc.select("a[href*='?series=']").mapNotNull { a ->
+                        val href = a.absUrl("href").trim()
+                        if (href.contains("episode=", ignoreCase = true)) return@mapNotNull null
                         val card = a.closest(".card")
-                        val title = a.attr("title")
-                            .ifBlank { a.text() }
-                            .ifBlank { card?.selectFirst(".card-title, h6, h5")?.text().orEmpty() }
-                            .ifBlank { card?.selectFirst("img[alt]")?.attr("alt").orEmpty() }
-                            .trim()
-                        if (title.startsWith("[INFO]", ignoreCase = true)) null
-                        else buildEntry(SourcePriority.YLNIME, title, a.absUrl("href"))
+                        val candidates = listOf(
+                            a.attr("title"),
+                            a.text(),
+                            card?.selectFirst(".card-title, h6, h5")?.text().orEmpty(),
+                            card?.selectFirst("img[alt]")?.attr("alt").orEmpty()
+                        ).map { it.trim() }.filter { it.length >= 2 && it.lowercase(Locale.ROOT) !in genericLabels }
+                        val title = candidates.firstOrNull().orEmpty()
+                        if (title.isBlank() || title.startsWith("[INFO]", ignoreCase = true)) null
+                        else buildEntry(SourcePriority.YLNIME, title, href)
                     }
                 }
             }
             val seen = HashSet<String>()
+            val slugRe = Regex("[?&]series=([^&#]+)", RegexOption.IGNORE_CASE)
             futures.flatMap { f -> runCatching { f.get(15, TimeUnit.SECONDS) }.getOrDefault(emptyList()) }
-                .filter { seen.add(it.url) }
+                .filter { entry ->
+                    val slug = slugRe.find(entry.url)?.groupValues?.getOrNull(1)?.lowercase(Locale.ROOT) ?: entry.url.lowercase(Locale.ROOT)
+                    seen.add(slug)
+                }
         } finally {
             pool.shutdownNow()
         }
