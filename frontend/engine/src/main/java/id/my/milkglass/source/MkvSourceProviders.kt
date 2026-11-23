@@ -186,14 +186,21 @@ class OtakudesuSourceProvider(
                 animeDoc.select(".episodelist ul li a[href]")
             }
             val parsedMap = linkedMapOf<Int, String>()
+            val bonusCandidates = mutableListOf<Pair<Int, String>>()
             orderedEpLinks.forEach { a ->
                 val href = a.absUrl("href")
                 if (href.contains("/episode/")) {
-                    SeriesEpisodeMapCache.extractEpisodeNumber(a.text(), href)?.let { num ->
-                        parsedMap.putIfAbsent(num, href)
+                    val txt = a.text()
+                    SeriesEpisodeMapCache.extractEpisodeNumber(txt, href)?.let { num ->
+                        if (SeriesEpisodeMapCache.isBonusOrSpecialLink(txt, href)) {
+                            bonusCandidates.add(num to href)
+                        } else {
+                            parsedMap.putIfAbsent(num, href)
+                        }
                     }
                 }
             }
+            bonusCandidates.forEach { (num, href) -> parsedMap.putIfAbsent(num, href) }
             SeriesEpisodeMapCache.putAll(priority, bestAnimeUrl, parsedMap)
             val singleMovieEpUrl = if (episodeNumber == 1 && parsedMap.isEmpty()) {
                 val nonBatchEps = orderedEpLinks
@@ -268,11 +275,11 @@ class OtakudesuSourceProvider(
         val out = mutableListOf<RawMkvCandidate>()
         // 1) Panen iframe default yang sudah ada di HTML awal halaman episode (0 request AJAX)
         out.addAll(StreamingFirstGuards.harvestOtakudesuDefaultEmbeds(epDoc, epUrl, targetQualities, seenUrls))
-        val hasHealthyDefault = out.any { !it.rawUrl.contains("nekocloud", ignoreCase = true) }
-        if (hasHealthyDefault) return out
-
         val mirrorLinks = epDoc.select("ul.m360p li a[data-content], ul.m480p li a[data-content], ul.m720p li a[data-content]")
-        if (mirrorLinks.isEmpty()) return out
+        val deadOrAdMirrorTokens = listOf("vidhide", "ondesuhd", "moedesu", "nekocloud", "mega", "yourupload")
+        if (!StreamingFirstGuards.shouldFetchOtakudesuMirrors(out, mirrorLinks, targetQualities, deadOrAdMirrorTokens)) {
+            return out
+        }
         val nonce = runCatching {
             val nonceAction = RemoteRulesStore.globalSelectorFor(SourcePriority.OTAKUDESU, "ajax_nonce_action", "aa1208d27f29ca340c92c66d1926f13f")
             val form = okhttp3.FormBody.Builder().add("action", nonceAction).build()
@@ -288,20 +295,30 @@ class OtakudesuSourceProvider(
             }
         }.getOrNull() ?: return out
 
-        // Prioritaskan mirror sehat & cepat (odstream -> odcdn -> filedon -> otakuwatch),
-        // dan fail-fast skip mirror rusak/jebakan iklan (vidhide, ondesuhd, moedesu, nekocloud, mega).
-        val deadOrAdMirrorTokens = listOf("vidhide", "ondesuhd", "moedesu", "nekocloud", "mega", "yourupload")
-        val rankedMirrors = mirrorLinks.sortedBy { a ->
-            val low = a.text().trim().lowercase(Locale.ROOT)
-            when {
-                low.contains("odstream") -> 0
-                low.contains("odcdn") -> 1
-                low.contains("filedon") -> 2
-                low.contains("otakuwatch") -> 3
-                low.contains("mp4load") || low.contains("mp4upload") -> 4
-                else -> 10
+        // Prioritaskan resolusi tertinggi yang diminta (1080p/720p dulu), lalu mirror sehat & cepat
+        // (odstream -> odcdn -> filedon -> otakuwatch), dan fail-fast skip mirror rusak/iklan.
+        val rankedMirrors = mirrorLinks.sortedWith(
+            compareBy<org.jsoup.nodes.Element> { a ->
+                val ulClass = a.parents().firstOrNull { it.tagName() == "ul" }?.className().orEmpty()
+                when (MkvQuality.fromText(ulClass)) {
+                    MkvQuality.P1080 -> 0
+                    MkvQuality.P720 -> 1
+                    MkvQuality.P480 -> 2
+                    MkvQuality.P360 -> 3
+                    null -> 4
+                }
+            }.thenBy { a ->
+                val low = a.text().trim().lowercase(Locale.ROOT)
+                when {
+                    low.contains("odstream") -> 0
+                    low.contains("odcdn") -> 1
+                    low.contains("filedon") -> 2
+                    low.contains("otakuwatch") -> 3
+                    low.contains("mp4load") || low.contains("mp4upload") -> 4
+                    else -> 10
+                }
             }
-        }
+        )
         for (a in rankedMirrors) {
             if (out.size >= 3) break
             val label = a.text().trim()
@@ -414,11 +431,28 @@ class YlnimeSourceProvider(
 
         var epUrl = SeriesEpisodeMapCache.get(priority, bestAnimeUrl, episodeNumber)
         if (epUrl == null) {
-            val animeDoc = runCatching { fetchDoc(bestAnimeUrl, searchUrl) }.getOrElse {
+            var animeDoc = runCatching { fetchDoc(bestAnimeUrl, searchUrl) }.getOrElse {
                 if (!Thread.currentThread().isInterrupted) slugCache?.invalidate(priority, animeTitle)
                 throw it
             }
-            val epLinks = animeDoc.select("a[href*='episode=']")
+            var epLinks = animeDoc.select("a[href*='episode=']")
+            if (epLinks.size <= 1) {
+                val altUrl = if (Regex("(?:%2[fF]|/)+$").containsMatchIn(bestAnimeUrl)) {
+                    bestAnimeUrl.replace(Regex("(?:%2[fF]|/)+$"), "")
+                } else {
+                    "$bestAnimeUrl%2F"
+                }
+                if (altUrl != bestAnimeUrl) {
+                    val altDoc = runCatching { fetchDoc(altUrl, searchUrl) }.getOrNull()
+                    val altLinks = altDoc?.select("a[href*='episode=']")
+                    if (altDoc != null && altLinks != null && altLinks.size > epLinks.size) {
+                        animeDoc = altDoc
+                        epLinks = altLinks
+                        bestAnimeUrl = altUrl
+                        slugCache?.put(priority, animeTitle, bestAnimeUrl)
+                    }
+                }
+            }
             val parsedMap = linkedMapOf<Int, String>()
             val distinctUrls = linkedSetOf<String>()
             epLinks.forEach { a ->
@@ -508,15 +542,46 @@ class YlnimeSourceProvider(
                 }
             }
         }
+        val streamsJsonRe = Regex("""(?:const|let|var)\s+streams\s*=\s*(\[[\s\S]*?\])\s*;""")
         val scriptMediaRe = Regex(
-            """["'](https?://(?:[^"'\s<>]+\.(?:mp4|m3u8)(?:\?[^"'\s<>]*)?|(?:www\.)?pixeldrain\.(?:com|lu)/(?:u|api/file)/[A-Za-z0-9_-]+))["']""",
+            """["'](https?://(?:[^"'\s<>]+\.(?:mp4|m3u8)(?:\?[^"'\s<>]*)?|(?:www\.)?pixeldrain\.(?:com|lu)/(?:u|api/file)/[A-Za-z0-9_-]+(?:\?[^"'\s<>]*)?))["']""",
             RegexOption.IGNORE_CASE
         )
         epDoc.select("script").forEach { sc ->
-            val body = sc.data()
-            if (body.isBlank()) return@forEach
+            val rawBody = sc.data()
+            if (rawBody.isBlank()) return@forEach
+            streamsJsonRe.find(rawBody)?.groupValues?.getOrNull(1)?.let { arrJson ->
+                runCatching {
+                    val arr = org.json.JSONArray(arrJson)
+                    for (idx in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(idx) ?: continue
+                        val link = obj.optString("link").replace("\\/", "/").trim().replace(" ", "%20")
+                        if (!link.startsWith("http")) continue
+                        val low = link.lowercase(Locale.ROOT)
+                        val hostLabel = when {
+                            low.contains("pixeldrain.") -> "Pixeldrain"
+                            low.contains("animekita.") -> "AnimeKita"
+                            else -> "Animeverse"
+                        }
+                        if (HosterFilter.isBlacklisted(hostLabel, link) || !seenUrls.add(link)) continue
+                        val q = MkvQuality.fromText(obj.optString("reso")) ?: MkvQuality.fromText(link) ?: qDefault
+                        results.add(
+                            RawMkvCandidate(
+                                source = priority,
+                                quality = q,
+                                hosterLabel = hostLabel,
+                                rawUrl = link,
+                                pageReferer = epUrlWithReso,
+                                container = if (low.contains(".m3u8")) MediaContainer.HLS else MediaContainer.MP4,
+                                isStreamEmbed = false
+                            )
+                        )
+                    }
+                }
+            }
+            val body = rawBody.replace("\\/", "/")
             scriptMediaRe.findAll(body).forEach { m ->
-                val raw = m.groupValues[1].replace("\\/", "/").trim()
+                val raw = m.groupValues[1].trim()
                 if (raw.startsWith("http") && !HosterFilter.isBlacklisted("Animeverse", raw) && seenUrls.add(raw)) {
                     val low = raw.lowercase(Locale.ROOT)
                     val q = MkvQuality.fromText(raw) ?: qDefault
@@ -528,7 +593,7 @@ class YlnimeSourceProvider(
                             rawUrl = raw,
                             pageReferer = epUrlWithReso,
                             container = if (low.contains(".m3u8")) MediaContainer.HLS else MediaContainer.MP4,
-                            isStreamEmbed = !low.contains("pixeldrain.")
+                            isStreamEmbed = false
                         )
                     )
                 }

@@ -270,3 +270,21 @@ test('parseYlnimeEpisodes recognizes Episode Movie with al-149330-1 and inline s
   assert.ok(urls.includes('https://cdn.animeverse.example/hls/mayuri-480p.m3u8'));
   assert.ok(urls.includes('https://pixeldrain.com/u/Mayuri720'));
 });
+
+test('parseEpisodeHostersFromHtml mengekstrak const streams JSON YLnime dengan slash ter-escape', () => {
+  const html = `<script>const streams = [{"reso":"720p","link":"https:\\/\\/s3.animeverse.id\\/ro\\/ffa8-1791046151587.mp4","provide":871},{"reso":"720p","link":"https:\\/\\/pixeldrain.com\\/api\\/file\\/wF9Lj6Ad?download","provide":11}];</script>`;
+  const hosters = parseEpisodeHostersFromHtml(html, 'https://ylnime.com/?series=blk-clver-s2-sub-indo&episode=al-154261-1', 'ylnime');
+  assert.equal(hosters.length, 2);
+  assert.equal(hosters[0].hoster, 'Pixeldrain');
+  assert.equal(hosters[0].url, 'https://pixeldrain.com/api/file/wF9Lj6Ad?download');
+  assert.equal(hosters[1].hoster, 'Animeverse');
+  assert.equal(hosters[1].url, 'https://s3.animeverse.id/ro/ffa8-1791046151587.mp4');
+});
+
+test('parseEpisodeHostersFromHtml meng-encode spasi di URL s3.animeverse.id dan mengenali sjkt.animekita.org HLS/MP4', () => {
+  const html = `<script>const streams = [{"reso":"1080p","link":"https:\\/\\/s3.animeverse.id\\/mp4\\/Violet Evergarden Movie.mp4"},{"reso":"720p","link":"https:\\/\\/sjkt.animekita.org\\/hls\\/zuFmWTSf\\/output.m3u8"}];</script>`;
+  const hosters = parseEpisodeHostersFromHtml(html, 'https://ylnime.com/?series=violet-evergarden-movie&episode=al-153096-movie', 'ylnime');
+  assert.equal(hosters.length, 2);
+  assert.equal(hosters.some((h) => h.url === 'https://s3.animeverse.id/mp4/Violet%20Evergarden%20Movie.mp4'), true);
+  assert.equal(hosters.some((h) => h.hoster === 'AnimeKita' && h.container === 'hls' && h.url.includes('sjkt.animekita.org')), true);
+});
