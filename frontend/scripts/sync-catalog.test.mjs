@@ -14,22 +14,23 @@ import {
   minUnique,
   parseOtakudesuCatalog,
   parseOtakudesuSchedule,
-  parseSamehadakuCatalog,
+  parseYlnimeSchedule,
+  parseYlnimeCatalog,
   retryAfterMs,
 } from './lib/catalog-sync.mjs';
 import { evaluateStatus } from './check-freshness.mjs';
 
 const SCRIPT = fileURLToPath(new URL('./sync-catalog.mjs', import.meta.url));
 
-test('ALLOWED_CATALOG_PROVIDERS hanya berisi samehadaku dan otakudesu', () => {
-  assert.deepEqual(ALLOWED_CATALOG_PROVIDERS, ['samehadaku', 'otakudesu']);
+test('ALLOWED_CATALOG_PROVIDERS hanya berisi ylnime dan otakudesu', () => {
+  assert.deepEqual(ALLOWED_CATALOG_PROVIDERS, ['ylnime', 'otakudesu']);
   assert.ok(minUnique('full') > minUnique('ongoing'));
 });
 
-test('mergeProviderCatalogs: hanya menggabungkan Samehadaku & Otakudesu, menolak provider lain', () => {
-  const same = parseSamehadakuCatalog(`
-    <a href="https://samehadaku.li/anime/sousou-no-frieren/">Sousou no Frieren Sub Indo</a>
-    <a href="https://samehadaku.li/anime/solo-leveling/">Solo Leveling</a>
+test('mergeProviderCatalogs: hanya menggabungkan YLnime & Otakudesu, menolak provider lain', () => {
+  const same = parseYlnimeCatalog(`
+    <a href="https://ylnime.com/?series=sousou-no-frieren">Sousou no Frieren Sub Indo</a>
+    <a href="https://ylnime.com/?series=solo-leveling">Solo Leveling</a>
   `);
   const otaku = parseOtakudesuCatalog(`
     <a class="hodebgst" href="https://otakudesu.blog/anime/frieren-sub-indo/">Sousou no Frieren Subtitle Indonesia</a>
@@ -45,7 +46,7 @@ test('mergeProviderCatalogs: hanya menggabungkan Samehadaku & Otakudesu, menolak
   const frieren = merged.find((x) => x.title === 'Sousou no Frieren');
   assert.ok(frieren);
   assert.deepEqual(frieren.source_urls, {
-    samehadaku: 'https://samehadaku.li/anime/sousou-no-frieren/',
+    ylnime: 'https://ylnime.com/?series=sousou-no-frieren',
     otakudesu: 'https://otakudesu.blog/anime/frieren-sub-indo/',
   });
   assert.equal(merged.some((x) => x.title.includes('Unknown') || x.title.includes('AniList')), false);
@@ -61,7 +62,7 @@ test('isStrictIdentityMatch menegakkan Law of Identity untuk season, part, dan m
 test('applyAniListEnrichment hanya mengisi anime_id, mal_id, total eps, rating, dan poster tanpa mengubah source_urls', () => {
   const base = {
     title: 'Sousou no Frieren',
-    source_urls: { samehadaku: 'https://samehadaku.li/anime/sousou-no-frieren/' },
+    source_urls: { ylnime: 'https://ylnime.com/?series=sousou-no-frieren' },
   };
   const enriched = applyAniListEnrichment(base, {
     id: 154587,
@@ -139,15 +140,15 @@ function runScript(env) {
   });
 }
 
-test('integrasi: katalog hanya dari Samehadaku + Otakudesu, AniList hanya enrich metadata, dan prune di batch terakhir', async () => {
+test('integrasi: katalog hanya dari YLnime + Otakudesu, AniList hanya enrich metadata, dan prune di batch terakhir', async () => {
   const posts = [];
   let anilistQueries = 0;
 
   const providerSrv = await listen((req, res) => {
-    if (req.url.startsWith('/az-list/') || req.url.startsWith('/daftar-anime-2/')) {
+    if (req.url.startsWith('/anime-list.php')) {
       res.writeHead(200, { 'Content-Type': 'text/html' }).end(`
-        <a href="https://samehadaku.li/anime/frieren/">Sousou no Frieren</a>
-        <a href="https://samehadaku.li/anime/solo-leveling/">Solo Leveling</a>
+        <a href="https://ylnime.com/?series=frieren">Sousou no Frieren</a>
+        <a href="https://ylnime.com/?series=solo-leveling">Solo Leveling</a>
       `);
       return;
     }
@@ -190,7 +191,7 @@ test('integrasi: katalog hanya dari Samehadaku + Otakudesu, AniList hanya enrich
     const r = await runScript({
       WORKER_URL: workerSrv.url,
       ADMIN_SECRET: 's3cret-s3cret-s3cret',
-      SAMEHADAKU_BASE_URL: providerSrv.url,
+      YLNIME_BASE_URL: providerSrv.url,
       OTAKUDESU_BASE_URL: providerSrv.url,
       ANILIST_URL: anilistSrv.url,
       SCOPE: 'full',
@@ -207,7 +208,7 @@ test('integrasi: katalog hanya dari Samehadaku + Otakudesu, AniList hanya enrich
     assert.equal(frieren.episodes_total, 28);
     assert.equal(frieren.score, 9.1);
     assert.equal(frieren.poster_url, 'https://s4.anilist.co/frieren.jpg');
-    assert.ok(frieren.source_urls.samehadaku);
+    assert.ok(frieren.source_urls.ylnime);
     assert.ok(frieren.source_urls.otakudesu);
     assert.match(r.out, /SUMMARY .*"enough":true/);
   } finally {
@@ -217,7 +218,7 @@ test('integrasi: katalog hanya dari Samehadaku + Otakudesu, AniList hanya enrich
   }
 });
 
-test('integrasi: Samehadaku & Otakudesu gagal total -> exit 1, tidak ada sinkronisasi', async () => {
+test('integrasi: YLnime & Otakudesu gagal total -> exit 1, tidak ada sinkronisasi', async () => {
   const posts = [];
   const deadSrv = await listen((_req, res) => { res.writeHead(503).end('down'); });
   const workerSrv = await listen(async (req, res) => {
@@ -228,7 +229,7 @@ test('integrasi: Samehadaku & Otakudesu gagal total -> exit 1, tidak ada sinkron
     const r = await runScript({
       WORKER_URL: workerSrv.url,
       ADMIN_SECRET: 'x'.repeat(20),
-      SAMEHADAKU_BASE_URL: deadSrv.url,
+      YLNIME_BASE_URL: deadSrv.url,
       OTAKUDESU_BASE_URL: deadSrv.url,
       SCOPE: 'ongoing',
     });
@@ -289,11 +290,11 @@ test('canonicalCatalogKey menyatukan Date A Live II & Season 2 tanpa duplikat, t
 
   const merged = mergeProviderCatalogs([
     [{ title: 'Date A Live II BD (Episode 1 – 10) Subtitle Indonesia + OVA', url: 'https://otakudesu.blog/anime/dal-s2/', provider: 'otakudesu', status: 2 }],
-    [{ title: 'Date A Live Season 2', url: 'https://samehadaku.li/anime/date-a-live-s2/', provider: 'samehadaku' }],
+    [{ title: 'Date A Live Season 2', url: 'https://ylnime.com/anime/date-a-live-s2/', provider: 'ylnime' }],
   ]);
   assert.equal(merged.length, 1);
   assert.ok(merged[0].source_urls.otakudesu);
-  assert.ok(merged[0].source_urls.samehadaku);
+  assert.ok(merged[0].source_urls.ylnime);
 });
 
 test('integrasi: hasil scrape di bawah MIN_UNIQUE tidak boleh mengirim prune=true (lindungi katalog existing)', async () => {
@@ -322,7 +323,7 @@ test('integrasi: hasil scrape di bawah MIN_UNIQUE tidak boleh mengirim prune=tru
     const r = await runScript({
       WORKER_URL: workerSrv.url,
       ADMIN_SECRET: 'x'.repeat(20),
-      SAMEHADAKU_BASE_URL: providerSrv.url,
+      YLNIME_BASE_URL: providerSrv.url,
       OTAKUDESU_BASE_URL: providerSrv.url,
       ANILIST_URL: providerSrv.url,
       SCOPE: 'ongoing',
@@ -357,4 +358,30 @@ test('applyAniListEnrichment mempertahankan anime_id wadah yang sudah ada agar r
   assert.equal(enriched.mal_id, 52991);
   assert.equal(enriched.score, 9.1);
   assert.equal(enriched.poster_url, 'https://s4.anilist.co/frieren.jpg');
+});
+
+test('parseYlnimeCatalog strips (HD)/(Uncen) prefix and skips [INFO] and (Live Action) entries', () => {
+  const html = `
+    <a href="?series=kny-infinity">(HD) Kimetsu no Yaiba: Infinity Castle Movie</a>
+    <a href="?series=nande-koko">(Uncen) Nande Koko ni Sensei ga!?</a>
+    <a href="?series=zom-100-la">(Live Action) Zom 100</a>
+    <a href="?series=info-takedown">[INFO] App Ke Takedown Playstore</a>
+  `;
+  const list = parseYlnimeCatalog(html, 'https://ylnime.com');
+  assert.deepEqual(
+    list.map((x) => x.title),
+    ['Kimetsu no Yaiba: Infinity Castle Movie', 'Nande Koko ni Sensei ga!?']
+  );
+});
+
+test('parseYlnimeSchedule maps daily schedule sections (Senin..Minggu) for YLnime-only or Random titles', () => {
+  const html = `
+    <h2>Senin 23 November 2026</h2>
+    <a href="?series=seitokai-ni-mo-ana-wa-aru">Seitokai ni mo Ana wa Aru!</a>
+    <h2>Minggu 22 November 2026</h2>
+    <a href="?series=black-clover-s2">Black Clover Season 2</a>
+  `;
+  const sched = parseYlnimeSchedule(html);
+  assert.equal(sched.get(canonicalCatalogKey('Seitokai ni mo Ana wa Aru!')), 1);
+  assert.equal(sched.get(canonicalCatalogKey('Black Clover Season 2')), 7);
 });

@@ -238,20 +238,46 @@ export function parseOtakudesuAnimeList(html) {
   return out;
 }
 
-export function parseSamehadakuAnimeList(html) {
+export function parseYlnimeAnimeList(html, baseUrl = 'https://ylnime.com') {
   const out = [];
   const seen = new Set();
-  const re = /<a[^>]+href="(https?:\/\/[^"]+\/anime\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const root = String(baseUrl || 'https://ylnime.com').replace(/\/+$/, '');
+  const re = /<a[^>]+href="((?:https?:\/\/[^"]+\/|\/)?(?:index\.php)?\?series=[^"&]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(html)) !== null) {
-    const url = m[1].trim();
+    const rawHref = m[1].trim().replace(/&amp;/g, '&');
+    const url = rawHref.startsWith('http') ? rawHref : `${root}/${rawHref.replace(/^\/+/, '')}`;
     const title = m[2].replace(/<[^>]+>/g, '').trim();
-    if (url.startsWith('http') && title.length >= 2 && !seen.has(url)) {
+    if (url.startsWith('http') && title.length >= 2 && !/^\[?info\]?/i.test(title) && !seen.has(url)) {
       seen.add(url);
-      out.push({ title, url, provider: 'samehadaku' });
+      out.push({ title, url, provider: 'ylnime' });
     }
   }
   return out;
+}
+
+export function parseYlnimeEpisodes(html, baseUrl = 'https://ylnime.com') {
+  const map = new Map();
+  const singleFallback = [];
+  const root = String(baseUrl || 'https://ylnime.com').replace(/\/+$/, '');
+  const re = /<a[^>]+href="([^"]*episode=[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const rawHref = m[1].trim().replace(/&amp;/g, '&');
+    const url = rawHref.startsWith('http') ? rawHref : `${root}/${rawHref.replace(/^\/+/, '')}`;
+    if (!singleFallback.includes(url)) singleFallback.push(url);
+    const text = m[2].replace(/<[^>]+>/g, '').trim();
+    const ep = extractEpisodeNumber(text, url);
+    if (ep !== null && ep >= 0 && !map.has(ep)) {
+      map.set(ep, url);
+    }
+  }
+  if (map.size === 0 && singleFallback.length === 1) {
+    map.set(1, singleFallback[0]);
+  }
+  return Array.from(map.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([ep, url]) => ({ ep, url }));
 }
 
 export function parseOtakudesuEpisodes(html) {
@@ -265,7 +291,7 @@ export function parseOtakudesuEpisodes(html) {
     if (!nonBatchFallback.includes(url)) nonBatchFallback.push(url);
     const text = m[2].replace(/<[^>]+>/g, '').trim();
     const ep = extractEpisodeNumber(text, url);
-    if (ep && !map.has(ep)) {
+    if (ep !== null && ep >= 0 && !map.has(ep)) {
       map.set(ep, url);
     }
   }
@@ -290,8 +316,20 @@ export function parseGenericEpisodes(html, baseUrl = '') {
     if (!/episode|eps/i.test(url) && !/episode|eps/i.test(text)) continue;
     if (/batch|daftar-anime|anime-list|schedule|jadwal/i.test(url)) continue;
     const ep = extractEpisodeNumber(text, url);
-    if (ep && !map.has(ep)) {
+    if (ep !== null && ep >= 0 && !map.has(ep)) {
       map.set(ep, url);
+    }
+  }
+  // Movie YLnime (mis. /black-clover-mahou-tei-no-ken-sword-of-the-wizard-king/) tidak memakai segmen /episode/
+  if (map.size === 0) {
+    const epListBlock = html.match(/<div[^>]+class="[^"]*(?:eplister|lstepsiode|listeps)[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/i)?.[1]
+      || html.match(/<div[^>]+class="[^"]*(?:eplister|lstepsiode|listeps)[^"]*"[^>]*>([\s\S]*?)<\/ul>/i)?.[1]
+      || '';
+    if (epListBlock) {
+      const linkM = epListBlock.match(/<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>/i);
+      if (linkM && !/batch|daftar-anime|anime-list|\/anime\//i.test(linkM[1])) {
+        map.set(1, linkM[1].trim());
+      }
     }
   }
   return Array.from(map.entries())
@@ -325,6 +363,25 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
       isEmbed: true,
     });
   };
+
+  const videoSrcRe = /<(?:video|source)[^>]+src=["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["'][^>]*>/gi;
+  let vm;
+  while ((vm = videoSrcRe.exec(html)) !== null) {
+    const vUrl = vm[1].trim().replace(/&amp;/g, '&');
+    if (isBlacklistedUrl('YLnimeVideo', vUrl)) continue;
+    const q = parseQuality(vUrl) || '720p';
+    const dk = `${q}|${vUrl}`;
+    if (seen.has(dk)) continue;
+    seen.add(dk);
+    results.push({
+      url: vUrl,
+      quality: q,
+      hoster: 'Animeverse',
+      provider,
+      container: vUrl.toLowerCase().includes('.m3u8') ? 'hls' : 'mp4',
+      referer: pageUrl,
+    });
+  }
 
   const iframeRe = /<iframe[^>]+src=["'](https?:\/\/[^"']+)["'][^>]*>/gi;
   let im;
@@ -430,7 +487,7 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
   return balanced;
 }
 
-const ALLOWED_CATALOG_PROVIDERS = new Set(['samehadaku', 'otakudesu']);
+const ALLOWED_CATALOG_PROVIDERS = new Set(['otakudesu', 'ylnime']);
 
 export function buildSourceFirstCatalog(catalog, providerIndices) {
   const allowedIndices = (providerIndices || []).filter((p) => p && ALLOWED_CATALOG_PROVIDERS.has(p.provider));
@@ -471,7 +528,7 @@ export function buildSourceFirstCatalog(catalog, providerIndices) {
     }
   }
 
-  // Source-First: sertakan anime yang ada di Samehadaku/Otakudesu
+  // Source-First: sertakan anime yang ada di YLnime/Otakudesu
   const sourceOnlyByKey = new Map();
   for (const pIdx of providerIndices) {
     for (const cand of pIdx.list) {
@@ -594,48 +651,38 @@ async function main() {
 
   const catalog = (catJson.data || []).slice(0, maxAnimes);
   const sourcesMap = new Map((srcJson.sources || []).map((s) => [s.id, s.base_url]));
-  const sameBase = (sourcesMap.get('samehadaku') || 'https://samehadaku.li').replace(/\/+$/, '');
+  const ylBase = (sourcesMap.get('ylnime') || 'https://ylnime.com').replace(/\/+$/, '');
   const otakuBase = (sourcesMap.get('otakudesu') || 'https://otakudesu.blog').replace(/\/+$/, '');
 
-  // Katalog eksklusif Samehadaku & Otakudesu saja.
+  // Katalog eksklusif YLnime & Otakudesu saja.
   const providerIndices = [];
-  async function fetchSamehadakuAllPages() {
-    const all = [];
-    const seenUrls = new Set();
-    for (let page = 1; page <= 15; page++) {
-      const pageUrl = page === 1 ? `${sameBase}/az-list/` : `${sameBase}/az-list/page/${page}/`;
-      let html = '';
-      try {
-        html = await fetchText(pageUrl, `${sameBase}/`, 20000);
-      } catch {
-        if (page === 1) {
-          html = await fetchText(`${sameBase}/daftar-anime-2/?list`, `${sameBase}/`, 20000);
-          return parseSamehadakuAnimeList(html);
-        }
-        break;
-      }
-      const items = parseSamehadakuAnimeList(html);
-      let added = 0;
-      for (const it of items) {
-        if (!seenUrls.has(it.url)) {
-          seenUrls.add(it.url);
-          all.push(it);
-          added++;
+  const [ylRes, otakuRes] = await Promise.allSettled([
+    (async () => {
+      const letters = ['', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')];
+      const all = [];
+      const seen = new Set();
+      for (let i = 0; i < letters.length; i += 6) {
+        const settled = await Promise.allSettled(
+          letters.slice(i, i + 6).map((ch) => {
+            const u = ch ? `${ylBase}/anime-list.php?l=${ch}` : `${ylBase}/anime-list.php`;
+            return fetchText(u, `${ylBase}/`, 20000).then((h) => parseYlnimeAnimeList(h, ylBase));
+          })
+        );
+        for (const r of settled) {
+          if (r.status !== 'fulfilled') continue;
+          for (const it of r.value) {
+            if (!seen.has(it.url)) { seen.add(it.url); all.push(it); }
+          }
         }
       }
-      if (added === 0 || !new RegExp(`/az-list/page/${page + 1}/`, 'i').test(html)) break;
-    }
-    return all;
-  }
-
-  const [sameRes, otakuRes] = await Promise.allSettled([
-    fetchSamehadakuAllPages(),
+      return all;
+    })(),
     fetchText(`${otakuBase}/anime-list/`, `${otakuBase}/`, 20000).then(parseOtakudesuAnimeList),
   ]);
 
   const orderedProviderResults = [
     ['otakudesu', otakuBase, otakuRes],
-    ['samehadaku', sameBase, sameRes],
+    ['ylnime', ylBase, ylRes],
   ];
   for (const [provider, base, res] of orderedProviderResults) {
     if (res.status === 'fulfilled' && res.value.length > 0) {
@@ -719,7 +766,9 @@ async function main() {
         const rawEps =
           source.provider === 'otakudesu'
             ? parseOtakudesuEpisodes(animeHtml)
-            : parseGenericEpisodes(animeHtml, source.base);
+            : source.provider === 'ylnime'
+              ? parseYlnimeEpisodes(animeHtml, source.base)
+              : parseGenericEpisodes(animeHtml, source.base);
         const eps = selectEpisodesToIndex(rawEps, maxEps);
         if (eps.length === 0) continue;
 
