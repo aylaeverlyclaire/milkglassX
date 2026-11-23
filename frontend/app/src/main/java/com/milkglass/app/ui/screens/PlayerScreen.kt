@@ -725,8 +725,11 @@ private fun PlayerInfo(
     val e = entry.engine
     val a = e.anime
     val ep = e.episode
-    val mx = minOf(a.totalEpisodes, time.releasedEpisodeCount(a) + if (time.isOngoing(a)) 1 else 0)
-    val episodesList = remember(mx) { if (mx >= 2) (1..mx).toList() else emptyList() }
+    val released = ctl.effectiveReleasedCount(a)
+    val totalEps = ctl.effectiveTotalCount(a)
+    val mx = maxOf(released, minOf(totalEps, released + if (time.isOngoing(a)) 1 else 0))
+    val startEp = if (ctl.hasEpisodeZero(a)) 0 else 1
+    val episodesList = remember(startEp, mx) { if (mx - startEp + 1 >= 2) (startEp..mx).toList() else emptyList() }
     val recAnimes = remember(entry.rec, ctl.catalog) { entry.rec.mapNotNull { ctl.animeOf(it) }.take(9) }
     val accent = remember(a.id, c.surface) { com.milkglass.app.core.design.accentFor(a, c.surface) }
     Column(

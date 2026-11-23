@@ -78,4 +78,30 @@ class InstantPlayReliabilityTest {
         assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.OTAKUDESU))
         assertFalse(SourceCircuitBreaker.isOpen(SourcePriority.YLNIME))
     }
+
+    @Test
+    fun parseLiveEpisodeMapDetectsNewlyReleasedEpisodeAndEpisodeZero() {
+        val ylHtml = """
+            <a href="index.php?series=mushoku-tensei&episode=al-24930-0">Episode 0</a>
+            <a href="index.php?series=mushoku-tensei&episode=al-24930-1">Episode 1</a>
+            <a href="index.php?series=mushoku-tensei&episode=al-24930-13">Episode 13</a>
+        """.trimIndent()
+        val ylMap = EngineRuntime.parseLiveEpisodeMap(SourcePriority.YLNIME, ylHtml, "https://ylnime.com/index.php?series=mushoku-tensei")
+        assertTrue(0 in ylMap)
+        assertEquals(13, ylMap.keys.maxOrNull())
+        assertEquals("https://ylnime.com/index.php?series=mushoku-tensei&episode=al-24930-13", ylMap[13])
+
+        val otakuHtml = """
+            <div class="episodelist"><ul><li><a href="https://otakudesu.blog/batch/test/">Batch</a></li></ul></div>
+            <div class="episodelist">
+              <ul>
+                <li><a href="https://otakudesu.blog/episode/test-episode-14-sub-indo/">Test Episode 14 Sub Indo</a></li>
+                <li><a href="https://otakudesu.blog/episode/test-episode-1-sub-indo/">Test Episode 1 Sub Indo</a></li>
+              </ul>
+            </div>
+        """.trimIndent()
+        val otakuMap = EngineRuntime.parseLiveEpisodeMap(SourcePriority.OTAKUDESU, otakuHtml, "https://otakudesu.blog/anime/test/")
+        assertEquals(14, otakuMap.keys.maxOrNull())
+        assertEquals("https://otakudesu.blog/episode/test-episode-14-sub-indo/", otakuMap[14])
+    }
 }

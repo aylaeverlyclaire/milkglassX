@@ -98,8 +98,9 @@ fun DetailScreen(ctl: AppController, id: Int) {
     val time = ctl.time
     val a = ctl.animeOf(id) ?: run { LaunchedEffect(id) { ctl.goBack() }; return }
     val resume = ctl.continueInfo(a)
-    val released = time.releasedEpisodeCount(a)
-    val mx = minOf(a.totalEpisodes, released + if (time.isOngoing(a)) 1 else 0)
+    val released = ctl.effectiveReleasedCount(a)
+    val totalEps = ctl.effectiveTotalCount(a)
+    val mx = maxOf(released, minOf(totalEps, released + if (time.isOngoing(a)) 1 else 0))
     val hasEp0 = ctl.hasEpisodeZero(a)
     val startEp = if (hasEp0) 0 else 1
     val eps = remember(startEp, mx, ctl.episodesDescending) { (startEp..mx).toList().let { if (ctl.episodesDescending) it.reversed() else it } }
@@ -114,6 +115,16 @@ fun DetailScreen(ctl: AppController, id: Int) {
     LaunchedEffect(a.id) { ctl.loadEpisodeMeta(a) }
     LaunchedEffect(a.id) { ctl.loadExtras(a) }
     val detailCtx = LocalContext.current.applicationContext
+    LaunchedEffect(a.id, ctl.online) {
+        if (ctl.online && (a.sourceUrls.isNotEmpty() || a.romaji.isNotBlank())) {
+            val rt = EngineRuntime.get(detailCtx)
+            rt.seedSourceUrls(a.title, a.romaji, a.sourceUrls)
+            val live = rt.probeLiveEpisodes(a.title, a.romaji, a.sourceUrls)
+            if (live != null && (live.maxEpisode > 0 || live.hasEpisodeZero)) {
+                ctl.reportLiveEpisodes(a.id, live.maxEpisode, live.hasEpisodeZero)
+            }
+        }
+    }
     LaunchedEffect(a.id, resume?.episode, resume?.waiting, ctl.preferredQuality, ctl.online) {
         val targetEp = when {
             resume == null -> 1
@@ -249,8 +260,8 @@ fun DetailScreen(ctl: AppController, id: Int) {
                 "episodes" -> Column {
                     Row(Modifier.fillMaxWidth().heightIn(min = 32.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         MilkText(
-                            (if (released >= a.totalEpisodes) tr.t("detail.episodesAll", "totalEpisodes" to a.totalEpisodes)
-                            else tr.t("detail.episodesAvailable", "released" to released, "totalEpisodes" to a.totalEpisodes)) +
+                            (if (released >= totalEps) tr.t("detail.episodesAll", "totalEpisodes" to totalEps)
+                            else tr.t("detail.episodesAvailable", "released" to released, "totalEpisodes" to totalEps)) +
                                 " · " + tr.t("episode.minutes", "episodeMinutes" to a.episodeMinutes),
                             ty.caption, c.onSurfaceVariant, Modifier.weight(1f, fill = false))
                         Spacer(Modifier.width(8.dp))

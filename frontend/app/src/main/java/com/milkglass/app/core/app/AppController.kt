@@ -210,8 +210,26 @@ class AppController(
 
     private var episodeMeta by mutableStateOf<Map<Int, Map<Int, com.milkglass.app.core.remote.EpisodeMeta>>>(emptyMap())
     private val metaRequested = HashSet<Int>()
+    private var liveEpisodeMax by mutableStateOf<Map<Int, Int>>(emptyMap())
+    private var liveEpisodeZero by mutableStateOf<Map<Int, Boolean>>(emptyMap())
 
-    fun hasEpisodeZero(a: Anime): Boolean = episodeMeta[a.id]?.containsKey(0) == true
+    fun reportLiveEpisodes(animeId: Int, maxEpisode: Int, hasEp0: Boolean) {
+        if (maxEpisode > (liveEpisodeMax[animeId] ?: 0)) {
+            liveEpisodeMax = liveEpisodeMax + (animeId to maxEpisode)
+        }
+        if (hasEp0 && liveEpisodeZero[animeId] != true) {
+            liveEpisodeZero = liveEpisodeZero + (animeId to true)
+        }
+    }
+
+    fun effectiveReleasedCount(a: Anime): Int =
+        maxOf(time.releasedEpisodeCount(a), liveEpisodeMax[a.id] ?: 0)
+
+    fun effectiveTotalCount(a: Anime): Int =
+        maxOf(a.totalEpisodes, effectiveReleasedCount(a))
+
+    fun hasEpisodeZero(a: Anime): Boolean =
+        episodeMeta[a.id]?.containsKey(0) == true || liveEpisodeZero[a.id] == true
 
     fun episodeThumbOf(a: Anime, ep: Int): String? = episodeMeta[a.id]?.get(ep)?.image
 
@@ -473,7 +491,8 @@ class AppController(
     fun isEarlyAccessWindow(a: Anime): Boolean = time.nextReleaseAt(a)?.let { it - now() <= DAY_MS } ?: false
 
     fun episodeAccess(a: Anime, ep: Int): Access {
-        val released = time.releasedEpisodeCount(a)
+        if (ep == 0 && hasEpisodeZero(a)) return Access.Ok
+        val released = effectiveReleasedCount(a)
         if (ep <= released) return Access.Ok
         return if (features.premium && ep == released + 1 && time.isOngoing(a) && isEarlyAccessWindow(a)) {
             if (isPremium()) Access.Ok else Access.Early
@@ -482,17 +501,18 @@ class AppController(
 
     fun episodeAirTime(a: Anime, ep: Int): Long? =
         extras[a.id]?.airingAtMs?.get(ep)
-            ?: time.nextReleaseAt(a)?.let { it + (ep - time.releasedEpisodeCount(a) - 1) * WEEK_MS }
+            ?: time.nextReleaseAt(a)?.let { it + (ep - effectiveReleasedCount(a) - 1) * WEEK_MS }
 
     fun continueInfo(a: Anime): ContinueInfo? {
         val started = startedEpisodes(a)
         if (started.isEmpty()) return null
         val l = started.max()
         if (!isWatched(a, l)) return ContinueInfo(episode = l, position = resumePosition(a, l))
-        val released = time.releasedEpisodeCount(a)
-        val hi = released + if (episodeAccess(a, released + 1) == Access.Ok && released < a.totalEpisodes) 1 else 0
+        val released = effectiveReleasedCount(a)
+        val total = effectiveTotalCount(a)
+        val hi = released + if (episodeAccess(a, released + 1) == Access.Ok && released < total) 1 else 0
         if (l < hi) return ContinueInfo(episode = l + 1, position = 0.0)
-        return ContinueInfo(episode = null, waiting = true, completed = l >= a.totalEpisodes)
+        return ContinueInfo(episode = null, waiting = true, completed = l >= total)
     }
 
     fun lastWatchedAt(a: Anime): Long = lastWatchedMap[a.id.toString()] ?: 0L
@@ -566,7 +586,7 @@ class AppController(
             val n = time.nextReleaseAt(a)
             return if (n != null) tr.t(
                 "home.waitingEpisode",
-                "value" to time.releasedEpisodeCount(a) + 1,
+                "value" to effectiveReleasedCount(a) + 1,
                 "WEEKDAYS_LONG" to tr.locale.weekdaysLong[time.weekdayOf(n)],
             ) else tr.t("home.completed")
         }
@@ -877,7 +897,7 @@ class AppController(
     var availablePlayerQualities by mutableStateOf(listOf("Auto", "1080p", "720p", "480p"))
 
     fun nextPlayableEpisode(a: Anime, ep: Int): Int? =
-        if (ep < a.totalEpisodes && episodeAccess(a, ep + 1) == Access.Ok) ep + 1 else null
+        if (ep < effectiveTotalCount(a) && episodeAccess(a, ep + 1) == Access.Ok) ep + 1 else null
 
     fun playEpisode(id: Int, ep: Int? = null) {
         val a = animeOf(id) ?: return
