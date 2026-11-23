@@ -9,7 +9,7 @@ import { recheckAfterSec } from '../services/sync-schedule';
 import { getSourceBaseUrls } from '../services/anilist.service';
 import { AppBindings } from '../index';
 import { readDb } from '../utils/db';
-import { ensureCuratedCatalogPatchApplied } from '../services/curatedPatch.service';
+import { CURATED_PATCH_MAP, ensureCuratedCatalogPatchApplied } from '../services/curatedPatch.service';
 
 
 const ALLOWED_CATALOG_PROVIDERS = new Set(['ylnime', 'otakudesu']);
@@ -56,6 +56,19 @@ function shapeAnimeRow(
         }
       }
     } catch {}
+  }
+  const rowId = Number(rest.id ?? 0);
+  const patch = Number.isInteger(rowId) && rowId > 0 ? CURATED_PATCH_MAP.get(rowId) : undefined;
+  if (patch) {
+    const mergedUrls = { ...source_urls, ...(patch.source_urls ?? {}) };
+    return {
+      ...rest,
+      type: patch.type || rest.type,
+      status: patch.status,
+      episodes_total: Math.max(Number(rest.episodes_total ?? 0), patch.episodes_total),
+      genres,
+      source_urls: mergedUrls,
+    };
   }
   return { ...rest, genres, source_urls };
 }

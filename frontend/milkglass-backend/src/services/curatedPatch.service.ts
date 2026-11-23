@@ -3,6 +3,21 @@ import curatedPatch from '../../data/curated_catalog_patch.json';
 const META_KEY = 'curated_patch_version';
 let appliedInIsolateVersion = 0;
 
+export interface CuratedPatchEntry {
+  id: number;
+  title: string;
+  type: string;
+  status: number;
+  episodes_total: number;
+  source_urls?: Record<string, string>;
+}
+
+export const CURATED_PATCH_MAP: ReadonlyMap<number, CuratedPatchEntry> = new Map(
+  (curatedPatch.entries ?? [])
+    .filter((e): e is CuratedPatchEntry => Boolean(e && Number.isInteger(e.id) && e.id > 0))
+    .map((e) => [e.id, e])
+);
+
 export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<void> {
   const targetVersion = Number(curatedPatch?.version ?? 0);
   if (!Number.isFinite(targetVersion) || targetVersion <= 0) return;
@@ -21,8 +36,7 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
 
     const nowSec = Math.floor(Date.now() / 1000);
     const stmts: D1PreparedStatement[] = [];
-    for (const entry of curatedPatch.entries ?? []) {
-      if (!entry || !Number.isInteger(entry.id) || entry.id <= 0) continue;
+    for (const entry of CURATED_PATCH_MAP.values()) {
       const urlsJson = entry.source_urls ? JSON.stringify(entry.source_urls) : null;
       stmts.push(
         db
@@ -47,14 +61,6 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
     }
 
     stmts.push(
-      db.prepare(
-        `UPDATE animes
-         SET episodes_total = 1, status = 2, updated_at = ?1
-         WHERE type = 'MOVIE' AND episodes_total = 0`
-      ).bind(nowSec)
-    );
-
-    stmts.push(
       db
         .prepare(
           `INSERT INTO catalog_meta (key, value, updated_at)
@@ -64,9 +70,7 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
         .bind(META_KEY, String(targetVersion), nowSec)
     );
 
-    for (let i = 0; i < stmts.length; i += 80) {
-      await db.batch(stmts.slice(i, i + 80));
-    }
+    await db.batch(stmts);
     appliedInIsolateVersion = targetVersion;
   } catch (err: unknown) {
     console.error('[curatedPatch] failed to apply', {
