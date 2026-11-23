@@ -151,13 +151,10 @@ async function fetchYlnimeCatalogAllLetters(ylBase) {
         const url = ch ? `${ylBase}/anime-list.php?l=${ch}` : `${ylBase}/anime-list.php`;
         const html = await fetchHtml(url, `${ylBase}/`);
         const items = parseYlnimeCatalog(html, ylBase);
-        if (items.length === 0 && !firstEmptySample) {
-          const hrefs = [...html.matchAll(/href=(["'])([^"']+)\1/gi)]
-            .map((m) => m[2])
-            .filter((h) => !h.startsWith('#') && !h.endsWith('.css') && !h.endsWith('.png') && !h.endsWith('.ico'))
-            .slice(0, 12)
-            .join(', ');
-          firstEmptySample = `${url} len=${html.length} head=${html.slice(0, 160).replace(/\s+/g, ' ')} hrefs=[${hrefs}]`;
+        if (items.length === 0 && !firstEmptySample && ch === 'A') {
+          const idx = html.search(/judul\)|A Portrait|A-Channel|Anime A-Z/i);
+          const snippet = idx >= 0 ? html.slice(idx, idx + 1200).replace(/\s+/g, ' ') : html.slice(Math.floor(html.length / 2), Math.floor(html.length / 2) + 1200).replace(/\s+/g, ' ');
+          firstEmptySample = `${url} len=${html.length} idx=${idx} snippet=${snippet}`;
         }
         return items;
       })
