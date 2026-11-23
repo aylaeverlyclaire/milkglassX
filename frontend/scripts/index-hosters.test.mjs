@@ -229,3 +229,22 @@ test('parseYlnimeAnimeList and parseYlnimeEpisodes handle index.php?series= and 
     { ep: 1, url: 'https://ylnime.com/index.php?series=mushoku-tensei-honki-dasu&episode=al-24930-1' },
   ]);
 });
+
+test('parseYlnimeAnimeList extracts title from Bootstrap card with empty stretched-link', () => {
+  const html = `
+    <div class="card h-100">
+      <div class="card-img-wrapper">
+        <img src="https://assets.animekita.org/cover/2026/02/f6ca1bf501dde32e.jpg" alt="A Portrait of Jianghu: Bu Liang Ren">
+        <a href="index.php?series=a-portrait-of-jianghu-bu-liang-ren" class="stretched-link"></a>
+      </div>
+      <div class="card-body">
+        <h6 class="card-title text-truncate">A Portrait of Jianghu: Bu Liang Ren</h6>
+      </div>
+    </div>`;
+  const list = parseYlnimeAnimeList(html, 'https://ylnime.com');
+  assert.deepEqual(list, [{
+    title: 'A Portrait of Jianghu: Bu Liang Ren',
+    url: 'https://ylnime.com/index.php?series=a-portrait-of-jianghu-bu-liang-ren',
+    provider: 'ylnime',
+  }]);
+});

@@ -241,13 +241,27 @@ export function parseOtakudesuAnimeList(html) {
 export function parseYlnimeAnimeList(html, baseUrl = 'https://ylnime.com') {
   const out = [];
   const seen = new Set();
+  const rawHtml = String(html || '');
   const root = String(baseUrl || 'https://ylnime.com').replace(/\/+$/, '');
-  const re = /<a[^>]+href="((?:https?:\/\/[^"]+\/|\/)?(?:index\.php)?\?series=[^"&]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const re = /<a\b([^>]*?)\bhref=(["'])([^"']+)\2([^>]*)>([\s\S]*?)<\/a>/gi;
   let m;
-  while ((m = re.exec(html)) !== null) {
-    const rawHref = m[1].trim().replace(/&amp;/g, '&');
-    const url = rawHref.startsWith('http') ? rawHref : `${root}/${rawHref.replace(/^\/+/, '')}`;
-    const title = m[2].replace(/<[^>]+>/g, '').trim();
+  while ((m = re.exec(rawHtml)) !== null) {
+    const rawHref = m[3].trim().replace(/&amp;/g, '&');
+    if (!/[?&]series=[^&#]+/i.test(rawHref) || /[?&]episode=/i.test(rawHref)) continue;
+    const url = rawHref.startsWith('http')
+      ? rawHref
+      : rawHref.startsWith('?')
+        ? `${root}/${rawHref}`
+        : `${root}/${rawHref.replace(/^\/+/, '')}`;
+    let title = m[5].replace(/<[^>]+>/g, '').trim();
+    if (title.length < 2) {
+      const beforeSlice = rawHtml.slice(Math.max(0, m.index - 450), m.index);
+      const afterSlice = rawHtml.slice(m.index + m[0].length, m.index + m[0].length + 450);
+      const cardTitleMatch = afterSlice.match(/<(?:h[1-6]|div|span)[^>]*class=(["'])[^"']*card-title[^"']*\1[^>]*>([\s\S]*?)<\/(?:h[1-6]|div|span)>/i);
+      const imgAltMatches = [...beforeSlice.matchAll(/<img\b[^>]*\balt=(["'])([^"']+)\1/gi)];
+      const nearestImgAlt = imgAltMatches.length > 0 ? imgAltMatches[imgAltMatches.length - 1][2] : '';
+      title = String(cardTitleMatch?.[2] || nearestImgAlt || '').replace(/<[^>]+>/g, '').trim();
+    }
     if (url.startsWith('http') && title.length >= 2 && !/^\[?info\]?/i.test(title) && !seen.has(url)) {
       seen.add(url);
       out.push({ title, url, provider: 'ylnime' });

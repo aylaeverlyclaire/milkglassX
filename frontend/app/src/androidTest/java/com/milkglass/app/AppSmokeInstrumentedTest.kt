@@ -10,6 +10,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
+/**
+ * Smoke test UI Android Emulator terhadap katalog live Otakudesu + YLnime.
+ */
 @RunWith(AndroidJUnit4::class)
 class AppSmokeInstrumentedTest {
     @get:Rule
