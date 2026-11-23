@@ -11,7 +11,8 @@ import {
   normalizeCatalogKey,
   parseOtakudesuCatalog,
   parseOtakudesuSchedule,
-  parseSamehadakuCatalog,
+  parseYlnimeSchedule,
+  parseYlnimeCatalog,
   sleep,
 } from './lib/catalog-sync.mjs';
 
@@ -62,9 +63,9 @@ async function fetchHtml(url, referer) {
 }
 
 async function resolveProviderBaseUrls() {
-  let sameBase = (process.env.SAMEHADAKU_BASE_URL || '').trim().replace(/\/+$/, '');
+  let ylBase = (process.env.YLNIME_BASE_URL || '').trim().replace(/\/+$/, '');
   let otakuBase = (process.env.OTAKUDESU_BASE_URL || '').trim().replace(/\/+$/, '');
-  if (!sameBase || !otakuBase) {
+  if (!ylBase || !otakuBase) {
     try {
       const res = await fetch(`${WORKER}/v1/catalog/sources`, {
         headers: { 'User-Agent': UA, Accept: 'application/json' },
@@ -73,13 +74,13 @@ async function resolveProviderBaseUrls() {
       if (res.ok) {
         const json = await res.json();
         const map = new Map((json?.sources || []).map((s) => [s.id, s.base_url]));
-        if (!sameBase) sameBase = String(map.get('samehadaku') || '').replace(/\/+$/, '');
+        if (!ylBase) ylBase = String(map.get('ylnime') || '').replace(/\/+$/, '');
         if (!otakuBase) otakuBase = String(map.get('otakudesu') || '').replace(/\/+$/, '');
       }
     } catch {}
   }
   return {
-    samehadaku: sameBase || 'https://samehadaku.li',
+    ylnime: ylBase || 'https://ylnime.com',
     otakudesu: otakuBase || 'https://otakudesu.blog',
   };
 }
@@ -125,35 +126,27 @@ async function enrichFromAniList(title) {
 }
 
 
-const MAX_AZ_PAGES = Math.max(1, Math.min(30, Number(process.env.MAX_AZ_PAGES ?? 15)));
+const YLNIME_LETTERS = ['', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')];
 
-async function fetchSamehadakuCatalogPaginated(sameBase) {
+async function fetchYlnimeCatalogAllLetters(ylBase) {
   const all = [];
-  const seenPages = new Set();
-  let nextUrl = `${sameBase}/az-list/`;
-  for (let page = 1; page <= MAX_AZ_PAGES && nextUrl && !seenPages.has(nextUrl); page++) {
-    seenPages.add(nextUrl);
-    let html = '';
-    try {
-      html = await fetchHtml(nextUrl, `${sameBase}/`);
-    } catch {
-      if (page === 1) {
-        html = await fetchHtml(`${sameBase}/daftar-anime-2/?list`, `${sameBase}/`);
-        return parseSamehadakuCatalog(html);
+  const seen = new Set();
+  for (let i = 0; i < YLNIME_LETTERS.length; i += 6) {
+    const batch = YLNIME_LETTERS.slice(i, i + 6);
+    const settled = await Promise.allSettled(
+      batch.map((ch) => {
+        const url = ch ? `${ylBase}/anime-list.php?l=${ch}` : `${ylBase}/anime-list.php`;
+        return fetchHtml(url, `${ylBase}/`).then((h) => parseYlnimeCatalog(h, ylBase));
+      })
+    );
+    for (const r of settled) {
+      if (r.status !== 'fulfilled') continue;
+      for (const it of r.value) {
+        if (!seen.has(it.url)) {
+          seen.add(it.url);
+          all.push(it);
+        }
       }
-      break;
-    }
-    const items = parseSamehadakuCatalog(html);
-    if (items.length === 0) break;
-    all.push(...items);
-    const nextMatch =
-      html.match(/<a[^>]+class="[^"]*next[^"]*"[^>]+href="([^"]+)"/i) ||
-      html.match(/<a[^>]+href="([^"]+\/az-list\/page\/\d+\/?[^"]*)"/i);
-    if (nextMatch && nextMatch[1]) {
-      const candidate = nextMatch[1].startsWith('http') ? nextMatch[1] : `${sameBase}${nextMatch[1]}`;
-      nextUrl = candidate !== nextUrl ? candidate : '';
-    } else {
-      nextUrl = '';
     }
   }
   return all;
@@ -162,24 +155,35 @@ async function fetchSamehadakuCatalogPaginated(sameBase) {
 const bases = await resolveProviderBaseUrls();
 const providerResults = await Promise.allSettled([
   fetchHtml(`${bases.otakudesu}/anime-list/`, `${bases.otakudesu}/`).then(parseOtakudesuCatalog),
-  fetchSamehadakuCatalogPaginated(bases.samehadaku),
+  fetchYlnimeCatalogAllLetters(bases.ylnime),
   fetchHtml(`${bases.otakudesu}/jadwal-rilis/`, `${bases.otakudesu}/`).then(parseOtakudesuSchedule),
+  fetchHtml(`${bases.ylnime}/ongoing.php`, `${bases.ylnime}/`).then((h) => parseYlnimeCatalog(h, bases.ylnime)),
+  fetchHtml(`${bases.ylnime}/jadwals.php`, `${bases.ylnime}/`).then(parseYlnimeSchedule),
 ]);
 
 const otakuList = providerResults[0].status === 'fulfilled' ? providerResults[0].value : [];
-const sameList = providerResults[1].status === 'fulfilled' ? providerResults[1].value : [];
-const scheduleMap = providerResults[2].status === 'fulfilled' ? providerResults[2].value : new Map();
+const ylOngoingUrls = new Set(
+  (providerResults[3].status === 'fulfilled' ? providerResults[3].value : []).map((x) => x.url)
+);
+const ylList = (providerResults[1].status === 'fulfilled' ? providerResults[1].value : []).map((x) =>
+  ylOngoingUrls.has(x.url) ? { ...x, status: 1 } : x
+);
+const scheduleMap = new Map(providerResults[2].status === 'fulfilled' ? providerResults[2].value : []);
+const ylScheduleMap = providerResults[4].status === 'fulfilled' ? providerResults[4].value : new Map();
+for (const [k, day] of ylScheduleMap.entries()) {
+  if (!scheduleMap.has(k)) scheduleMap.set(k, day);
+}
 
 console.log(
-  `[samehadaku] ${providerResults[0].status === 'fulfilled' ? `${sameList.length} judul` : `GAGAL: ${providerResults[0].reason?.message}`}`
+  `[otakudesu] ${providerResults[0].status === 'fulfilled' ? `${otakuList.length} judul` : `GAGAL: ${providerResults[0].reason?.message}`}`
 );
 console.log(
-  `[otakudesu] ${providerResults[1].status === 'fulfilled' ? `${otakuList.length} judul` : `GAGAL: ${providerResults[1].reason?.message}`}`
+  `[ylnime] ${providerResults[1].status === 'fulfilled' ? `${ylList.length} judul` : `GAGAL: ${providerResults[1].reason?.message}`}`
 );
 
-const merged = mergeProviderCatalogs([otakuList, sameList], scheduleMap);
+const merged = mergeProviderCatalogs([otakuList, ylList], scheduleMap);
 if (merged.length === 0) {
-  console.error('0 item dari Samehadaku & Otakudesu — batalkan sinkronisasi');
+  console.error('0 item dari YLnime & Otakudesu — batalkan sinkronisasi');
   process.exit(1);
 }
 
@@ -245,7 +249,7 @@ for (let i = 0; i < batches.length; i++) {
 console.log(
   `SUMMARY ${JSON.stringify({
     scope: SCOPE,
-    samehadaku: sameList.length,
+    ylnime: ylList.length,
     otakudesu: otakuList.length,
     unique: merged.length,
     enriched: enrichedCount,

@@ -1,4 +1,4 @@
-export const ALLOWED_CATALOG_PROVIDERS = ['samehadaku', 'otakudesu'];
+export const ALLOWED_CATALOG_PROVIDERS = ['ylnime', 'otakudesu'];
 
 export const ENRICH_FIELDS = `id idMal title{romaji english native} synonyms averageScore episodes genres coverImage{extraLarge large}`;
 
@@ -16,6 +16,7 @@ export function cleanCatalogTitle(raw) {
     .replace(/&amp;/gi, '&')
     .replace(/&#8211;|&ndash;/gi, '-')
     .replace(/&#8217;|&#039;/gi, "'")
+    .replace(/^\s*\((?:HD|Uncen|Uncensored|BD|Sub Indo)\)\s*/i, '')
     .replace(/\(Episode[^)]*\)/gi, '')
     .replace(/\+\s*(?:ova|oad|special)\b/gi, '')
     .replace(/\b(?:Subtitle Indonesia|Sub Indo|On-?Going|BD|Batch)\b/gi, '')
@@ -75,7 +76,7 @@ function stripSeasonAndPart(norm) {
 }
 
 /**
- * Kunci kanonik anti-duplikat lintas Otakudesu & Samehadaku:
+ * Kunci kanonik anti-duplikat lintas Otakudesu & YLnime:
  * "Date A Live II", "Date A Live Season 2", dan "Date A Live 2nd Season" menghasilkan kunci identik,
  * sementara season, part/cour, atau side-story berbeda tetap terpisah.
  */
@@ -88,17 +89,19 @@ export function canonicalCatalogKey(raw) {
   return `${baseCompact}|s${extractSeasonTag(cleaned, norm)}|p${extractPartTag(norm)}|${extractFormatKind(norm)}`;
 }
 
-export function parseSamehadakuCatalog(html) {
+export function parseYlnimeCatalog(html, baseUrl = 'https://ylnime.com') {
   const out = [];
   const seen = new Set();
-  const re = /<a[^>]+href="(https?:\/\/[^"]+\/anime\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const root = String(baseUrl || 'https://ylnime.com').replace(/\/+$/, '');
+  const re = /<a[^>]+href="((?:https?:\/\/[^"]+\/|\/)?(?:index\.php)?\?series=[^"&]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(String(html || ''))) !== null) {
-    const url = m[1].trim();
+    const rawHref = m[1].trim().replace(/&amp;/g, '&');
+    const url = rawHref.startsWith('http') ? rawHref : `${root}/${rawHref.replace(/^\/+/, '')}`;
     const title = cleanCatalogTitle(m[2]);
-    if (url.startsWith('https://') && title.length >= 2 && !seen.has(url)) {
+    if (url.startsWith('https://') && title.length >= 2 && !/^\[?info\]?/i.test(title) && !/^\(live\s*action\)/i.test(title) && !seen.has(url)) {
       seen.add(url);
-      out.push({ title, url, provider: 'samehadaku' });
+      out.push({ title, url, provider: 'ylnime' });
     }
   }
   return out;
@@ -156,9 +159,31 @@ export function parseOtakudesuSchedule(html) {
 }
 
 /**
- * Menggabungkan entri katalog HANYA dari Samehadaku dan Otakudesu.
- * Provider di luar Samehadaku dan Otakudesu selalu ditolak.
+ * Menggabungkan entri katalog HANYA dari YLnime dan Otakudesu.
+ * Provider di luar YLnime dan Otakudesu selalu ditolak.
  */
+/**
+ * Mem-parsing halaman /jadwals.php YLnime menjadi peta canonicalKey -> schedule_day (1=Senin..7=Minggu)
+ * sebagai pelengkap untuk judul YLnime-only atau kategori Random di Otakudesu.
+ */
+export function parseYlnimeSchedule(html) {
+  const map = new Map();
+  const text = String(html || '');
+  const sectionRe = /(Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)\s*(?:<[^>]+>\s*)*\d{1,2}\s+[A-Za-z]+\s+\d{4}([\s\S]*?)(?=(?:Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)\s*(?:<[^>]+>\s*)*\d{1,2}\s+[A-Za-z]+\s+\d{4}|$)/gi;
+  let sec;
+  while ((sec = sectionRe.exec(text)) !== null) {
+    const dayNum = DAY_NAME_TO_NUM[sec[1].toLowerCase()];
+    if (!dayNum) continue;
+    const linkRe = /<a[^>]+href="(?:(?:https?:\/\/[^"]+\/|\/)?(?:index\.php)?\?series=[^"&]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let lm;
+    while ((lm = linkRe.exec(sec[2])) !== null) {
+      const key = canonicalCatalogKey(lm[1]);
+      if (key && !map.has(key)) map.set(key, dayNum);
+    }
+  }
+  return map;
+}
+
 export function mergeProviderCatalogs(providerLists, scheduleMap = null) {
   const allowed = new Set(ALLOWED_CATALOG_PROVIDERS);
   const byKey = new Map();
