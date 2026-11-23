@@ -11,13 +11,13 @@ import { AppBindings } from '../index';
 import { readDb } from '../utils/db';
 
 
-const ALLOWED_CATALOG_PROVIDERS = new Set(['samehadaku', 'otakudesu']);
-const CATALOG_SOURCE_FILTER = `(has_live_source = 1 AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%'))`;
-const CATALOG_SOURCE_FILTER_A = `(a.has_live_source = 1 AND (a.source_urls_json LIKE '%"samehadaku"%' OR a.source_urls_json LIKE '%"otakudesu"%'))`;
+const ALLOWED_CATALOG_PROVIDERS = new Set(['ylnime', 'otakudesu']);
+const CATALOG_SOURCE_FILTER = `(has_live_source = 1 AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%'))`;
+const CATALOG_SOURCE_FILTER_A = `(a.has_live_source = 1 AND (a.source_urls_json LIKE '%"ylnime"%' OR a.source_urls_json LIKE '%"otakudesu"%'))`;
 
 const DEFAULT_ENGINE_RULES = {
   otakudesu: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'ul.chivsrc > li', search_link: 'h2 > a[href]', episode_box: 'div.episodelist', episode_link: 'ul li a[href]', download_block: 'div.download ul', download_row: 'li', quality_text: 'strong', size_text: 'i', hoster_link: 'a[href]', ajax_nonce_action: 'aa1208d27f29ca340c92c66d1926f13f', ajax_mirror_action: '2a3505c93b0035d3f455df82bf976b84' } },
-  samehadaku: { search_path: '/?s={q}', selectors: { search_item: '.listupd .bs .bsx > a[href], article.bs .bsx a[href], div.animposx > a[href]', search_title: '.tt, h2, .data .title h2', series_link: "a[href*='/anime/'], div.nvs.nvsc a[href]", episode_row: 'div.eplister ul li, .eplister ul li, div.lstepsiode.listeps ul li, .listeps ul li', episode_badge: '.epl-num, .epsright, .shrink-0 a', episode_link: "a[href*='-episode-'], h4 a[href], .lchx a[href], a[href]", mirror_select: 'select.mirror option[value]', player_iframe: '#embed_holder iframe[src], .video-content iframe[src], iframe[src]', download_block: 'div.download-eps, div#downloadb', download_header: 'p b, p', download_row: 'ul li', quality_text: 'strong', hoster_link: 'a[href]' } },
+  ylnime: { search_path: '/index.php?search={q}', selectors: { search_item: "a[href*='?series=']", series_link: "a[href*='?series=']", episode_link: "a[href*='episode=']", video_source: 'video source[src], video[src]', hoster_link: "a[href*='pixeldrain.']", player_iframe: 'iframe[src]' } },
 };
 
 export const catalogRoutes = new Hono<{ Bindings: AppBindings }>();
@@ -153,7 +153,7 @@ catalogRoutes.get('/status', edgeCache(60, 120, false), async (c) => {
     status: 'ok',
     data: {
       total,
-      catalog_sources: ['otakudesu', 'samehadaku'],
+      catalog_sources: ['otakudesu', 'ylnime'],
       total_catalog: totalCatalog,
       live_hosters: liveHosters,
       version: catalogVersion(marker, total),
@@ -181,7 +181,7 @@ catalogRoutes.get(
     ];
     if (v) {
       statements.push(
-        db.prepare(`SELECT ${LIST_COLUMNS} FROM animes WHERE ${CATALOG_SOURCE_FILTER} ORDER BY popularity DESC, updated_at DESC LIMIT 5000`)
+        db.prepare(`SELECT ${LIST_COLUMNS} FROM animes WHERE ${CATALOG_SOURCE_FILTER} ORDER BY popularity DESC, updated_at DESC LIMIT 8000`)
       );
     }
     const batchRes = await db.batch(statements);
@@ -274,14 +274,19 @@ catalogRoutes.get(
 
     if (q && q.length > 0) {
       const ftsQ = buildFtsQuery(q);
+      const escapedQ = escapeSqlLike(q);
       if (ftsQ.length > 0) {
         params.push(ftsQ);
-        conditions.push(`id IN (SELECT rowid FROM animes_fts WHERE animes_fts MATCH ?${params.length})`);
+        const ftsParamIdx = params.length;
+        params.push(`%${escapedQ}%`);
+        const likeParamIdx = params.length;
+        conditions.push(
+          `(id IN (SELECT rowid FROM animes_fts WHERE animes_fts MATCH ?${ftsParamIdx}) OR synonyms_json LIKE ?${likeParamIdx} ESCAPE '\\')`
+        );
       } else {
-        const escapedQ = escapeSqlLike(q);
         params.push(`%${escapedQ}%`);
         conditions.push(
-          `(title LIKE ?${params.length} ESCAPE '\\' OR title_alt LIKE ?${params.length} ESCAPE '\\')`
+          `(title LIKE ?${params.length} ESCAPE '\\' OR title_alt LIKE ?${params.length} ESCAPE '\\' OR synonyms_json LIKE ?${params.length} ESCAPE '\\')`
         );
       }
     }
@@ -610,13 +615,13 @@ catalogRoutes.get(
     };
 
     const scrapeSourceSearch = async (
-      sourceId: 'samehadaku' | 'otakudesu',
+      sourceId: 'ylnime' | 'otakudesu',
       baseUrl: string
     ): Promise<Array<Record<string, unknown>>> => {
       const root = baseUrl.trim().replace(/\/+$/, '');
       if (!root.startsWith('https://')) return [];
       try {
-        const searchPath = sourceId === 'samehadaku' ? `/?s=${encodeURIComponent(q)}` : `/?s=${encodeURIComponent(q)}&post_type=anime`;
+        const searchPath = sourceId === 'ylnime' ? `/index.php?search=${encodeURIComponent(q)}` : `/?s=${encodeURIComponent(q)}&post_type=anime`;
         const resp = await fetch(`${root}${searchPath}`, {
           method: 'GET',
           headers: {
@@ -635,10 +640,11 @@ catalogRoutes.get(
         const re =
           sourceId === 'otakudesu'
             ? /<h2[^>]*>\s*<a[^>]+href="(https?:\/\/[^"]+\/anime\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
-            : /<a[^>]+href="(https?:\/\/[^"]+\/anime\/[^"]+)"[^>]*title="([^"]+)"/gi;
+            : /<a[^>]+href="((?:https?:\/\/[^"]+\/|\/)?(?:index\.php)?\?series=[^"&]+)"[^>]*>([\s\S]*?)<\/a>/gi;
         let m: RegExpExecArray | null;
         while ((m = re.exec(html)) !== null && items.length < 12) {
-          const url = m[1].trim();
+          const rawHref = m[1].trim();
+          const url = rawHref.startsWith('http') ? rawHref : `${root}/${rawHref.replace(/^\/+/, '')}`;
           const rawTitle = m[2]
             .replace(/<[^>]+>/g, ' ')
             .replace(/&amp;/gi, '&')
@@ -669,7 +675,7 @@ catalogRoutes.get(
             status: 1,
             schedule_day: 0,
             duration: '24 min',
-            studio: sourceId === 'samehadaku' ? 'Samehadaku' : 'Otakudesu',
+            studio: sourceId === 'ylnime' ? 'YLnime' : 'Otakudesu',
             release_season: '-',
             poster_url: '',
             popularity: 0,
@@ -719,7 +725,7 @@ catalogRoutes.get(
     if (d1Rows.length < 6) {
       const [otakuLive, sameLive] = await Promise.allSettled([
         scrapeSourceSearch('otakudesu', sourceUrls.otakudesu),
-        scrapeSourceSearch('samehadaku', sourceUrls.samehadaku),
+        scrapeSourceSearch('ylnime', sourceUrls.ylnime),
       ]);
       liveRows = [
         ...(otakuLive.status === 'fulfilled' ? otakuLive.value : []),
@@ -821,7 +827,7 @@ catalogRoutes.get('/rules', edgeCache(1800, 3600, false), async (c) => {
     schema_version: 1,
     updated_at: Math.floor(Date.now() / 1000),
     sources: {
-      samehadaku: merge('samehadaku', DEFAULT_ENGINE_RULES.samehadaku),
+      ylnime: merge('ylnime', DEFAULT_ENGINE_RULES.ylnime),
       otakudesu: merge('otakudesu', DEFAULT_ENGINE_RULES.otakudesu),
     },
   });

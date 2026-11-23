@@ -71,7 +71,7 @@ export function hintKey(title: string, ep: number): string {
 
 const hintBodySchema = z.object({
   title: z.string().trim().min(2).max(160),
-  ep: z.number().int().min(1).max(2000),
+  ep: z.number().int().min(0).max(2000),
   candidates: z
     .array(
       z.object({
@@ -266,7 +266,7 @@ const DIRECT_MAX_CANDIDATES = 4;
 
 const directBodySchema = z.object({
   title: z.string().trim().min(2).max(160),
-  ep: z.number().int().min(1).max(2000),
+  ep: z.number().int().min(0).max(2000),
   candidates: z
     .array(
       z.object({
@@ -386,7 +386,7 @@ async function lookupDirect(db: D1ReadClient, title: string, ep: number): Promis
 const resolveQuerySchema = z.object({
   anime_id: z.coerce.number().int().positive().optional(),
   title: z.string().trim().min(1).max(160),
-  ep: z.coerce.number().int().min(1).max(2000),
+  ep: z.coerce.number().int().min(0).max(2000),
   q: QUALITY_SCHEMA.default('1080p'),
 });
 
@@ -484,7 +484,7 @@ playRoutes.get(
       quality: q,
       order: cascadeOrder.join(','),
     });
-    if (sourceMap.samehadaku) params.set('samehadaku', sourceMap.samehadaku);
+    if (sourceMap.ylnime) params.set('ylnime', sourceMap.ylnime);
     if (sourceMap.otakudesu) params.set('otakudesu', sourceMap.otakudesu);
 
     const headers = buildCfHandlerHeaders(c.env);
@@ -523,7 +523,7 @@ playRoutes.get(
 
 const reportDeadSchema = z.object({
   title: z.string().trim().min(2).max(160),
-  ep: z.number().int().min(1).max(2000),
+  ep: z.number().int().min(0).max(2000),
   kind: z.enum(['direct', 'hint']),
   url: z.string().trim().pipe(z.string().url().max(2048)),
   http_status: z.enum(['403', '404', '410', 'expired', 'timeout']),
@@ -739,7 +739,7 @@ const DEFAULT_TELEMETRY_REPO = 'aylaeverlyclaire/milkglassX';
 
 const playbackReportSchema = z.object({
   title: z.string().trim().min(1).max(160),
-  ep: z.number().int().min(1).max(2000),
+  ep: z.number().int().min(0).max(2000),
   anime_id: z.number().int().positive().optional(),
   status: z.enum(['ok', 'slow', 'failed']),
   resolve_ms: z.number().int().min(0).max(120_000).default(0),

@@ -174,7 +174,7 @@ export function computeScheduleDayWib(airingAtEpochSec: number | null | undefine
 
 /**
  * AniList HANYA melengkapi metadata (total episode, rating/score, poster, mal_id)
- * pada entri katalog yang sudah berasal dari Samehadaku atau Otakudesu.
+ * pada entri katalog yang sudah berasal dari YLnime atau Otakudesu.
  * Tidak pernah meng-insert entri katalog baru dari AniList.
  */
 const ENRICH_ANIME_SQL = `
@@ -190,7 +190,7 @@ const ENRICH_ANIME_SQL = `
     synonyms_json = CASE WHEN ?8 != '[]' THEN ?8 ELSE synonyms_json END,
     updated_at = ?9
   WHERE id = ?10
-    AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
+    AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%')
 `;
 
 export function bindAnimeEnrichOnly(
@@ -235,7 +235,7 @@ const UPSERT_META_SQL = `
 
 /**
  * Memperkaya (UPDATE-only) total episode, rating, dan poster pada entri katalog
- * Samehadaku/Otakudesu yang sudah ada di D1. Tidak pernah menambah katalog baru dari AniList.
+ * YLnime/Otakudesu yang sudah ada di D1. Tidak pernah menambah katalog baru dari AniList.
  */
 export async function importAniListMedia(
   db: D1Database,
@@ -259,7 +259,7 @@ export async function ensureAnimeExistsFastInD1(
     .prepare(
       `SELECT id, mal_id, poster_url, score, genres_json FROM animes
        WHERE id = ?1
-         AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')`
+         AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%')`
     )
     .bind(animeId)
     .first<{ id: number; mal_id: number | null; poster_url: string | null; score: number | null; genres_json: string | null }>();
@@ -380,13 +380,13 @@ function isStrictTitleMatch(sourceTitle: string, candidateTitle: string): boolea
 
 /**
  * Melengkapi metadata (total eps, rating, poster) dari AniList HANYA untuk entri katalog
- * yang berasal dari Samehadaku atau Otakudesu.
+ * yang berasal dari YLnime atau Otakudesu.
  */
 export async function backfillIncompleteAnime(db: D1Database, limit = 50): Promise<number> {
   const rows = await db
     .prepare(
       `SELECT id, title FROM animes
-       WHERE (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
+       WHERE (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%')
          AND (poster_url IS NULL OR poster_url = '' OR score = 0 OR episodes_total = 0 OR genres_json IS NULL OR genres_json = '' OR genres_json = '[]')
        ORDER BY (CASE WHEN status = 1 THEN 0 ELSE 1 END) ASC, updated_at ASC
        LIMIT ?1`
@@ -477,7 +477,7 @@ export async function getSourceBaseUrls(db: D1ReadClient): Promise<SourceBaseUrl
     const { results } = await db
       .prepare(
         `SELECT key, value FROM catalog_meta
-         WHERE key IN ('otakudesu_base_url', 'samehadaku_base_url')`
+         WHERE key IN ('otakudesu_base_url', 'ylnime_base_url')`
       )
       .all<{ key: string; value: string }>();
 
@@ -485,7 +485,7 @@ export async function getSourceBaseUrls(db: D1ReadClient): Promise<SourceBaseUrl
       const clean = (row.value || '').trim().replace(/\/+$/, '');
       if (!clean.startsWith('https://')) continue;
       if (row.key === 'otakudesu_base_url') resolved.otakudesu = clean;
-      else if (row.key === 'samehadaku_base_url') resolved.samehadaku = clean;
+      else if (row.key === 'ylnime_base_url') resolved.ylnime = clean;
     }
     cachedSourceUrls = { expiresAt: now + SOURCE_URLS_CACHE_TTL_MS, value: { ...resolved } };
   } catch (err: unknown) {

@@ -19,7 +19,7 @@ import { SOURCE_ID_SCHEMA } from '../utils/sources';
 
 export const ingestRoutes = new Hono<{ Bindings: AppBindings }>();
 
-const ALLOWED_CATALOG_PROVIDERS = new Set(['samehadaku', 'otakudesu']);
+const ALLOWED_CATALOG_PROVIDERS = new Set(['ylnime', 'otakudesu']);
 
 const FORBIDDEN_DEFAULT_SECRETS = new Set([
   'dev-secret-key-min-16-chars',
@@ -141,7 +141,7 @@ ingestRoutes.post('/ingest', zValidator('json', ingestEpisodeBodySchema), async 
   );
   if (!ensured.exists) {
     return c.json(
-      { status: 'error', message: 'Wadah anime tidak ditemukan di katalog Samehadaku/Otakudesu.' },
+      { status: 'error', message: 'Wadah anime tidak ditemukan di katalog YLnime/Otakudesu.' },
       404
     );
   }
@@ -272,7 +272,7 @@ ingestRoutes.post('/ingest', zValidator('json', ingestEpisodeBodySchema), async 
 });
 
 // AniList tidak lagi menemukan/menambah katalog; endpoint ini hanya melakukan enrich metadata
-// (total eps, rating, poster) untuk entri katalog Samehadaku & Otakudesu yang sudah ada.
+// (total eps, rating, poster) untuk entri katalog YLnime & Otakudesu yang sudah ada.
 ingestRoutes.post('/sync-anilist', async (c) => {
   const enriched = await backfillIncompleteAnime(c.env.DB, 50);
   await purgeHomeCache(c.req.url);
@@ -300,7 +300,7 @@ ingestRoutes.post('/catalog-import', async (c) => {
 });
 
 const sourceDomainSchema = z.object({
-  source: SOURCE_ID_SCHEMA.default('samehadaku'),
+  source: SOURCE_ID_SCHEMA.default('ylnime'),
   base_url: z.string().url().refine((u) => u.startsWith('https://'), {
     message: 'Harus HTTPS',
   }),
@@ -332,9 +332,9 @@ ingestRoutes.get('/catalog-list', async (c) => {
     `SELECT id, title, title_alt, synonyms_json, status, popularity, episodes_total, score, poster_url, genres_json, has_live_source, source_urls_json
      FROM animes
      WHERE has_live_source = 1
-       AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')
+       AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%')
      ORDER BY popularity DESC
-     LIMIT 5000`
+     LIMIT 8000`
   ).all<Record<string, unknown>>();
   return c.json({ status: 'ok', count: (results ?? []).length, data: results ?? [] });
 });
@@ -433,7 +433,7 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
         `UPDATE animes
          SET has_live_source = 1
          WHERE id = ?1
-           AND (source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%')`
+           AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%')`
       ).bind(aid)
     );
     await c.env.DB.batch(flagStmts);
@@ -443,7 +443,7 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
     await c.env.DB.prepare(
       `UPDATE animes
        SET has_live_source = CASE
-         WHEN source_urls_json LIKE '%"samehadaku"%' OR source_urls_json LIKE '%"otakudesu"%' THEN 1
+         WHEN source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%' THEN 1
          ELSE 0
        END`
     ).run();
@@ -506,7 +506,7 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
   let skipped = 0;
 
   for (const item of items) {
-    // Kontrak katalog eksklusif: HANYA Samehadaku dan Otakudesu yang boleh masuk katalog.
+    // Kontrak katalog eksklusif: HANYA YLnime dan Otakudesu yang boleh masuk katalog.
     const cleanUrls: Record<string, string> = {};
     for (const [k, v] of Object.entries(item.source_urls)) {
       const key = k.trim().toLowerCase();
@@ -587,7 +587,7 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
       `UPDATE animes
        SET has_live_source = 0
        WHERE source_urls_json IS NULL
-          OR (source_urls_json NOT LIKE '%"samehadaku"%' AND source_urls_json NOT LIKE '%"otakudesu"%')`
+          OR (source_urls_json NOT LIKE '%"ylnime"%' AND source_urls_json NOT LIKE '%"otakudesu"%')`
     ).run();
   }
 
