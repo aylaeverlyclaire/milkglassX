@@ -248,3 +248,25 @@ test('parseYlnimeAnimeList extracts title from Bootstrap card with empty stretch
     provider: 'ylnime',
   }]);
 });
+
+test('parseYlnimeEpisodes recognizes Episode Movie with al-149330-1 and inline script video/pixeldrain URLs', () => {
+  const seriesHtml = `
+    <a href="index.php?series=date-a-live-movie-mayuri-judgment&amp;episode=al-149330-1">Tonton Sekarang</a>
+    <a href="index.php?series=date-a-live-movie-mayuri-judgment&amp;episode=al-149330-1&amp;reso=720p">Episode Movie</a>
+  `;
+  const eps = parseYlnimeEpisodes(seriesHtml, 'https://ylnime.com');
+  assert.equal(eps.length, 1);
+  assert.equal(eps[0].ep, 1);
+  assert.equal(eps[0].url, 'https://ylnime.com/index.php?series=date-a-live-movie-mayuri-judgment&episode=al-149330-1');
+
+  const epHtml = `
+    <div data-video="https://cdn.animeverse.example/streams/mayuri-720p.mp4"></div>
+    <script>
+      const sources = [{"file":"https://cdn.animeverse.example/hls/mayuri-480p.m3u8"},{"url":"https://pixeldrain.com/u/Mayuri720"}];
+    </script>
+  `;
+  const hosters = parseEpisodeHostersFromHtml(epHtml, eps[0].url, 'ylnime');
+  const urls = hosters.map((h) => h.url);
+  assert.ok(urls.includes('https://cdn.animeverse.example/hls/mayuri-480p.m3u8'));
+  assert.ok(urls.includes('https://pixeldrain.com/u/Mayuri720'));
+});

@@ -218,10 +218,16 @@ export function extractEpisodeNumber(text, url) {
   const m =
     combined.match(/episode[\s\-_]*(\d{1,4})/i) ||
     combined.match(/\beps?[\s\-_]*(\d{1,4})\b/i) ||
+    String(url || '').match(/[?&]episode=[a-z0-9_-]+-0*(\d{1,4})(?:[&#]|$)/i) ||
     combined.match(/-(\d{1,4})(?:[-/]|$)/);
-  if (!m) return null;
-  const n = Number.parseInt(m[1], 10);
-  return Number.isFinite(n) && n >= 0 && n <= 2000 ? n : null;
+  if (m) {
+    const n = Number.parseInt(m[1], 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 2000) return n;
+  }
+  if (/^(?:episode\s+)?(?:movie|film|ova|special)$/i.test(String(text || '').trim())) {
+    return 1;
+  }
+  return null;
 }
 
 export function parseOtakudesuAnimeList(html) {
@@ -378,7 +384,7 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     });
   };
 
-  const videoSrcRe = /<(?:video|source)[^>]+src=["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["'][^>]*>/gi;
+  const videoSrcRe = /(?:(?:src|data-src|data-video|data-url)\s*=\s*|["'](?:file|src|url|video_url|stream_url)["']\s*:\s*)["'](https?:\/\/(?:[^"']+\.(?:mp4|m3u8)[^"']*|(?:www\.)?pixeldrain\.(?:com|lu)\/(?:u|api\/file)\/[^"']+))["']/gi;
   let vm;
   while ((vm = videoSrcRe.exec(html)) !== null) {
     const vUrl = vm[1].trim().replace(/&amp;/g, '&');

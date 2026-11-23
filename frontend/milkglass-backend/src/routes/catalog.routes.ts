@@ -451,7 +451,9 @@ catalogRoutes.get('/sources', edgeCache(300, 600, false), async (c) => {
     resolution_mode: 'CLIENT_CASCADE_MKV',
     target_format: 'MKV',
     target_resolutions: [...TARGET_RESOLUTIONS],
-    cf_handler_available: isCfHandlerConfigured(c.env),
+    cf_handler_available: true,
+    cf_handler_mode: isCfHandlerConfigured(c.env) ? 'hybrid' : 'on_device',
+    remote_cf_handler_available: isCfHandlerConfigured(c.env),
     sources: buildSourceCatalogList(urls, order),
   });
 });
@@ -748,7 +750,24 @@ catalogRoutes.get(
     ]);
     let d1Rows = d1Animes.results ?? [];
     if (d1Rows.length < 12) {
-      const { results: fullPool } = await rdb
+      const qTokensForPool = qSpaced.split(' ').filter((t) => t.length >= 3).slice(0, 4);
+      let poolRows: Array<Record<string, unknown>> = [];
+      if (qTokensForPool.length > 0) {
+        const tokenConds = qTokensForPool.map((_, idx) => `(title LIKE ?${idx + 1} ESCAPE '\\' OR title_alt LIKE ?${idx + 1} ESCAPE '\\')`).join(' OR ');
+        const tokenBinds = qTokensForPool.map((t) => `%${escapeSqlLike(t)}%`);
+        const { results: tokPool } = await rdb
+          .prepare(
+            `SELECT ${LIST_COLUMNS}, title_native, synonyms_json
+             FROM animes
+             WHERE ${CATALOG_SOURCE_FILTER} AND (${tokenConds})
+             ORDER BY popularity DESC, updated_at DESC
+             LIMIT 300`
+          )
+          .bind(...tokenBinds)
+          .all<Record<string, unknown>>();
+        poolRows = tokPool ?? [];
+      }
+      const { results: topPool } = await rdb
         .prepare(
           `SELECT ${LIST_COLUMNS}, title_native, synonyms_json
            FROM animes
@@ -757,6 +776,7 @@ catalogRoutes.get(
            LIMIT 1000`
         )
         .all<Record<string, unknown>>();
+      const fullPool = [...poolRows, ...(topPool ?? [])];
       const seenIds = new Set(d1Rows.map((r) => r.id));
       const scored = (fullPool ?? [])
         .filter((r) => !seenIds.has(r.id))

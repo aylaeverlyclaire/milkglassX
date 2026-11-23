@@ -195,18 +195,38 @@ export function parseOtakudesuSchedule(html) {
  * Mem-parsing halaman /jadwals.php YLnime menjadi peta canonicalKey -> schedule_day (1=Senin..7=Minggu)
  * sebagai pelengkap untuk judul YLnime-only atau kategori Random di Otakudesu.
  */
+export function inferCatalogMediaType(title) {
+  const t = String(title || '');
+  if (/\b(?:movie|gekijouban|film)\b/i.test(t)) return 'MOVIE';
+  if (/\b(?:ova|oad)\b/i.test(t)) return 'OVA';
+  if (/\bspecials?\b/i.test(t)) return 'SPECIAL';
+  return 'TV';
+}
+
 export function parseYlnimeSchedule(html) {
   const map = new Map();
   const text = String(html || '');
+  const isGeneric = (v) => /^(?:cover|poster|thumbnail|thumb|image|img|logo|banner|watch|tonton|nonton|detail)$/i.test(String(v || '').trim());
   const sectionRe = /(Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)\s*(?:<[^>]+>\s*)*\d{1,2}\s+[A-Za-z]+\s+\d{4}([\s\S]*?)(?=(?:Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)\s*(?:<[^>]+>\s*)*\d{1,2}\s+[A-Za-z]+\s+\d{4}|$)/gi;
   let sec;
   while ((sec = sectionRe.exec(text)) !== null) {
     const dayNum = DAY_NAME_TO_NUM[sec[1].toLowerCase()];
     if (!dayNum) continue;
-    const linkRe = /<a[^>]+href="(?:(?:https?:\/\/[^"]+\/|\/)?(?:index\.php)?\?series=[^"&]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    const block = sec[2];
+    const linkRe = /<a\b[^>]*\bhref=(["'])(?:(?:https?:\/\/[^"']+\/|\/)?(?:index\.php)?\?series=[^"'&]+)\1[^>]*>([\s\S]*?)<\/a>/gi;
     let lm;
-    while ((lm = linkRe.exec(sec[2])) !== null) {
-      const key = canonicalCatalogKey(lm[1]);
+    while ((lm = linkRe.exec(block)) !== null) {
+      let rawTitle = cleanCatalogTitle(lm[2]);
+      if (rawTitle.length < 2 || isGeneric(rawTitle)) {
+        const beforeSlice = block.slice(Math.max(0, lm.index - 450), lm.index);
+        const afterSlice = block.slice(lm.index + lm[0].length, lm.index + lm[0].length + 450);
+        const cardTitleMatch = afterSlice.match(/<(?:h[1-6]|div|span)[^>]*class=(["'])[^"']*card-title[^"']*\1[^>]*>([\s\S]*?)<\/(?:h[1-6]|div|span)>/i);
+        const imgAlts = [...beforeSlice.matchAll(/<img\b[^>]*\balt=(["'])([^"']+)\1/gi)]
+          .map((x) => cleanCatalogTitle(x[2]))
+          .filter((t) => t.length >= 2 && !isGeneric(t));
+        rawTitle = cleanCatalogTitle(cardTitleMatch?.[2] || (imgAlts.length > 0 ? imgAlts[imgAlts.length - 1] : ''));
+      }
+      const key = canonicalCatalogKey(rawTitle);
       if (key && !map.has(key)) map.set(key, dayNum);
     }
   }
@@ -238,10 +258,13 @@ export function mergeProviderCatalogs(providerLists, scheduleMap = null) {
           existing.poster_url = raw.poster_url;
         }
       } else {
+        const mediaType = inferCatalogMediaType(title);
         const entry = {
           title: title.slice(0, 180),
+          type: mediaType,
           source_urls: { [raw.provider]: url },
         };
+        if (mediaType === 'MOVIE') entry.episodes_total = 1;
         if (incomingStatus !== undefined) entry.status = incomingStatus;
         if (schedDay > 0) entry.schedule_day = schedDay;
         if (typeof raw.poster_url === 'string' && raw.poster_url.startsWith('https://')) {

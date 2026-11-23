@@ -466,6 +466,7 @@ const syncSourceCatalogSchema = z.object({
         mal_id: z.number().int().positive().nullable().optional(),
         title: z.string().trim().min(1).max(200),
         title_alt: z.string().trim().max(200).optional(),
+        type: z.enum(['TV', 'MOVIE', 'OVA', 'ONA', 'SPECIAL']).optional(),
         poster_url: z.string().trim().max(1024).optional(),
         score: z.number().min(0).max(10).optional(),
         episodes_total: z.number().int().min(0).max(5000).optional(),
@@ -530,6 +531,7 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
         : 0;
     const genresJson = JSON.stringify(item.genres ?? []);
     const synonymsJson = JSON.stringify(item.synonyms ?? []);
+    const mediaType = item.type ?? (/\b(?:movie|gekijouban|film)\b/i.test(item.title) ? 'MOVIE' : /\b(?:ova|oad)\b/i.test(item.title) ? 'OVA' : /\bspecials?\b/i.test(item.title) ? 'SPECIAL' : 'TV');
     const statusVal = item.status ?? 1;
     const scheduleDay = item.schedule_day ?? 0;
     const compact = item.title.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 120);
@@ -542,11 +544,12 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
            duration, studio, release_season, poster_url, genres_json, popularity,
            updated_at, episodes_total, next_airing_at, next_airing_ep,
            has_live_source, norm_compact, source_urls_json, synonyms_json
-         ) VALUES (?1, ?2, ?3, ?4, '', ?5, 'TV', ?6, ?13, '24 min', '-', '-', ?7, ?8, 100, ?9, ?10, 0, 0, 1, ?11, ?12, ?14)
+         ) VALUES (?1, ?2, ?3, ?4, '', ?5, ?15, ?6, ?13, '24 min', '-', '-', ?7, ?8, 100, ?9, ?10, 0, 0, 1, ?11, ?12, ?14)
          ON CONFLICT(id) DO UPDATE SET
            mal_id = COALESCE(excluded.mal_id, animes.mal_id),
            title = COALESCE(NULLIF(excluded.title, ''), animes.title),
            title_alt = COALESCE(NULLIF(excluded.title_alt, ''), animes.title_alt),
+           type = CASE WHEN excluded.type != 'TV' THEN excluded.type ELSE animes.type END,
            status = excluded.status,
            schedule_day = CASE WHEN excluded.schedule_day > 0 THEN excluded.schedule_day ELSE animes.schedule_day END,
            score = CASE WHEN excluded.score > 0 THEN excluded.score ELSE animes.score END,
@@ -571,7 +574,8 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
         compact,
         urlsJson,
         scheduleDay,
-        synonymsJson
+        synonymsJson,
+        mediaType
       )
     );
     if (item.anime_id) updated++;

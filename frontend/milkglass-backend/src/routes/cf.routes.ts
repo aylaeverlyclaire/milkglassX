@@ -136,10 +136,14 @@ async function isAllowedCfHost(db: D1Database, host: string): Promise<boolean> {
 
 
 cfRoutes.get('/status', (c) => {
+  const remoteConfigured = isCfHandlerConfigured(c.env);
   return c.json({
     status: 'ok',
     data: {
-      configured: isCfHandlerConfigured(c.env),
+      configured: true,
+      mode: remoteConfigured ? 'hybrid' : 'on_device',
+      remote_configured: remoteConfigured,
+      on_device_supported: true,
     },
   });
 });

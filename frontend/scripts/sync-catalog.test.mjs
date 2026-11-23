@@ -9,6 +9,7 @@ import {
   canonicalCatalogKey,
   chunk,
   fetchWithRetry,
+  inferCatalogMediaType,
   isStrictIdentityMatch,
   mergeProviderCatalogs,
   minUnique,
@@ -404,4 +405,36 @@ test('parseYlnimeCatalog mengekstrak judul & poster dari Bootstrap card dengan s
   assert.equal(items[0].title, 'A Portrait of Jianghu: Bu Liang Ren');
   assert.equal(items[0].url, 'https://ylnime.com/index.php?series=a-portrait-of-jianghu-bu-liang-ren');
   assert.equal(items[0].poster_url, 'https://assets.animekita.org/cover/2026/02/f6ca1bf501dde32e.jpg');
+});
+
+test('inferCatalogMediaType & mergeProviderCatalogs menetapkan type MOVIE + episodes_total=1 untuk film YLnime', () => {
+  assert.equal(inferCatalogMediaType('Date A Live Movie: Mayuri Judgment'), 'MOVIE');
+  assert.equal(inferCatalogMediaType('Mushoku Tensei OVA'), 'OVA');
+  assert.equal(inferCatalogMediaType('Frieren Special'), 'SPECIAL');
+  assert.equal(inferCatalogMediaType('Sousou no Frieren'), 'TV');
+  const merged = mergeProviderCatalogs([
+    [{ title: 'Date A Live Movie: Mayuri Judgment', url: 'https://ylnime.com/index.php?series=date-a-live-movie-mayuri-judgment', provider: 'ylnime', status: 2 }],
+  ]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].type, 'MOVIE');
+  assert.equal(merged[0].episodes_total, 1);
+});
+
+test('parseYlnimeSchedule mengekstrak judul dari kartu Bootstrap stretched-link dan mengabaikan alt Cover', () => {
+  const html = `
+    <h3>Senin 23 November 2026</h3>
+    <div class="card">
+      <img src="https://cdn.example/p.jpg" alt="Cover" />
+      <a href="index.php?series=akane-banashi" class="stretched-link"></a>
+      <h5 class="card-title">Akane-banashi</h5>
+    </div>
+    <h3>Minggu 29 November 2026</h3>
+    <div class="card">
+      <img src="https://cdn.example/f.jpg" alt="Sousou no Frieren Season 2" />
+      <a href="index.php?series=frieren-s2" class="stretched-link"></a>
+    </div>
+  `;
+  const sched = parseYlnimeSchedule(html);
+  assert.equal(sched.get(canonicalCatalogKey('Akane-banashi')), 1);
+  assert.equal(sched.get(canonicalCatalogKey('Sousou no Frieren Season 2')), 7);
 });
