@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { POPULAR_PRIORITY_TITLES, prioritizePopularCatalog, buildCuratedHostersPatchPayload } from './lib/popular-priority.mjs';
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -384,6 +386,35 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     });
   };
 
+  // Prioritas 1a: JSON inline YLnime (`const streams = [{"reso":"720p","link":"https:\/\/s3.animeverse.id\/..."}]`)
+  const ylStreamsMatch = html.match(/(?:const|let|var)\s+streams\s*=\s*(\[[\s\S]*?\])\s*;/);
+  if (ylStreamsMatch) {
+    try {
+      const parsedStreams = JSON.parse(ylStreamsMatch[1]);
+      if (Array.isArray(parsedStreams)) {
+        for (const item of parsedStreams) {
+          const vUrl = String(item?.link || '').trim().replace(/&amp;/g, '&').replace(/ /g, '%20');
+          if (!/^https?:\/\//i.test(vUrl)) continue;
+          const isPd = vUrl.toLowerCase().includes('pixeldrain.');
+          const hostName = isPd ? 'Pixeldrain' : (vUrl.toLowerCase().includes('animekita.') ? 'AnimeKita' : 'Animeverse');
+          if (isBlacklistedUrl(hostName, vUrl)) continue;
+          const q = parseQuality(String(item?.reso || '') + ' ' + vUrl) || '720p';
+          const dk = `${q}|${vUrl}`;
+          if (seen.has(dk)) continue;
+          seen.add(dk);
+          results.push({
+            url: vUrl,
+            quality: q,
+            hoster: hostName,
+            provider,
+            container: vUrl.toLowerCase().includes('.m3u8') ? 'hls' : 'mp4',
+            referer: pageUrl,
+          });
+        }
+      }
+    } catch {}
+  }
+
   const videoSrcRe = /(?:(?:src|data-src|data-video|data-url)\s*=\s*|["'](?:file|src|url|video_url|stream_url)["']\s*:\s*)["'](https?:\/\/(?:[^"']+\.(?:mp4|m3u8)[^"']*|(?:www\.)?pixeldrain\.(?:com|lu)\/(?:u|api\/file)\/[^"']+))["']/gi;
   let vm;
   while ((vm = videoSrcRe.exec(html)) !== null) {
@@ -655,26 +686,30 @@ async function runPool(items, concurrency, fn) {
 async function main() {
   const workerUrl = (process.env.WORKER_URL || 'https://milkglass-backend.milkyliquid.workers.dev').replace(/\/+$/, '');
   const adminSecret = (process.env.ADMIN_SECRET || '').trim();
-  if (!adminSecret) {
-    throw new Error('ADMIN_SECRET wajib diisi.');
+  const exportFile = (process.env.EXPORT_CURATED_HOSTERS_FILE || '').trim();
+  const popularOnly = /^(1|true|yes)$/i.test(String(process.env.POPULAR_ONLY || '').trim());
+  if (!adminSecret && !exportFile) {
+    throw new Error('ADMIN_SECRET wajib diisi (atau set EXPORT_CURATED_HOSTERS_FILE untuk ekspor lokal).');
   }
 
-  const maxAnimes = Math.max(1, Number.parseInt(process.env.MAX_ANIMES || '1500', 10) || 1500);
-  const maxEps = Math.max(1, Number.parseInt(process.env.MAX_EPS_PER_ANIME || '4', 10) || 4);
+  const defaultMaxAnimes = popularOnly ? '100' : '1500';
+  const defaultMaxEps = popularOnly ? '26' : '4';
+  const maxAnimes = Math.max(1, Number.parseInt(process.env.MAX_ANIMES || defaultMaxAnimes, 10) || 100);
+  const maxEps = Math.max(1, Number.parseInt(process.env.MAX_EPS_PER_ANIME || defaultMaxEps, 10) || 4);
   const concurrency = Math.max(1, Math.min(12, Number.parseInt(process.env.CONCURRENCY || '6', 10) || 6));
 
-  console.log(`Fetching catalog list from ${workerUrl} (maxAnimes=${maxAnimes}, maxEps=${maxEps})...`);
+  console.log(`Fetching catalog list from ${workerUrl} (maxAnimes=${maxAnimes}, maxEps=${maxEps}, popularOnly=${popularOnly})...`);
   const [catJson, srcJson] = await Promise.all([
-    fetchJson(`${workerUrl}/v1/internal/catalog-list`, { 'X-Admin-Secret': adminSecret }),
+    adminSecret
+      ? fetchJson(`${workerUrl}/v1/internal/catalog-list`, { 'X-Admin-Secret': adminSecret })
+      : fetchJson(`${workerUrl}/v1/catalog/snapshot`),
     fetchJson(`${workerUrl}/v1/catalog/sources`).catch(() => ({ sources: [] })),
   ]);
 
-  const allCatalog = Array.isArray(catJson.data) ? catJson.data : [];
-  const incompleteCatalog = allCatalog.filter((a) => !a.episodes_total || Number(a.episodes_total) <= 0);
-  const completeCatalog = allCatalog.filter((a) => Number(a.episodes_total) > 0);
-  const catalog = [...incompleteCatalog, ...completeCatalog].slice(0, maxAnimes);
+  const allCatalog = Array.isArray(catJson.data) ? catJson.data : (Array.isArray(catJson) ? catJson : []);
+  const catalog = prioritizePopularCatalog(allCatalog, maxAnimes, popularOnly, parseTitleMeta, extractMatchableTitles);
   console.log(
-    `Catalog queue: ${catalog.length} anime (${Math.min(incompleteCatalog.length, catalog.length)} incomplete episodes_total=0 prioritized)`
+    `Catalog queue: ${catalog.length} anime (Top-${POPULAR_PRIORITY_TITLES.length} popular prioritized, popularOnly=${popularOnly})`
   );
   const sourcesMap = new Map((srcJson.sources || []).map((s) => [s.id, s.base_url]));
   const ylBase = (sourcesMap.get('ylnime') || 'https://ylnime.com').replace(/\/+$/, '');
@@ -759,7 +794,7 @@ async function main() {
   );
 
   // Sinkronkan seluruh source_urls_json ke D1 (Source-First Catalog) agar katalog langsung lengkap & bypass search saat Play
-  for (let i = 0; i < syncItems.length; i += 150) {
+  if (adminSecret) for (let i = 0; i < syncItems.length; i += 150) {
     const chunk = syncItems.slice(i, i + 150);
     try {
       const res = await fetch(`${workerUrl}/v1/internal/sync-source-catalog`, {
@@ -786,8 +821,13 @@ async function main() {
   let syncedAnimes = 0;
   let diagLogs = 0;
   const batchBuffer = [];
+  const exportedEntries = [];
 
   async function flushBatch(forceReconcile = false) {
+    if (!adminSecret) {
+      batchBuffer.splice(0, batchBuffer.length);
+      return;
+    }
     if (batchBuffer.length === 0 && !forceReconcile) return;
     const payload = {
       items: batchBuffer.splice(0, batchBuffer.length),
@@ -813,11 +853,10 @@ async function main() {
     );
   }
 
-  await runPool(matched, concurrency, async ({ anime, hits }, itemIdx) => {
+  await runPool(matched, concurrency, async ({ anime, hits }) => {
     const epHostersMap = new Map();
     let discoveredMaxEp = 0;
     let isCompleted = false;
-    const epBudget = itemIdx < 150 ? maxEps : Math.min(maxEps, 2);
 
     for (const source of hits) {
       try {
@@ -829,10 +868,12 @@ async function main() {
             : source.provider === 'ylnime'
               ? parseYlnimeEpisodes(animeHtml, source.base)
               : parseGenericEpisodes(animeHtml, source.base);
-        if (rawEps.length === 0 && source.provider === 'ylnime' && /(?:%2f|\/+)$/i.test(usedUrl)) {
-          const cleanedUrl = usedUrl.replace(/(?:%2f|\/)+$/i, '');
-          if (cleanedUrl && cleanedUrl !== usedUrl) {
-            usedUrl = cleanedUrl;
+        if (rawEps.length === 0 && source.provider === 'ylnime') {
+          const altUrl = /(?:%2f|\/+)$/i.test(usedUrl)
+            ? usedUrl.replace(/(?:%2f|\/)+$/i, '')
+            : `${usedUrl}%2F`;
+          if (altUrl && altUrl !== usedUrl) {
+            usedUrl = altUrl;
             animeHtml = await fetchText(usedUrl, `${source.base}/`, 15000);
             rawEps = parseYlnimeEpisodes(animeHtml, source.base);
           }
@@ -844,7 +885,7 @@ async function main() {
         if (/\b(?:completed|tamat|finished)\b/i.test(animeHtml)) {
           isCompleted = true;
         }
-        const eps = selectEpisodesToIndex(rawEps, epBudget);
+        const eps = selectEpisodesToIndex(rawEps, maxEps);
         if (eps.length === 0) continue;
 
         for (const epItem of eps) {
@@ -884,7 +925,7 @@ async function main() {
             }
           }
         }
-        if (epHostersMap.size >= Math.min(epBudget, 4)) break;
+        if (epHostersMap.size >= Math.min(maxEps, 4)) break;
       } catch (err) {
         if (diagLogs < 6) {
           diagLogs++;
@@ -902,14 +943,16 @@ async function main() {
           return { ep, hosters };
         });
       syncedAnimes++;
-      batchBuffer.push({
+      const payloadItem = {
         anime_id: anime.id,
         title: anime.title,
         title_alt: anime.title_alt || null,
         episodes_total: discoveredMaxEp > 0 ? discoveredMaxEp : undefined,
         is_completed: isCompleted || undefined,
         episodes: epPayloads,
-      });
+      };
+      if (exportFile) exportedEntries.push(payloadItem);
+      batchBuffer.push(payloadItem);
       if (batchBuffer.length >= 12) {
         await flushBatch(false);
       }
@@ -917,6 +960,11 @@ async function main() {
   });
 
   await flushBatch(syncedAnimes >= 100);
+  if (exportFile && exportedEntries.length > 0) {
+    const patchObj = buildCuratedHostersPatchPayload(exportedEntries, Number.parseInt(process.env.CURATED_HOSTERS_VERSION || '1', 10) || 1);
+    writeFileSync(exportFile, JSON.stringify(patchObj) + '\n', 'utf8');
+    console.log(`[export-curated-hosters] wrote ${exportFile}: anime=${patchObj.stats.anime_count}, eps=${patchObj.stats.episode_count}, links=${patchObj.stats.hoster_links}`);
+  }
   console.log(
     `DONE: syncedAnimes=${syncedAnimes}, totalEpisodes=${totalEpisodes}, totalHosters=${totalHosters}`
   );
