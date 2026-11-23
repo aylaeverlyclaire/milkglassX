@@ -12,9 +12,11 @@ export interface CuratedPatchEntry {
   source_urls?: Record<string, string>;
 }
 
+const rawEntries = (curatedPatch.entries ?? []) as unknown as CuratedPatchEntry[];
+
 export const CURATED_PATCH_MAP: ReadonlyMap<number, CuratedPatchEntry> = new Map(
-  (curatedPatch.entries ?? [])
-    .filter((e): e is CuratedPatchEntry => Boolean(e && Number.isInteger(e.id) && e.id > 0))
+  rawEntries
+    .filter((e) => Boolean(e && Number.isInteger(e.id) && e.id > 0))
     .map((e) => [e.id, e])
 );
 
