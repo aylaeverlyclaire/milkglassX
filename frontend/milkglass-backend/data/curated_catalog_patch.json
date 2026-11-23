@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "updated_at": "2026-11-23T13:12:00+07:00",
+  "notes": "Curated catalog episode & status seed for Date A Live franchise and verified single-entry movies",
+  "entries": [
+    {
+      "id": 1367699440,
+      "title": "Date A Live",
+      "type": "TV",
+      "status": 2,
+      "episodes_total": 12,
+      "source_urls": {
+        "ylnime": "https://ylnime.com/index.php?series=date-live-subtitle-indonesia"
+      }
+    },
+    {
+      "id": 931329839,
+      "title": "Date A Live Season 2",
+      "type": "TV",
+      "status": 2,
+      "episodes_total": 10,
+      "source_urls": {
+        "ylnime": "https://ylnime.com/index.php?series=date-live-ii-subtitle-indonesia"
+      }
+    },
+    {
+      "id": 914552220,
+      "title": "Date A Live Season 3",
+      "type": "TV",
+      "status": 2,
+      "episodes_total": 12,
+      "source_urls": {
+        "ylnime": "https://ylnime.com/index.php?series=date-live-season-3-subtitle-indonesia"
+      }
+    },
+    {
+      "id": 1192741901,
+      "title": "Date A Live Season 4",
+      "type": "TV",
+      "status": 2,
+      "episodes_total": 12,
+      "source_urls": {
+        "ylnime": "https://ylnime.com/index.php?series=date-live-iv-subtitle-indonesia"
+      }
+    },
+    {
+      "id": 1175964282,
+      "title": "Date A Live Season 5",
+      "type": "TV",
+      "status": 2,
+      "episodes_total": 12,
+      "source_urls": {
+        "ylnime": "https://ylnime.com/index.php?series=date-live-v-sub-indo"
+      }
+    },
+    {
+      "id": 1056084127,
+      "title": "Date A Live Movie: Mayuri Judgment",
+      "type": "MOVIE",
+      "status": 2,
+      "episodes_total": 1,
+      "source_urls": {
+        "ylnime": "https://ylnime.com/index.php?series=date-a-live-movie-mayuri-judgment"
+      }
+    },
+    {
+      "id": 1759005256,
+      "title": "Date A Bullet: Dead or Bullet",
+      "type": "MOVIE",
+      "status": 2,
+      "episodes_total": 1,
+      "source_urls": {
+        "ylnime": "https://ylnime.com/index.php?series=date-a-bullet-dead-or-bullet"
+      }
+    },
+    {
+      "id": 975727851,
+      "title": "Date A Bullet: Nightmare or Queen",
+      "type": "MOVIE",
+      "status": 2,
+      "episodes_total": 1,
+      "source_urls": {
+        "ylnime": "https://ylnime.com/index.php?series=date-a-bullet-nightmare-or-queen"
+      }
+    }
+  ]
+}
