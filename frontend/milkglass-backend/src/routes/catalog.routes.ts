@@ -667,14 +667,18 @@ catalogRoutes.get(
           let posterUrl = '';
           const beforeSlice = html.slice(Math.max(0, m.index - 450), m.index);
           const afterSlice = html.slice(m.index + m[0].length, m.index + m[0].length + 450);
+          const isGenericTitle = (t: string) =>
+            /^(?:cover|poster|thumbnail|thumb|image|img|logo|banner|watch|tonton|nonton|detail)$/i.test(t.trim());
           if (sourceId === 'ylnime') {
-            if (rawTitle.length < 2) {
+            if (rawTitle.length < 2 || isGenericTitle(rawTitle)) {
               // Kartu Bootstrap YLnime memakai <a href="index.php?series=..." class="stretched-link"></a> kosong
               const cardTitleMatch = afterSlice.match(
                 /<(?:h[1-6]|div|span)[^>]*class=(["'])[^"']*card-title[^"']*\1[^>]*>([\s\S]*?)<\/(?:h[1-6]|div|span)>/i
               );
-              const imgAlts = [...beforeSlice.matchAll(/<img\b[^>]*\balt=(["'])([^"']+)\1/gi)];
-              const nearestAlt = imgAlts.length > 0 ? imgAlts[imgAlts.length - 1][2] : '';
+              const imgAlts = [...beforeSlice.matchAll(/<img\b[^>]*\balt=(["'])([^"']+)\1/gi)]
+                .map((x) => cleanLiveTitle(x[2]))
+                .filter((t) => t.length >= 2 && !isGenericTitle(t));
+              const nearestAlt = imgAlts.length > 0 ? imgAlts[imgAlts.length - 1] : '';
               rawTitle = cleanLiveTitle(cardTitleMatch?.[2] || nearestAlt || '');
             }
             const imgSrcs = [...beforeSlice.matchAll(/<img\b[^>]*\bsrc=(["'])(https?:\/\/[^"']+)\1/gi)];
@@ -685,10 +689,21 @@ catalogRoutes.get(
             const nearestSrc = imgSrcs.length > 0 ? imgSrcs[imgSrcs.length - 1][2] : '';
             if (nearestSrc.startsWith('https://')) posterUrl = nearestSrc;
           }
-          if (!url || rawTitle.length < 2 || /^\[?info\]?/i.test(rawTitle) || /^\(live\s*action\)/i.test(rawTitle) || seenUrls.has(url)) {
+          const dedupKey =
+            sourceId === 'ylnime'
+              ? (url.match(/[?&]series=([^&#]+)/i)?.[1]?.toLowerCase() || url)
+              : url;
+          if (
+            !url ||
+            rawTitle.length < 2 ||
+            isGenericTitle(rawTitle) ||
+            /^\[?info\]?/i.test(rawTitle) ||
+            /^\(live\s*action\)/i.test(rawTitle) ||
+            seenUrls.has(dedupKey)
+          ) {
             continue;
           }
-          seenUrls.add(url);
+          seenUrls.add(dedupKey);
           let hash = 2166136261;
           const seed = `${sourceId}:${url.toLowerCase()}`;
           for (let i = 0; i < seed.length; i++) {
