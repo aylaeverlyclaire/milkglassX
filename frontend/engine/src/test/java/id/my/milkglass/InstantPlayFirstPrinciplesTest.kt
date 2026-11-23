@@ -72,11 +72,20 @@ class InstantPlayFirstPrinciplesTest {
     @Test
     fun rankCandidatesPrioritizesStreamingEmbedsForPlaybackAndDownloadsForDownloadMode() {
         val resolver = MkvCascadeResolver(clients = IsolatedHttpClients(null), providers = emptyList())
-        val downloadHoster = RawMkvCandidate(
+        val directApiHoster = RawMkvCandidate(
             source = SourcePriority.OTAKUDESU,
             quality = MkvQuality.P1080,
             hosterLabel = "Pixeldrain",
-            rawUrl = "https://pixeldrain.com/u/dead123",
+            rawUrl = "https://pixeldrain.com/u/fast123",
+            pageReferer = "https://otakudesu.blog/episode/dal-episode-1-sub-indo/",
+            container = MediaContainer.MKV,
+            isStreamEmbed = false
+        )
+        val genericDownloadHoster = RawMkvCandidate(
+            source = SourcePriority.OTAKUDESU,
+            quality = MkvQuality.P1080,
+            hosterLabel = "Solidfiles",
+            rawUrl = "https://www.solidfiles.com/v/generic123",
             pageReferer = "https://otakudesu.blog/episode/dal-episode-1-sub-indo/",
             container = MediaContainer.MKV,
             isStreamEmbed = false
@@ -91,23 +100,29 @@ class InstantPlayFirstPrinciplesTest {
             isStreamEmbed = true
         )
 
+        // Zero-WebView First playback: Direct-API hoster (Tier 0) > HTTP-only embed (Tier 1) > Generic download (Tier 2)
         val playRanked = resolver.rankCandidates(
-            candidates = listOf(downloadHoster, streamEmbed),
+            candidates = listOf(genericDownloadHoster, streamEmbed, directApiHoster),
             qualityOrder = MkvQuality.ALL_DESC,
             allowBatchFallback = false,
             preferCompatibleContainer = false,
             preferStreamingEmbeds = true
         )
-        assertEquals(streamEmbed.rawUrl, playRanked.first().rawUrl)
+        assertEquals(
+            listOf(directApiHoster.rawUrl, streamEmbed.rawUrl, genericDownloadHoster.rawUrl),
+            playRanked.map { it.rawUrl }
+        )
 
+        // Download mode: non-embed download hosters rank ahead of streaming embeds
         val downloadRanked = resolver.rankCandidates(
-            candidates = listOf(downloadHoster, streamEmbed),
+            candidates = listOf(streamEmbed, genericDownloadHoster, directApiHoster),
             qualityOrder = MkvQuality.ALL_DESC,
             allowBatchFallback = false,
             preferCompatibleContainer = false,
             preferStreamingEmbeds = false
         )
-        assertEquals(downloadHoster.rawUrl, downloadRanked.first().rawUrl)
+        assertEquals(directApiHoster.rawUrl, downloadRanked.first().rawUrl)
+        assertEquals(streamEmbed.rawUrl, downloadRanked.last().rawUrl)
     }
 
     @Test
