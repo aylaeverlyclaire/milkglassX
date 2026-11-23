@@ -72,7 +72,9 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
         .bind(META_KEY, String(targetVersion), nowSec)
     );
 
-    await db.batch(stmts);
+    for (let i = 0; i < stmts.length; i += 80) {
+      await db.batch(stmts.slice(i, i + 80));
+    }
     appliedInIsolateVersion = targetVersion;
   } catch (err: unknown) {
     console.error('[curatedPatch] failed to apply', {
