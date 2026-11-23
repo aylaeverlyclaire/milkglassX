@@ -8,6 +8,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import org.json.JSONObject
 import org.jsoup.Jsoup
+import org.jsoup.parser.Parser
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -41,7 +42,7 @@ object HosterFilter {
 
     // 4 hoster cepat sebagai cadangan otomatis (Tahap 2) & sumber 1080p.
     private val fastFallbackTokens = listOf(
-        "pixeldrain", "pdrain", "gofile", "buzzheavier", "bzzhr", "fuckingfast", "filedon", "odfiles"
+        "pixeldrain", "pdrain", "gofile", "buzzheavier", "bzzhr", "fuckingfast", "filedon", "odfiles", ".animeverse.id", ".animekita.org"
     )
 
     // Embed streaming langsung (Tahap 1) + 4 hoster cepat (Tahap 2).
@@ -324,6 +325,9 @@ class LinkUnshortener(
             lowerUrl.contains("hubdrive.") ||
             lowerUrl.contains("workers.dev") ||
             lowerUrl.contains("r2.dev") ||
+            lowerUrl.contains("r2.cloudflarestorage.com/") ||
+            lowerUrl.contains(".animeverse.id/") ||
+            lowerUrl.contains(".animekita.org/") ||
             lowerUrl.contains("dood.") ||
             lowerUrl.contains("odstream.xyz") ||
             lowerUrl.contains("ondesu.cc") ||
@@ -425,7 +429,7 @@ class MkvHosterExtractorRegistry(
 
         return when {
             low.contains("pixeldrain.com") || low.contains("pixeldrain.net") || low.contains("pixeldrain.lu") || low.contains("pdrain.com") -> extractPixeldrain(resolvedUrl)
-            low.contains("filedon.co") || low.contains("odfiles.com") -> extractFiledon(resolvedUrl)
+            low.contains("filedon.co") || low.contains("odfiles.com") -> extractFiledon(resolvedUrl, referer)
             low.contains("krakenfiles.com") -> extractKrakenfiles(resolvedUrl)
             low.contains("gofile.io") -> extractGoFile(resolvedUrl)
             low.contains("mediafire.com") -> extractMediaFire(resolvedUrl)
@@ -488,30 +492,47 @@ class MkvHosterExtractorRegistry(
         )
     }
 
-    private fun extractFiledon(url: String): ExtractedDirectMedia? {
+    private fun extractFiledon(url: String, referer: String? = null): ExtractedDirectMedia? {
         val slug = filedoSlugRegex.find(url)?.groupValues?.getOrNull(1)
             ?: url.trimEnd('/').substringAfterLast('/').takeIf { it.isNotBlank() }
             ?: return null
-        val candidates = listOf("https://filedon.co/embed/$slug", url).distinct()
-        for (target in candidates) {
-            val html = fetchText(target, "https://filedon.co/") ?: continue
-            val doc = Jsoup.parse(html, target)
-            val rawDataPage = doc.selectFirst("[data-page]")?.attr("data-page") ?: continue
-            val props = runCatching { JSONObject(rawDataPage).optJSONObject("props") }.getOrNull() ?: continue
-            val directUrl = listOf("url", "download_url", "stream_url", "file_url", "direct_url")
-                .firstNotNullOfOrNull { k -> props.optString(k).takeIf { it.startsWith("http") } }
-                ?: props.optJSONObject("media")?.optString("hls_url")?.takeIf { it.startsWith("http") }
-                ?: continue
-            return ExtractedDirectMedia(
-                hoster = "ODFiles",
-                directUrl = directUrl,
-                referer = "https://filedon.co/",
-                supportsRange = !directUrl.contains(".m3u8", ignoreCase = true),
-                isHls = directUrl.contains(".m3u8", ignoreCase = true)
-            )
+        val embedUrl = "https://filedon.co/embed/$slug"
+        val referers = listOfNotNull(
+            referer?.trim()?.takeIf { it.startsWith("http") },
+            "https://otakudesu.blog/",
+            "https://v2.samehadaku.how/",
+            "https://filedon.co/"
+        ).distinct()
+        for (ref in referers) {
+            val html = fetchText(embedUrl, ref) ?: continue
+            parseFiledonHtml(html, embedUrl)?.let { return it }
+            if (!html.contains("embed-forbidden", ignoreCase = true)) break
+        }
+        if (url != embedUrl) {
+            val html = fetchText(url, referers.first()) ?: return null
+            parseFiledonHtml(html, url)?.let { return it }
         }
         // /get-url returns HTTP 405 on live filedon.co; avoid 3.9s wasted fallback.
         return null
+    }
+
+    internal fun parseFiledonHtml(html: String, baseUrl: String = "https://filedon.co/"): ExtractedDirectMedia? {
+        val doc = Jsoup.parse(html, baseUrl)
+        val rawDataPage = doc.selectFirst("[data-page]")?.attr("data-page") ?: return null
+        val pageJson = runCatching { JSONObject(rawDataPage) }.getOrNull() ?: return null
+        if (pageJson.optString("component").contains("embed-forbidden", ignoreCase = true)) return null
+        val props = pageJson.optJSONObject("props") ?: return null
+        val directUrl = listOf("url", "download_url", "stream_url", "file_url", "direct_url")
+            .firstNotNullOfOrNull { k -> props.optString(k).takeIf { it.startsWith("http") } }
+            ?: props.optJSONObject("media")?.optString("hls_url")?.takeIf { it.startsWith("http") }
+            ?: return null
+        return ExtractedDirectMedia(
+            hoster = "ODFiles",
+            directUrl = directUrl,
+            referer = "https://filedon.co/",
+            supportsRange = !directUrl.contains(".m3u8", ignoreCase = true),
+            isHls = directUrl.contains(".m3u8", ignoreCase = true)
+        )
     }
 
     private fun extractKrakenfiles(url: String): ExtractedDirectMedia? {
@@ -952,21 +973,42 @@ class MkvHosterExtractorRegistry(
     private fun extractBlogger(url: String, referer: String?): ExtractedDirectMedia? {
         val fixed = if (url.startsWith("//")) "https:$url" else url
         val html = fetchText(fixed, referer ?: "https://www.blogger.com/") ?: return null
-        val decoded = decodeUnicodeEscapes(html)
-        val playUrl = Regex(""""play_url"\s*:\s*"([^"]+)"""").find(decoded)?.groupValues?.getOrNull(1)
-            ?: Regex(""""iurl"\s*:\s*"([^"]+)"""").find(decoded)?.groupValues?.getOrNull(1)
-            ?: Regex("""https://[^\s"']+""")
-                .findAll(decoded)
+        return parseBloggerHtml(html, fixed)
+    }
+
+    internal fun parseBloggerHtml(html: String, baseUrl: String = "https://www.blogger.com/"): ExtractedDirectMedia? {
+        val decoded = Parser.unescapeEntities(decodeUnicodeEscapes(html), false)
+        val candidates = buildList {
+            Regex(""""play_url"\s*:\s*"([^"]+)"""").findAll(decoded)
+                .mapTo(this) { it.groupValues[1].replace("\\", "") }
+            Regex(""""iurl"\s*:\s*"([^"]+)"""").findAll(decoded)
+                .mapTo(this) { it.groupValues[1].replace("\\", "") }
+            Regex("""https://[^\s"'<>\\]+""").findAll(decoded)
                 .map { it.value.replace("\\", "") }
-                .firstOrNull {
+                .filter {
                     it.contains("googlevideo.com/videoplayback") ||
                         it.contains("blogger.googleusercontent.com")
                 }
-            ?: return null
+                .forEach { add(it) }
+        }.distinct()
+        if (candidates.isEmpty()) return null
+
+        fun itagRank(u: String): Int {
+            val itag = Regex("[?&]itag=(\\d+)").find(u)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            return when (itag) {
+                37, 137 -> 0   // 1080p
+                22, 136 -> 1   // 720p
+                59, 78, 135 -> 2 // 480p
+                18, 134 -> 3   // 360p
+                null -> 4
+                else -> 5
+            }
+        }
+        val playUrl = candidates.minByOrNull { itagRank(it) } ?: return null
         val directRef = if (playUrl.contains("googlevideo.com/", ignoreCase = true)) {
             "https://youtube.googleapis.com/"
         } else {
-            fixed
+            baseUrl
         }
         return ExtractedDirectMedia(
             hoster = "Blogger",
