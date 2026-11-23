@@ -10,6 +10,7 @@ import { getSourceBaseUrls } from '../services/anilist.service';
 import { deriveSessionProofKey, hmacSha256Hex, verifyAccessTokenClaims, verifyRequestProof, VerifiedAccessClaims } from './auth.routes';
 import { AppBindings } from '../index';
 import { D1ReadClient, readDb } from '../utils/db';
+import { lookupCuratedEpisodeHosters } from '../services/curatedHosters.service';
 
 export const playRoutes = new Hono<{ Bindings: AppBindings }>();
 
@@ -438,9 +439,10 @@ playRoutes.get(
       lookupHint(rdb, title, ep),
       loadAsnStats(rdb, 0),
     ]);
+    const curatedHosters = lookupCuratedEpisodeHosters(title, ep, anime_id);
     const mergedHints: StoredHint[] = [];
     const seenUrls = new Set<string>();
-    for (const item of [...(indexedHosters ?? []), ...(hinted ?? [])]) {
+    for (const item of [...(curatedHosters ?? []), ...(indexedHosters ?? []), ...(hinted ?? [])]) {
       if (!seenUrls.has(item.raw_url)) {
         seenUrls.add(item.raw_url);
         mergedHints.push(item);
@@ -457,7 +459,7 @@ playRoutes.get(
           direct_candidates: rankByAsn(direct ?? [], q, globalStats),
           client_extract_candidates: rankByAsn(mergedHints, q, globalStats),
           hoster_scores: hosterScores,
-          source: direct ? 'direct' : indexedHosters ? 'catalog_hosters' : 'hint',
+          source: direct ? 'direct' : curatedHosters ? 'curated_hosters' : indexedHosters ? 'catalog_hosters' : 'hint',
         },
       });
     }
