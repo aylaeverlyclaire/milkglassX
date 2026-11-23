@@ -46,7 +46,7 @@ class RaceResolveTest {
                 clients = clients,
                 providers = listOf(
                     EmptyProvider(SourcePriority.OTAKUDESU, sleepMs),
-                    EmptyProvider(SourcePriority.SAMEHADAKU, sleepMs)
+                    EmptyProvider(SourcePriority.YLNIME, sleepMs)
                 )
             )
         )
@@ -81,7 +81,7 @@ class RaceResolveTest {
         }
         assertTrue("pembatalan harus berhenti cepat (${elapsedMs}ms)", elapsedMs < 3_000L)
         assertTrue(!SourceCircuitBreaker.isOpen(SourcePriority.OTAKUDESU))
-        assertTrue(!SourceCircuitBreaker.isOpen(SourcePriority.SAMEHADAKU))
+        assertTrue(!SourceCircuitBreaker.isOpen(SourcePriority.YLNIME))
     }
 
     @Test
