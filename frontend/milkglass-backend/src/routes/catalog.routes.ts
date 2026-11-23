@@ -268,6 +268,7 @@ catalogRoutes.get(
   rateLimit(40, 60),
   zValidatorQuery(browseQuerySchema),
   async (c) => {
+    await ensureCuratedCatalogPatchApplied(c.env.DB);
     const { q, genre, status, schedule_day, page } = c.req.valid('query');
     const limit = 24;
     const offset = (page - 1) * limit;
@@ -578,6 +579,7 @@ catalogRoutes.get(
       oregairu: 'yahari ore no seishun',
       frieren: 'sousou no frieren',
     };
+    await ensureCuratedCatalogPatchApplied(c.env.DB);
     const rawQ = (c.req.query('q') || '').trim().slice(0, 80);
     const rawCompact = normalizeSearchSpaced(rawQ).replace(/\s+/g, '');
     const q = SEARCH_ALIASES[rawCompact] ?? rawQ;
