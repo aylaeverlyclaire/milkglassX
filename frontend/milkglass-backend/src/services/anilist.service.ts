@@ -188,6 +188,7 @@ const ENRICH_ANIME_SQL = `
     episodes_total = CASE WHEN ?6 > episodes_total THEN ?6 ELSE episodes_total END,
     genres_json = CASE WHEN ?7 != '[]' THEN ?7 ELSE genres_json END,
     synonyms_json = CASE WHEN ?8 != '[]' THEN ?8 ELSE synonyms_json END,
+    status = CASE WHEN ?11 = 2 THEN 2 ELSE status END,
     updated_at = ?9
   WHERE id = ?10
     AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%')
@@ -222,7 +223,8 @@ export function bindAnimeEnrichOnly(
       JSON.stringify(genres),
       JSON.stringify(synonyms),
       nowSec,
-      targetAnimeId
+      targetAnimeId,
+      item.status === 'FINISHED' ? 2 : 0
     );
 }
 
@@ -398,7 +400,7 @@ export async function backfillIncompleteAnime(db: D1Database, limit = 50): Promi
   if (allRows.length === 0) return 0;
 
   const anilistIdRows = allRows.filter((r) => Number.isInteger(r.id) && r.id > 0 && r.id < 900_000_000);
-  const syntheticRows = allRows.filter((r) => Number.isInteger(r.id) && r.id >= 900_000_000).slice(0, 6);
+  const syntheticRows = allRows.filter((r) => Number.isInteger(r.id) && r.id >= 900_000_000).slice(0, 18);
 
   const nowSec = Math.floor(Date.now() / 1000);
   const stmts: D1PreparedStatement[] = [];

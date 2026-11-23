@@ -431,15 +431,29 @@ class EngineRuntime private constructor(private val appContext: Context) {
         }
         if (targets.isEmpty()) return@withContext null
 
-        val maps = withTimeoutOrNull(4_500L) {
+        val maps = withTimeoutOrNull(10_000L) {
             coroutineScope {
                 targets.entries.map { (priority, seriesUrl) ->
                     async {
                         runCatching {
-                            val html = fetchSeriesHtmlForProbe(priority, seriesUrl) ?: return@runCatching emptyMap<Int, String>()
-                            val parsed = parseLiveEpisodeMap(priority, html, seriesUrl)
+                            val html = fetchSeriesHtmlForProbe(priority, seriesUrl)
+                            var parsed = if (html != null) parseLiveEpisodeMap(priority, html, seriesUrl) else emptyMap()
+                            var usedUrl = seriesUrl
+                            if (parsed.isEmpty() && priority == SourcePriority.YLNIME &&
+                                Regex("(?:%2[fF]|/)+$").containsMatchIn(seriesUrl)
+                            ) {
+                                val cleanedUrl = seriesUrl.replace(Regex("(?:%2[fF]|/)+$"), "")
+                                val retryHtml = fetchSeriesHtmlForProbe(priority, cleanedUrl)
+                                if (retryHtml != null) {
+                                    parsed = parseLiveEpisodeMap(priority, retryHtml, cleanedUrl)
+                                    usedUrl = cleanedUrl
+                                }
+                            }
                             if (parsed.isNotEmpty()) {
-                                SeriesEpisodeMapCache.putAll(priority, seriesUrl, parsed)
+                                SeriesEpisodeMapCache.putAll(priority, usedUrl, parsed)
+                                if (usedUrl != seriesUrl) {
+                                    SeriesEpisodeMapCache.putAll(priority, seriesUrl, parsed)
+                                }
                             }
                             parsed
                         }.getOrDefault(emptyMap<Int, String>())
@@ -560,7 +574,9 @@ class EngineRuntime private constructor(private val appContext: Context) {
                         }
                     }
                 }
-                if (parsedMap.isEmpty() && distinctUrls.size == 1) {
+                val epIdRe = Regex("[?&]episode=([^&#]+)", RegexOption.IGNORE_CASE)
+                val distinctEpIds = distinctUrls.mapNotNull { epIdRe.find(it)?.groupValues?.getOrNull(1)?.lowercase(Locale.ROOT) }.toSet()
+                if (parsedMap.isEmpty() && (distinctUrls.size == 1 || distinctEpIds.size == 1)) {
                     parsedMap[1] = distinctUrls.first()
                 }
             }

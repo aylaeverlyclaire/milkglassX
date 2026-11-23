@@ -346,6 +346,8 @@ const syncHostersSchema = z.object({
         anime_id: z.number().int().positive(),
         title: z.string().trim().min(1).max(200),
         title_alt: z.string().trim().max(200).nullable().optional(),
+        episodes_total: z.number().int().min(0).max(5000).optional(),
+        is_completed: z.boolean().optional(),
         episodes: z
           .array(
             z.object({
@@ -365,8 +367,9 @@ const syncHostersSchema = z.object({
                 .max(20),
             })
           )
-          .min(1)
-          .max(200),
+          .min(0)
+          .max(200)
+          .default([]),
       })
     )
     .max(50)
@@ -379,11 +382,23 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
   const now = Math.floor(Date.now() / 1000);
   let upserted = 0;
   const touchedAnimeIds = new Set<number>();
+  const animeMetaUpdates = new Map<number, { episodesTotal: number; isCompleted: boolean }>();
 
   const stmts: D1PreparedStatement[] = [];
   for (const item of items) {
     const tKey = normalizeHosterTitleKey(item.title);
     const tAltKey = item.title_alt ? normalizeHosterTitleKey(item.title_alt) : null;
+    const epMaxFromPayload = item.episodes.reduce((m, e) => (e.ep > m ? e.ep : m), 0);
+    const mergedEpTotal = Math.max(item.episodes_total ?? 0, epMaxFromPayload);
+    const isCompleted = item.is_completed === true;
+    if (mergedEpTotal > 0 || isCompleted) {
+      const prev = animeMetaUpdates.get(item.anime_id);
+      animeMetaUpdates.set(item.anime_id, {
+        episodesTotal: Math.max(prev?.episodesTotal ?? 0, mergedEpTotal),
+        isCompleted: Boolean(prev?.isCompleted || isCompleted),
+      });
+      touchedAnimeIds.add(item.anime_id);
+    }
     for (const epEntry of item.episodes) {
       for (const h of epEntry.hosters) {
         if (!h.url.startsWith('https://') && !h.url.startsWith('http://')) continue;
@@ -428,15 +443,23 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
   }
 
   if (touchedAnimeIds.size > 0) {
-    const flagStmts = Array.from(touchedAnimeIds).map((aid) =>
-      c.env.DB.prepare(
+    const flagStmts = Array.from(touchedAnimeIds).map((aid) => {
+      const meta = animeMetaUpdates.get(aid);
+      const epTotal = meta?.episodesTotal ?? 0;
+      const completedFlag = meta?.isCompleted ? 1 : 0;
+      return c.env.DB.prepare(
         `UPDATE animes
-         SET has_live_source = 1
+         SET has_live_source = 1,
+             episodes_total = CASE WHEN ?2 > episodes_total THEN ?2 ELSE episodes_total END,
+             status = CASE WHEN ?3 = 1 THEN 2 ELSE status END,
+             updated_at = ?4
          WHERE id = ?1
            AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%')`
-      ).bind(aid)
-    );
-    await c.env.DB.batch(flagStmts);
+      ).bind(aid, epTotal, completedFlag, now);
+    });
+    for (let i = 0; i < flagStmts.length; i += 80) {
+      await c.env.DB.batch(flagStmts.slice(i, i + 80));
+    }
   }
 
   if (reconcile) {

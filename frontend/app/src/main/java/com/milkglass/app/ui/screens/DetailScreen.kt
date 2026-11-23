@@ -109,7 +109,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
     var synopsisExpanded by rememberSaveable(id) { mutableStateOf(false) }
 
     val statusText = if (time.isOngoing(a) && n != null) tr.t("detail.airing", "day" to tr.locale.weekdaysLong[time.weekdayOf(n)])
-        else tr.t("detail.finished", "totalEpisodes" to a.totalEpisodes)
+        else tr.t("detail.finished", "totalEpisodes" to totalEps)
     val statusKind = if (time.isOngoing(a) && n != null) BadgeKind.Success else BadgeKind.Neutral
     val accent = remember(a.id, c.surface) { accentFor(a, c.surface) }
     LaunchedEffect(a.id) { ctl.loadEpisodeMeta(a) }
