@@ -53,7 +53,7 @@ BLACKLIST_HOSTS = (
 
 DEFAULT_SOURCE_ORDER: Tuple[str, ...] = (
     "otakudesu",
-    "samehadaku",
+    "ylnime",
 )
 
 _RESOLVE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -305,23 +305,29 @@ async def _resolve_from_source(
     cf_handler: Any,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     root = base_url.rstrip("/")
-    search_url = f"{root}/?s={quote_plus(title)}&post_type=anime" if source_id == "otakudesu" else f"{root}/?s={quote_plus(title)}"
-    search_html = await _fetch_html(session, search_url, f"{root}/", cf_handler)
-    if not search_html:
-        return ([], [])
-
-    sp = _AnchorIframeParser()
-    sp.feed(search_html)
+    cleaned_q = re.sub(r"[^\w\s]+", " ", title).strip()
+    cleaned_q = re.sub(r"\s+", " ", cleaned_q)
+    search_queries = [title] + ([cleaned_q] if cleaned_q and cleaned_q.lower() != title.lower() else [])
     best_series: Optional[str] = None
     best_score = 0.0
-    for href, text, _ in sp.anchors:
-        abs_url = urljoin(root + "/", href)
-        if not abs_url.startswith("http") or "/episode/" in abs_url.lower():
+    search_url = f"{root}/"
+    for q_term in search_queries:
+        search_url = f"{root}/?s={quote_plus(q_term)}&post_type=anime" if source_id == "otakudesu" else f"{root}/index.php?search={quote_plus(q_term)}"
+        search_html = await _fetch_html(session, search_url, f"{root}/", cf_handler)
+        if not search_html:
             continue
-        sc = score_title(title, text)
-        if sc > best_score and sc >= 0.35:
-            best_score = sc
-            best_series = abs_url
+        sp = _AnchorIframeParser()
+        sp.feed(search_html)
+        for href, text, _ in sp.anchors:
+            abs_url = urljoin(root + "/", href)
+            if not abs_url.startswith("http") or "/episode/" in abs_url.lower() or "episode=" in abs_url.lower():
+                continue
+            sc = score_title(title, text)
+            if sc > best_score and sc >= 0.35:
+                best_score = sc
+                best_series = abs_url
+        if best_series and best_score >= 0.85:
+            break
     if not best_series:
         return ([], [])
 
@@ -332,11 +338,23 @@ async def _resolve_from_source(
     ep_parser.feed(series_html)
     ep_url: Optional[str] = None
     single_ep_candidates: List[str] = []
-    for href, text, _ in ep_parser.anchors:
+    series_slug = urlparse(best_series).path.strip("/").split("/")[-1].lower()
+    series_host = (urlparse(best_series).hostname or "").lower()
+    for href, text, ctx in ep_parser.anchors:
         abs_url = urljoin(best_series, href)
         if not abs_url.startswith("http"):
             continue
-        if "/episode/" in abs_url.lower() and "/batch/" not in abs_url.lower() and abs_url not in single_ep_candidates:
+        low_u = abs_url.lower()
+        is_same_host = (urlparse(abs_url).hostname or "").lower() == series_host
+        if (
+            "/batch/" not in low_u
+            and "/anime/" not in low_u
+            and (
+                "/episode/" in low_u
+                or (source_id == "ylnime" and "episode=" in low_u)
+            )
+            and abs_url not in single_ep_candidates
+        ):
             single_ep_candidates.append(abs_url)
         if _matches_episode(text, abs_url, ep):
             ep_url = abs_url
@@ -488,11 +506,25 @@ async def resolve_split_plane(
         ip_locked: List[Dict[str, Any]] = []
 
         async with AsyncSession(impersonate="chrome124") as session:
-            for sid, burl in ordered:
-                d_list, lock_list = await _resolve_from_source(session, sid, burl, title, ep, cf_handler)
-                directs.extend(d_list)
-                ip_locked.extend(lock_list)
+            # Prinsip Zero-Hostage: jalankan Otakudesu & YLnime paralel penuh; yang siap duluan langsung menang
+            pending = {
+                asyncio.create_task(_resolve_from_source(session, sid, burl, title, ep, cf_handler))
+                for sid, burl in ordered
+            }
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    try:
+                        d_list, lock_list = task.result()
+                    except Exception:
+                        continue
+                    directs.extend(d_list)
+                    ip_locked.extend(lock_list)
                 if directs or ip_locked:
+                    for p_task in pending:
+                        p_task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
                     break
 
         q_rank = {preferred_quality.lower(): 0, "1080p": 1, "720p": 2, "480p": 3, "360p": 4}
