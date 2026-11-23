@@ -9,7 +9,7 @@ import { recheckAfterSec } from '../services/sync-schedule';
 import { getSourceBaseUrls } from '../services/anilist.service';
 import { AppBindings } from '../index';
 import { readDb } from '../utils/db';
-import { CURATED_PATCH_MAP, ensureCuratedCatalogPatchApplied } from '../services/curatedPatch.service';
+import { CURATED_PATCH_MAP, CURATED_PATCH_VERSION, ensureCuratedCatalogPatchApplied } from '../services/curatedPatch.service';
 
 
 const ALLOWED_CATALOG_PROVIDERS = new Set(['ylnime', 'otakudesu']);
@@ -91,7 +91,8 @@ function catalogVersion(
   marker: { synced_at: number | null; full_synced_at: number | null },
   total: number
 ) {
-  return `${marker.synced_at ?? 0}.${total}`;
+  const patchSuffix = CURATED_PATCH_VERSION > 0 ? String(CURATED_PATCH_VERSION).padStart(3, '0') : '';
+  return `${marker.synced_at ?? 0}.${total}${patchSuffix}`;
 }
 
 function escapeSqlLike(input: string): string {
@@ -682,6 +683,14 @@ catalogRoutes.get(
             : rawHref.startsWith('?')
               ? `${root}/${rawHref}`
               : `${root}/${rawHref.replace(/^\/+/, '')}`;
+          const rawInnerText = m[3]
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&#8211;|&ndash;/gi, '-')
+            .replace(/&amp;/gi, '&');
+          const epRangeMatch = rawInnerText.match(/\(\s*Episode\s*\d+\s*(?:-|s\/d)\s*(\d+)\s*\)/i);
+          const inferredEps = epRangeMatch ? Math.max(1, Number(epRangeMatch[1])) : (/\bmovie\b/i.test(rawInnerText) ? 1 : 12);
+          const inferredStatus = epRangeMatch || /\bmovie\b/i.test(rawInnerText) ? 2 : 1;
+          const inferredType = /\bmovie\b/i.test(rawInnerText) ? 'MOVIE' : 'TV';
           let rawTitle = cleanLiveTitle(m[3]);
           let posterUrl = '';
           const beforeSlice = html.slice(Math.max(0, m.index - 450), m.index);
@@ -739,8 +748,8 @@ catalogRoutes.get(
             title: rawTitle,
             title_alt: rawTitle,
             score: 0,
-            type: 'TV',
-            status: 1,
+            type: inferredType,
+            status: inferredStatus,
             schedule_day: 0,
             duration: '24 min',
             studio: sourceId === 'ylnime' ? 'YLnime' : 'Otakudesu',
@@ -749,7 +758,7 @@ catalogRoutes.get(
             popularity: 0,
             updated_at: Math.floor(Date.now() / 1000),
             genres: [],
-            episodes_total: 12,
+            episodes_total: inferredEps,
             next_airing_at: 0,
             next_airing_ep: 0,
           });
