@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Prioritas Sumber (berlaku per resolusi):
- * Hanya Samehadaku (watermarkTier 0) dan Otakudesu (watermarkTier 2).
+ * Hanya Otakudesu dan YLnime (watermarkTier 0) (watermarkTier 2).
  */
 enum class SourcePriority(
     val rank: Int,
@@ -28,7 +28,7 @@ enum class SourcePriority(
     val watermarkTier: Int
 ) {
     OTAKUDESU(1, "otakudesu", "https://otakudesu.blog", 2),
-    SAMEHADAKU(2, "samehadaku", "https://samehadaku.li", 0)
+    YLNIME(2, "ylnime", "https://ylnime.com", 0)
 }
 
 enum class MediaContainer(val rank: Int, val label: String) {
@@ -500,7 +500,7 @@ class MkvCascadeResolver(
     private val embedSniffer: ((url: String, referer: String?) -> ExtractedDirectMedia?)? = null,
     private val providers: List<MkvSourceProvider> = listOf(
         OtakudesuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.OTAKUDESU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher),
-        SamehadakuSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.SAMEHADAKU) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher)
+        YlnimeSourceProvider(clients, slugCache = slugCache, baseUrlProvider = { baseUrlProvider(SourcePriority.YLNIME) }, indexLookup = indexLookup, remoteHtmlFetcher = remoteHtmlFetcher)
     )
 ) {
     private val unshortener = LinkUnshortener(clients)
@@ -583,17 +583,34 @@ class MkvCascadeResolver(
         } == true || rawStore?.has(cacheKey, DISK_RAW_TTL_MS) == true
         if (alreadyWarm) return true
 
-        val orderedProviders = adaptiveProviderOrder().take(2)
-        for (provider in orderedProviders) {
-            if (SourceCircuitBreaker.isOpen(provider.priority)) continue
-            val outcome = fetchFromProvider(provider, animeTitle, episodeNumber)
-            if (outcome.candidates.isNotEmpty()) {
-                SourceCircuitBreaker.recordSuccess(provider.priority)
-                putRawCache(cacheKey, outcome.candidates, System.currentTimeMillis())
-                return true
+        val active = adaptiveProviderOrder().take(2).filterNot { SourceCircuitBreaker.isOpen(it.priority) }
+        if (active.isEmpty()) return false
+        val queue = LinkedBlockingQueue<ProviderFetchOutcome>(active.size)
+        val abandoned = AtomicBoolean(false)
+        val futures = active.map { provider ->
+            sharedProviderPool.submit {
+                val outcome = runCatching { fetchFromProvider(provider, animeTitle, episodeNumber, abandoned) }
+                    .getOrElse { ProviderFetchOutcome(provider.priority, error = it.message) }
+                queue.offer(outcome)
             }
         }
-        return false
+        try {
+            val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L)
+            repeat(active.size) {
+                val rem = deadlineNs - System.nanoTime()
+                if (rem <= 0L) return@repeat
+                val done = pollKeepingInterrupt(queue, rem) ?: return@repeat
+                if (done.candidates.isNotEmpty()) {
+                    SourceCircuitBreaker.recordSuccess(done.source)
+                    putRawCache(cacheKey, done.candidates, System.currentTimeMillis())
+                    return true
+                }
+            }
+            return false
+        } finally {
+            abandoned.set(true)
+            futures.forEach { if (!it.isDone) it.cancel(true) }
+        }
     }
 
     fun verifyDirect(list: List<ResolvedMkvMedia>): List<ResolvedMkvMedia> {
@@ -635,11 +652,8 @@ class MkvCascadeResolver(
                 val hit = runCatching { fut.get() }.getOrNull()
                 if (hit != null) {
                     verified.add(hit)
-                    if (verified.size == 1) {
-                        val grace = System.nanoTime() + firstWinGraceNs
-                        if (grace < deadlineNs) deadlineNs = grace
-                    }
-                    if (verified.size >= 2) return@repeat
+                    // Prinsip Zero-Hostage: begitu 1 stream lolos verifikasi, langsung kembalikan tanpa menyandera pemutar
+                    return@repeat
                 }
             }
             return verified
@@ -776,7 +790,7 @@ class MkvCascadeResolver(
         var idx = 0
         if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
         if (activeProviders.size >= 2) {
-            // Optimasi #1: Balapkan Samehadaku & Otakudesu secara paralel penuh sejak t=0ms (tanpa jeda hedge),
+            // Optimasi #1: Balapkan Otakudesu & YLnime secara paralel penuh sejak t=0ms (tanpa jeda hedge),
             // first-playable-wins langsung membatalkan provider lainnya.
             val fanOutCount = minOf(activeProviders.size, 2)
             val raceQueue = LinkedBlockingQueue<ProviderResolvedOutcome>(fanOutCount)
@@ -928,7 +942,7 @@ class MkvCascadeResolver(
                 .sortedBy { id.my.milkglass.extractor.HosterFilter.rank(it.hosterLabel, it.rawUrl) }
                 .take(4)
             if (tier.isEmpty()) continue
-            val tierBudgetMs = remainingMs.coerceAtMost(4_000L)
+            val tierBudgetMs = remainingMs.coerceAtMost(2_200L)
             val extracted = raceExtractCandidates(tier, maxResults = maxResults, timeoutMs = tierBudgetMs)
             if (extracted.isNotEmpty()) return extracted
         }
