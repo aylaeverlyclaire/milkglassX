@@ -211,6 +211,8 @@ class AppController(
     private var episodeMeta by mutableStateOf<Map<Int, Map<Int, com.milkglass.app.core.remote.EpisodeMeta>>>(emptyMap())
     private val metaRequested = HashSet<Int>()
 
+    fun hasEpisodeZero(a: Anime): Boolean = episodeMeta[a.id]?.containsKey(0) == true
+
     fun episodeThumbOf(a: Anime, ep: Int): String? = episodeMeta[a.id]?.get(ep)?.image
 
     fun episodeTitleOf(a: Anime, ep: Int): String = episodeMeta[a.id]?.get(ep)?.title ?: time.episodeTitle(a, ep)
@@ -600,15 +602,24 @@ class AppController(
             .replace(NON_SEARCH_CHARS, " ")
             .trim()
 
-    private class SearchDoc(val haystack: String, val title: String, val vibes: Set<String>)
+    private class SearchDoc(
+        val haystack: String,
+        val title: String,
+        val vibes: Set<String>,
+        val titleCompact: String = title.replace(" ", ""),
+        val haystackCompact: String = haystack.replace(" ", ""),
+        val tokens: List<String> = haystack.split(" ").filter { it.isNotEmpty() },
+    )
 
     private val searchIndex: Map<Int, SearchDoc> by derivedStateOf {
         catalog.associate { a ->
+            val hay = normalizeText(
+                listOf(a.title, a.altTitle, a.genres.joinToString(" ") { enumLabel("genre", it) }, a.genres.joinToString(" "), a.studio, a.year.toString()).joinToString(" "),
+            )
+            val normTitle = normalizeText(a.title)
             a.id to SearchDoc(
-                haystack = normalizeText(
-                    listOf(a.title, a.altTitle, a.genres.joinToString(" ") { enumLabel("genre", it) }, a.genres.joinToString(" "), a.studio, a.year.toString()).joinToString(" "),
-                ),
-                title = normalizeText(a.title),
+                haystack = hay,
+                title = normTitle,
                 vibes = vibesOf(a.genres),
             )
         }
@@ -647,16 +658,15 @@ class AppController(
         return dp[m][n]
     }
 
-    private fun searchMatchScore(qSpaced: String, qCompact: String, doc: SearchDoc): Int {
+    private fun searchMatchScore(qSpaced: String, qCompact: String, qTokens: List<String>, doc: SearchDoc): Int {
         if (qCompact.isEmpty()) return 1
-        val titleCompact = doc.title.replace(" ", "")
-        val hayCompact = doc.haystack.replace(" ", "")
+        val titleCompact = doc.titleCompact
+        val hayCompact = doc.haystackCompact
         if (titleCompact == qCompact) return 100
         if (doc.title.startsWith(qSpaced) || titleCompact.startsWith(qCompact)) return 85
         if (doc.title.contains(qSpaced) || titleCompact.contains(qCompact)) return 75
         if (doc.haystack.contains(qSpaced) || hayCompact.contains(qCompact)) return 65
-        val qTokens = qSpaced.split(" ").filter { it.isNotEmpty() }
-        val hTokens = doc.haystack.split(" ").filter { it.isNotEmpty() }
+        val hTokens = doc.tokens
         if (qTokens.isEmpty() || hTokens.isEmpty()) return 0
         var matched = 0
         for (qt in qTokens) {
@@ -688,11 +698,12 @@ class AppController(
             }
         }
         val idx = searchIndex
+        val qTokens = if (q.isEmpty()) emptyList() else q.split(" ").filter { it.isNotEmpty() }
         val scored = cat.mapNotNull { a ->
             val d = idx[a.id] ?: return@mapNotNull null
             if (genre != "all" && !a.genres.contains(genre)) return@mapNotNull null
             if (vibe != "all" && !d.vibes.contains(vibe)) return@mapNotNull null
-            val sc = searchMatchScore(q, qCompact, d)
+            val sc = searchMatchScore(q, qCompact, qTokens, d)
             if (qCompact.isNotEmpty() && sc <= 0) return@mapNotNull null
             a to sc
         }

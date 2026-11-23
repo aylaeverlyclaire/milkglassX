@@ -301,7 +301,7 @@ class CatalogRepository(
                     out += RemoteMapper.toEntry(r)
                 }
             }
-            // Katalog & hasil pencarian hanya berasal dari Samehadaku & Otakudesu (`data`),
+            // Katalog & hasil pencarian hanya berasal dari Otakudesu & YLnime (`data`),
             // tidak pernah mengambil item katalog fallback dari AniList (`metadata`).
             out
         } catch (e: Exception) {
