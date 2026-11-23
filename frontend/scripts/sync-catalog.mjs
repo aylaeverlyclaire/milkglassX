@@ -131,16 +131,26 @@ const YLNIME_LETTERS = ['', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')];
 async function fetchYlnimeCatalogAllLetters(ylBase) {
   const all = [];
   const seen = new Set();
-  for (let i = 0; i < YLNIME_LETTERS.length; i += 6) {
-    const batch = YLNIME_LETTERS.slice(i, i + 6);
+  let firstErr = null;
+  let firstEmptySample = null;
+  for (let i = 0; i < YLNIME_LETTERS.length; i += 3) {
+    const batch = YLNIME_LETTERS.slice(i, i + 3);
     const settled = await Promise.allSettled(
-      batch.map((ch) => {
+      batch.map(async (ch) => {
         const url = ch ? `${ylBase}/anime-list.php?l=${ch}` : `${ylBase}/anime-list.php`;
-        return fetchHtml(url, `${ylBase}/`).then((h) => parseYlnimeCatalog(h, ylBase));
+        const html = await fetchHtml(url, `${ylBase}/`);
+        const items = parseYlnimeCatalog(html, ylBase);
+        if (items.length === 0 && !firstEmptySample) {
+          firstEmptySample = `${url} len=${html.length} head=${html.slice(0, 140).replace(/\s+/g, ' ')}`;
+        }
+        return items;
       })
     );
     for (const r of settled) {
-      if (r.status !== 'fulfilled') continue;
+      if (r.status !== 'fulfilled') {
+        if (!firstErr) firstErr = r.reason?.message || String(r.reason);
+        continue;
+      }
       for (const it of r.value) {
         if (!seen.has(it.url)) {
           seen.add(it.url);
@@ -148,6 +158,9 @@ async function fetchYlnimeCatalogAllLetters(ylBase) {
         }
       }
     }
+  }
+  if (all.length === 0) {
+    console.warn(`[ylnime-diag] 0 judul dari A-Z. firstErr=${firstErr || 'none'} sample=${firstEmptySample || 'none'}`);
   }
   return all;
 }
@@ -162,12 +175,11 @@ const providerResults = await Promise.allSettled([
 ]);
 
 const otakuList = providerResults[0].status === 'fulfilled' ? providerResults[0].value : [];
-const ylOngoingUrls = new Set(
-  (providerResults[3].status === 'fulfilled' ? providerResults[3].value : []).map((x) => x.url)
-);
-const ylList = (providerResults[1].status === 'fulfilled' ? providerResults[1].value : []).map((x) =>
-  ylOngoingUrls.has(x.url) ? { ...x, status: 1 } : x
-);
+const ylOngoingRaw = providerResults[3].status === 'fulfilled' ? providerResults[3].value : [];
+const ylOngoingUrls = new Set(ylOngoingRaw.map((x) => x.url));
+const ylAllRaw = providerResults[1].status === 'fulfilled' ? providerResults[1].value : [];
+const ylBaseList = ylAllRaw.length > 0 ? ylAllRaw : ylOngoingRaw;
+const ylList = ylBaseList.map((x) => (ylOngoingUrls.has(x.url) ? { ...x, status: 1 } : x));
 const scheduleMap = new Map(providerResults[2].status === 'fulfilled' ? providerResults[2].value : []);
 const ylScheduleMap = providerResults[4].status === 'fulfilled' ? providerResults[4].value : new Map();
 for (const [k, day] of ylScheduleMap.entries()) {

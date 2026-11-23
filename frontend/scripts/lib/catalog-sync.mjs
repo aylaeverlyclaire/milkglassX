@@ -93,12 +93,24 @@ export function parseYlnimeCatalog(html, baseUrl = 'https://ylnime.com') {
   const out = [];
   const seen = new Set();
   const root = String(baseUrl || 'https://ylnime.com').replace(/\/+$/, '');
-  const re = /<a[^>]+href="((?:https?:\/\/[^"]+\/|\/)?(?:index\.php)?\?series=[^"&]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const re = /<a\b([^>]*?)\bhref=(["'])([^"']+)\2([^>]*)>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(String(html || ''))) !== null) {
-    const rawHref = m[1].trim().replace(/&amp;/g, '&');
-    const url = rawHref.startsWith('http') ? rawHref : `${root}/${rawHref.replace(/^\/+/, '')}`;
-    const title = cleanCatalogTitle(m[2]);
+    const rawHref = m[3].trim().replace(/&amp;/g, '&');
+    if (!/[?&]series=[^&#]+/i.test(rawHref) || /[?&]episode=/i.test(rawHref)) continue;
+    const url = rawHref.startsWith('http')
+      ? rawHref
+      : rawHref.startsWith('?')
+        ? `${root}/${rawHref}`
+        : `${root}/${rawHref.replace(/^\/+/, '')}`;
+    const attrs = `${m[1] || ''} ${m[4] || ''}`;
+    const innerText = cleanCatalogTitle(m[5]);
+    const attrTitle = cleanCatalogTitle(
+      (attrs.match(/\btitle=(["'])([^"']+)\1/i)?.[2]) ||
+      (m[5].match(/\balt=(["'])([^"']+)\1/i)?.[2]) ||
+      ''
+    );
+    const title = innerText.length >= 2 ? innerText : attrTitle;
     if (url.startsWith('https://') && title.length >= 2 && !/^\[?info\]?/i.test(title) && !/^\(live\s*action\)/i.test(title) && !seen.has(url)) {
       seen.add(url);
       out.push({ title, url, provider: 'ylnime' });
