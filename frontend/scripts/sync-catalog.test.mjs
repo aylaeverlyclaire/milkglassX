@@ -385,3 +385,23 @@ test('parseYlnimeSchedule maps daily schedule sections (Senin..Minggu) for YLnim
   assert.equal(sched.get(canonicalCatalogKey('Seitokai ni mo Ana wa Aru!')), 1);
   assert.equal(sched.get(canonicalCatalogKey('Black Clover Season 2')), 7);
 });
+
+test('parseYlnimeCatalog mengekstrak judul & poster dari Bootstrap card dengan stretched-link kosong', () => {
+  const html = `
+    <div class="col-6 col-md-3 col-lg-2 mb-4">
+      <div class="card h-100">
+        <div class="card-img-wrapper">
+          <img src="https://assets.animekita.org/cover/2026/02/f6ca1bf501dde32e.jpg" class="card-img-top" loading="lazy" alt="A Portrait of Jianghu: Bu Liang Ren">
+          <a href="index.php?series=a-portrait-of-jianghu-bu-liang-ren" class="stretched-link"></a>
+        </div>
+        <div class="card-body p-0 mt-2 text-center">
+          <h6 class="card-title text-truncate mb-0 px-1">A Portrait of Jianghu: Bu Liang Ren</h6>
+        </div>
+      </div>
+    </div>`;
+  const items = parseYlnimeCatalog(html, 'https://ylnime.com');
+  assert.equal(items.length, 1);
+  assert.equal(items[0].title, 'A Portrait of Jianghu: Bu Liang Ren');
+  assert.equal(items[0].url, 'https://ylnime.com/index.php?series=a-portrait-of-jianghu-bu-liang-ren');
+  assert.equal(items[0].poster_url, 'https://assets.animekita.org/cover/2026/02/f6ca1bf501dde32e.jpg');
+});

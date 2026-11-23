@@ -225,7 +225,12 @@ class SourceAvailabilityIndex(
                     val html = fetchHtml(url, "$base/") ?: return@submit emptyList()
                     val doc = Jsoup.parse(html, base)
                     doc.select("a[href*='?series=']").mapNotNull { a ->
-                        val title = a.attr("title").ifBlank { a.text() }.trim()
+                        val card = a.closest(".card")
+                        val title = a.attr("title")
+                            .ifBlank { a.text() }
+                            .ifBlank { card?.selectFirst(".card-title, h6, h5")?.text().orEmpty() }
+                            .ifBlank { card?.selectFirst("img[alt]")?.attr("alt").orEmpty() }
+                            .trim()
                         if (title.startsWith("[INFO]", ignoreCase = true)) null
                         else buildEntry(SourcePriority.YLNIME, title, a.absUrl("href"))
                     }

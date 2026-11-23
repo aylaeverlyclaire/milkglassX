@@ -392,9 +392,14 @@ class YlnimeSourceProvider(
                     .mapNotNull { a ->
                         val href = a.absUrl("href")
                         if (!href.contains("series=")) return@mapNotNull null
-                        val title = a.selectFirst(".tt, h2, h3, .title")?.text()?.trim()
+                        val card = a.closest(".card")
+                        val title = a.selectFirst(".tt, h2, h3, .title, .card-title, h6, h5")?.text()?.trim()
                             ?.takeIf { it.isNotBlank() }
-                            ?: a.attr("title").ifBlank { a.text() }.trim()
+                            ?: a.attr("title")
+                                .ifBlank { a.text() }
+                                .ifBlank { card?.selectFirst(".card-title, h6, h5")?.text().orEmpty() }
+                                .ifBlank { card?.selectFirst("img[alt]")?.attr("alt").orEmpty() }
+                                .trim()
                         if (href.isBlank() || title.isBlank()) null else TitleMatcher.score(animeTitle, title) to href
                     }
                     .maxByOrNull { it.first }

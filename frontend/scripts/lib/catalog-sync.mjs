@@ -92,10 +92,11 @@ export function canonicalCatalogKey(raw) {
 export function parseYlnimeCatalog(html, baseUrl = 'https://ylnime.com') {
   const out = [];
   const seen = new Set();
+  const rawHtml = String(html || '');
   const root = String(baseUrl || 'https://ylnime.com').replace(/\/+$/, '');
   const re = /<a\b([^>]*?)\bhref=(["'])([^"']+)\2([^>]*)>([\s\S]*?)<\/a>/gi;
   let m;
-  while ((m = re.exec(String(html || ''))) !== null) {
+  while ((m = re.exec(rawHtml)) !== null) {
     const rawHref = m[3].trim().replace(/&amp;/g, '&');
     if (!/[?&]series=[^&#]+/i.test(rawHref) || /[?&]episode=/i.test(rawHref)) continue;
     const url = rawHref.startsWith('http')
@@ -105,15 +106,31 @@ export function parseYlnimeCatalog(html, baseUrl = 'https://ylnime.com') {
         : `${root}/${rawHref.replace(/^\/+/, '')}`;
     const attrs = `${m[1] || ''} ${m[4] || ''}`;
     const innerText = cleanCatalogTitle(m[5]);
-    const attrTitle = cleanCatalogTitle(
-      (attrs.match(/\btitle=(["'])([^"']+)\1/i)?.[2]) ||
-      (m[5].match(/\balt=(["'])([^"']+)\1/i)?.[2]) ||
-      ''
-    );
-    const title = innerText.length >= 2 ? innerText : attrTitle;
+    let title = innerText;
+    if (title.length < 2) {
+      title = cleanCatalogTitle(
+        (attrs.match(/\btitle=(["'])([^"']+)\1/i)?.[2]) ||
+        (m[5].match(/\balt=(["'])([^"']+)\1/i)?.[2]) ||
+        ''
+      );
+    }
+    const beforeSlice = rawHtml.slice(Math.max(0, m.index - 450), m.index);
+    const afterSlice = rawHtml.slice(m.index + m[0].length, m.index + m[0].length + 450);
+    if (title.length < 2) {
+      // YLnime Bootstrap card menggunakan <a href="index.php?series=..." class="stretched-link"></a> kosong
+      // dengan judul di <h6 class="card-title ..."> setelahnya atau <img alt="..."> sebelumnya.
+      const cardTitleMatch = afterSlice.match(/<(?:h[1-6]|div|span)[^>]*class=(["'])[^"']*card-title[^"']*\1[^>]*>([\s\S]*?)<\/(?:h[1-6]|div|span)>/i);
+      const imgAltMatches = [...beforeSlice.matchAll(/<img\b[^>]*\balt=(["'])([^"']+)\1/gi)];
+      const nearestImgAlt = imgAltMatches.length > 0 ? imgAltMatches[imgAltMatches.length - 1][2] : '';
+      title = cleanCatalogTitle(cardTitleMatch?.[2] || nearestImgAlt || '');
+    }
+    const imgSrcMatches = [...beforeSlice.matchAll(/<img\b[^>]*\bsrc=(["'])(https?:\/\/[^"']+)\1/gi)];
+    const posterUrl = imgSrcMatches.length > 0 ? imgSrcMatches[imgSrcMatches.length - 1][2] : '';
     if (url.startsWith('https://') && title.length >= 2 && !/^\[?info\]?/i.test(title) && !/^\(live\s*action\)/i.test(title) && !seen.has(url)) {
       seen.add(url);
-      out.push({ title, url, provider: 'ylnime' });
+      const item = { title, url, provider: 'ylnime' };
+      if (posterUrl.startsWith('https://')) item.poster_url = posterUrl;
+      out.push(item);
     }
   }
   return out;
@@ -217,6 +234,9 @@ export function mergeProviderCatalogs(providerLists, scheduleMap = null) {
         if (incomingStatus === 1) existing.status = 1;
         else if (existing.status === undefined && incomingStatus !== undefined) existing.status = incomingStatus;
         if (schedDay > 0 && !existing.schedule_day) existing.schedule_day = schedDay;
+        if (!existing.poster_url && typeof raw.poster_url === 'string' && raw.poster_url.startsWith('https://')) {
+          existing.poster_url = raw.poster_url;
+        }
       } else {
         const entry = {
           title: title.slice(0, 180),
@@ -224,6 +244,9 @@ export function mergeProviderCatalogs(providerLists, scheduleMap = null) {
         };
         if (incomingStatus !== undefined) entry.status = incomingStatus;
         if (schedDay > 0) entry.schedule_day = schedDay;
+        if (typeof raw.poster_url === 'string' && raw.poster_url.startsWith('https://')) {
+          entry.poster_url = raw.poster_url;
+        }
         byKey.set(key, entry);
       }
     }
