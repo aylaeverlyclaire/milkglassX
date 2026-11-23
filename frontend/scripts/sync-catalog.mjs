@@ -152,8 +152,8 @@ async function fetchYlnimeCatalogAllLetters(ylBase) {
         const html = await fetchHtml(url, `${ylBase}/`);
         const items = parseYlnimeCatalog(html, ylBase);
         if (items.length === 0 && !firstEmptySample && ch === 'A') {
-          const idx = html.search(/judul\)|A Portrait|A-Channel|Anime A-Z/i);
-          const snippet = idx >= 0 ? html.slice(idx, idx + 1200).replace(/\s+/g, ' ') : html.slice(Math.floor(html.length / 2), Math.floor(html.length / 2) + 1200).replace(/\s+/g, ' ');
+          const idx = html.search(/A Portrait|A-Channel|Absolute Duo|Accel World/i);
+          const snippet = idx >= 0 ? html.slice(Math.max(0, idx - 300), idx + 600).replace(/\s+/g, ' ') : html.slice(Math.floor(html.length / 2), Math.floor(html.length / 2) + 900).replace(/\s+/g, ' ');
           firstEmptySample = `${url} len=${html.length} idx=${idx} snippet=${snippet}`;
         }
         return items;
