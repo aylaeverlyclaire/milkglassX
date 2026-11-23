@@ -575,7 +575,13 @@ object SeriesEpisodeMapCache {
     private val EP_HREF_REGEX = Regex("(?:episode|eps?|ep)[-_\\s]*0*(\\d{1,4})(?!(?:\\.\\d|\\d))", RegexOption.IGNORE_CASE)
     private val YLNIME_EP_HREF_REGEX = Regex("[?&]episode=[a-z0-9_-]+-0*(\\d{1,4})(?:[&#]|$)", RegexOption.IGNORE_CASE)
     private val MOVIE_EP_TEXT_REGEX = Regex("^(?:episode\\s+)?(?:movie|film|ova|special)$", RegexOption.IGNORE_CASE)
+    private val OVA_SPECIAL_NUM_TEXT_REGEX = Regex("\\b(?:ova|oad|special)\\s*0*(\\d{1,3})(?!(?:\\.\\d|\\d))", RegexOption.IGNORE_CASE)
+    private val OVA_SPECIAL_NUM_HREF_REGEX = Regex("(?:ova|oad|special)[-_]+0*(\\d{1,3})(?!(?:\\.\\d|\\d))", RegexOption.IGNORE_CASE)
+    private val BONUS_EP_REGEX = Regex("\\b(?:ova|oad|special|recap|bonus|preview)\\b", RegexOption.IGNORE_CASE)
     private val SLUG_EP_REGEX = Regex("-ep-(\\d+)$", RegexOption.IGNORE_CASE)
+
+    fun isBonusOrSpecialLink(text: String, href: String): Boolean =
+        BONUS_EP_REGEX.containsMatchIn(text) || BONUS_EP_REGEX.containsMatchIn(href)
 
     fun extractEpisodeNumberFromSlug(slug: String): Int =
         SLUG_EP_REGEX.find(slug)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
@@ -587,6 +593,10 @@ object SeriesEpisodeMapCache {
         if (fromHref != null) return fromHref
         val fromYlnime = YLNIME_EP_HREF_REGEX.find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
         if (fromYlnime != null) return fromYlnime
+        val fromOvaText = OVA_SPECIAL_NUM_TEXT_REGEX.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        if (fromOvaText != null) return fromOvaText
+        val fromOvaHref = OVA_SPECIAL_NUM_HREF_REGEX.find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        if (fromOvaHref != null) return fromOvaHref
         if (MOVIE_EP_TEXT_REGEX.matches(text.trim())) return 1
         return null
     }
@@ -1137,9 +1147,16 @@ class MkvCascadeResolver(
             val topEmbed = batch.firstOrNull { it.isStreamEmbed }
             val sniffer = embedSniffer
             if (topEmbed != null && sniffer != null) {
+                val deferSnifferMs = if (StreamingFirstGuards.shouldDeferWebViewSniffer(batch)) 900L else 0L
                 futures.add(
                     cs.submit {
                         runCatching {
+                            if (deferSnifferMs > 0L) {
+                                val endNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(deferSnifferMs)
+                                while (!abandoned.get() && !Thread.currentThread().isInterrupted && System.nanoTime() < endNs) {
+                                    Thread.sleep(30L)
+                                }
+                            }
                             if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
                             val sniffed = sniffer.invoke(topEmbed.rawUrl, topEmbed.pageReferer) ?: return@runCatching null
                             // Wajib verifikasi untuk URL non-CDN agar halaman HTML/error tidak pernah lolos ke ExoPlayer,
@@ -1180,7 +1197,10 @@ class MkvCascadeResolver(
                                 }
                                 return@runCatching null
                             }
-                            if (!media.isArchive && !extractorRegistry.verifyPlayableMedia(media)) {
+                            if (!media.isArchive &&
+                                !id.my.milkglass.extractor.EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(media.directUrl) &&
+                                !extractorRegistry.verifyPlayableMedia(media)
+                            ) {
                                 if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
                                 DeadCandidateCache.markDead(candidate.rawUrl)
                                 EndpointHealthScorer.recordFailure(media.hoster)
@@ -1193,7 +1213,7 @@ class MkvCascadeResolver(
                 )
             }
             var deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
-            val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(40L)
+            val firstWinGraceNs = 0L
             repeat(futures.size) {
                 if (Thread.currentThread().isInterrupted) return@repeat
                 val remainingNs = deadlineNs - System.nanoTime()
@@ -1224,7 +1244,7 @@ class MkvCascadeResolver(
     companion object {
         private const val RAW_CACHE_TTL_MS = 20L * 60L * 1000L
         private const val DISK_RAW_TTL_MS = 6L * 60L * 60L * 1000L
-        private const val HEDGE_DELAY_MS = 250L
+        private const val HEDGE_DELAY_MS = 120L
 
         private val extractSeq = AtomicInteger(1)
         private val sharedExtractionPool: ExecutorService = Executors.newFixedThreadPool(8) { r ->
