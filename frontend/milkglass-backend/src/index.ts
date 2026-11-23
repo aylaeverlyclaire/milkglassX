@@ -37,7 +37,7 @@ function isAllowedOrigin(origin: string): boolean {
   }
 }
 
-const app = new Hono<{ Bindings: AppBindings }>();
+const app = new Hono<{ Bindings: AppBindings }>({ strict: false });
 
 app.use(
   '*',

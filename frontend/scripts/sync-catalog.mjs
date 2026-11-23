@@ -186,20 +186,28 @@ const providerResults = await Promise.allSettled([
   fetchHtml(`${bases.otakudesu}/jadwal-rilis/`, `${bases.otakudesu}/`).then(parseOtakudesuSchedule),
   fetchHtml(`${bases.ylnime}/ongoing.php`, `${bases.ylnime}/`).then((h) => parseYlnimeCatalog(h, bases.ylnime)),
   fetchHtml(`${bases.ylnime}/jadwals.php`, `${bases.ylnime}/`).then(parseYlnimeSchedule),
+  fetchHtml(`${bases.ylnime}/completed.php`, `${bases.ylnime}/`).then((h) => parseYlnimeCatalog(h, bases.ylnime)),
 ]);
 
 const otakuList = providerResults[0].status === 'fulfilled' ? providerResults[0].value : [];
 const ylOngoingRaw = providerResults[3].status === 'fulfilled' ? providerResults[3].value : [];
+const ylCompletedRaw = providerResults[5].status === 'fulfilled' ? providerResults[5].value : [];
 const ylOngoingUrls = new Set(ylOngoingRaw.map((x) => x.url));
-const ylBaseList = providerResults[1].status === 'fulfilled' ? providerResults[1].value : [];
-const ylList = (ylBaseList.length > 0 ? ylBaseList : ylOngoingRaw.map((x) => ({ ...x, status: 1 }))).map((x) =>
-  ylOngoingUrls.has(x.url) ? { ...x, status: 1 } : x
-);
+const ylCompletedUrls = new Set(ylCompletedRaw.map((x) => x.url));
 const scheduleMap = new Map(providerResults[2].status === 'fulfilled' ? providerResults[2].value : []);
 const ylScheduleMap = providerResults[4].status === 'fulfilled' ? providerResults[4].value : new Map();
 for (const [k, day] of ylScheduleMap.entries()) {
   if (!scheduleMap.has(k)) scheduleMap.set(k, day);
 }
+const ylBaseList = providerResults[1].status === 'fulfilled' ? providerResults[1].value : [];
+const ylList = (ylBaseList.length > 0 ? ylBaseList : ylOngoingRaw.map((x) => ({ ...x, status: 1 }))).map((x) => {
+  if (ylOngoingUrls.has(x.url)) return { ...x, status: 1 };
+  if (ylCompletedUrls.has(x.url)) return { ...x, status: 2 };
+  const key = canonicalCatalogKey(x.title);
+  if (key && scheduleMap.has(key)) return { ...x, status: 1 };
+  if (ylOngoingUrls.size > 0 || ylCompletedUrls.size > 0) return { ...x, status: 2 };
+  return x;
+});
 
 console.log(
   `[otakudesu] ${providerResults[0].status === 'fulfilled' ? `${otakuList.length} judul` : `GAGAL: ${providerResults[0].reason?.message}`}`
