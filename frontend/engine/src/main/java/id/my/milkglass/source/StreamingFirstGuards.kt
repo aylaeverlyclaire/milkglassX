@@ -179,10 +179,16 @@ internal object StreamingFirstGuards {
                 c.rank
             }
         }
+        val primaryComparator = if (preferStreamingEmbeds) {
+            compareBy<RawMkvCandidate> { zeroWebViewTier(it) }
+        } else {
+            compareBy<RawMkvCandidate> { if (it.isStreamEmbed) 1 else 0 }
+                .thenBy { zeroWebViewTier(it) }
+        }
         return candidates
             .filter { allowBatchFallback || !it.isBatchArchive }
             .sortedWith(
-                compareBy<RawMkvCandidate> { zeroWebViewTier(it) }
+                primaryComparator
                     .thenBy { qualityOrder.indexOf(it.quality).let { idx -> if (idx < 0) 99 else idx } }
                     .thenBy { containerRank(it.container) }
                     .thenByDescending { EndpointHealthScorer.score(it.hosterLabel) }
