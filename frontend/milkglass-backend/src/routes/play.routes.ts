@@ -567,7 +567,7 @@ async function resolveLiveFromSourceUrlsOnEdge(
   title: string,
   ep: number,
   animeId?: number,
-  execCtx?: ExecutionContext
+  execCtx?: { waitUntil(promise: Promise<unknown>): void }
 ): Promise<{ direct: StoredDirect[]; hints: StoredHint[] }> {
   const direct: StoredDirect[] = [];
   const hints: StoredHint[] = [];
