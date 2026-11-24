@@ -11,6 +11,7 @@ import {
   fetchWithRetry,
   inferCatalogMediaType,
   isStrictIdentityMatch,
+  isExcludedCatalogAnime,
   mergeProviderCatalogs,
   minUnique,
   parseOtakudesuCatalog,
@@ -437,4 +438,27 @@ test('parseYlnimeSchedule mengekstrak judul dari kartu Bootstrap stretched-link 
   const sched = parseYlnimeSchedule(html);
   assert.equal(sched.get(canonicalCatalogKey('Akane-banashi')), 1);
   assert.equal(sched.get(canonicalCatalogKey('Sousou no Frieren Season 2')), 7);
+});
+
+test('isExcludedCatalogAnime blocks Detective Conan, Naruto, Boruto, One Piece, and >500 episode anime', () => {
+  assert.equal(isExcludedCatalogAnime('Detective Conan', 1200), true);
+  assert.equal(isExcludedCatalogAnime('Meitantei Conan Movie 28', 1), true);
+  assert.equal(isExcludedCatalogAnime('Naruto: Shippuuden', 500), true);
+  assert.equal(isExcludedCatalogAnime('Boruto: Naruto Next Generations', 293), true);
+  assert.equal(isExcludedCatalogAnime('One Piece', 1174), true);
+  assert.equal(isExcludedCatalogAnime('Martial Master', 720), true);
+  assert.equal(isExcludedCatalogAnime('Lord of the Ancient God Grave', 503), true);
+  assert.equal(isExcludedCatalogAnime('Sousou no Frieren', 28), false);
+  assert.equal(isExcludedCatalogAnime('Bleach', 366), false);
+
+  const merged = mergeProviderCatalogs([[
+    { title: 'One Piece', url: 'https://ylnime.com/index.php?series=1piece-sub-indo', provider: 'ylnime' },
+    { title: 'Naruto: Shippuuden', url: 'https://ylnime.com/index.php?series=naruto-shippuuden', provider: 'ylnime' },
+    { title: 'Boruto: Naruto Next Generations', url: 'https://ylnime.com/index.php?series=boruto', provider: 'ylnime' },
+    { title: 'Detective Conan', url: 'https://ylnime.com/index.php?series=detective-conan', provider: 'ylnime' },
+    { title: 'Martial Master', url: 'https://ylnime.com/index.php?series=martial-master', provider: 'ylnime', episodes_total: 720 },
+    { title: 'Sousou no Frieren', url: 'https://ylnime.com/index.php?series=sousou-no-frieren', provider: 'ylnime', episodes_total: 28 },
+  ]]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].title, 'Sousou no Frieren');
 });

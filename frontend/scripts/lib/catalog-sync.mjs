@@ -1,5 +1,37 @@
 export const ALLOWED_CATALOG_PROVIDERS = ['ylnime', 'otakudesu'];
 
+export const MAX_ALLOWED_EPISODES = 500;
+
+export const BANNED_FRANCHISE_RE =
+  /\b(?:detective[\s\-_]*conan|meitantei[\s\-_]*conan|case[\s\-_]*closed|naruto|boruto|one[\s\-_]*piece|1piece)\b/i;
+
+
+export function isExcludedCatalogAnime(title, episodesTotal = 0, sourceUrls = null) {
+  const eps = Number(episodesTotal ?? 0);
+  if (Number.isFinite(eps) && eps > MAX_ALLOWED_EPISODES) return true;
+  if (typeof title === 'string' && BANNED_FRANCHISE_RE.test(title)) return true;
+  if (typeof sourceUrls === 'string' && BANNED_FRANCHISE_RE.test(sourceUrls)) return true;
+  if (sourceUrls && typeof sourceUrls === 'object') {
+    for (const v of Object.values(sourceUrls)) {
+      if (typeof v === 'string' && BANNED_FRANCHISE_RE.test(v)) return true;
+    }
+  }
+  return false;
+}
+
+export function isExcludedCatalogEntry(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  const eps = Number(entry.episodes_total ?? entry.episodes ?? 0);
+  if (Number.isFinite(eps) && eps > MAX_ALLOWED_EPISODES) return true;
+  const fields = [
+    entry.title,
+    entry.title_alt,
+    entry.url,
+    ...(entry.source_urls && typeof entry.source_urls === 'object' ? Object.values(entry.source_urls) : []),
+  ];
+  return fields.some((f) => typeof f === 'string' && BANNED_FRANCHISE_RE.test(f));
+}
+
 export const ENRICH_FIELDS = `id idMal title{romaji english native} synonyms averageScore episodes genres coverImage{extraLarge large}`;
 
 export const ENRICH_SEARCH_QUERY = `query($search:String){Page(page:1,perPage:5){media(search:$search,type:ANIME,isAdult:false){${ENRICH_FIELDS}}}}`;
@@ -75,11 +107,6 @@ function stripSeasonAndPart(norm) {
     .trim();
 }
 
-/**
- * Kunci kanonik anti-duplikat lintas Otakudesu & YLnime:
- * "Date A Live II", "Date A Live Season 2", dan "Date A Live 2nd Season" menghasilkan kunci identik,
- * sementara season, part/cour, atau side-story berbeda tetap terpisah.
- */
 export function canonicalCatalogKey(raw) {
   const cleaned = cleanCatalogTitle(raw);
   const norm = normalizeCatalogTitle(cleaned);
@@ -117,8 +144,6 @@ export function parseYlnimeCatalog(html, baseUrl = 'https://ylnime.com') {
     const beforeSlice = rawHtml.slice(Math.max(0, m.index - 450), m.index);
     const afterSlice = rawHtml.slice(m.index + m[0].length, m.index + m[0].length + 450);
     if (title.length < 2) {
-      // YLnime Bootstrap card menggunakan <a href="index.php?series=..." class="stretched-link"></a> kosong
-      // dengan judul di <h6 class="card-title ..."> setelahnya atau <img alt="..."> sebelumnya.
       const cardTitleMatch = afterSlice.match(/<(?:h[1-6]|div|span)[^>]*class=(["'])[^"']*card-title[^"']*\1[^>]*>([\s\S]*?)<\/(?:h[1-6]|div|span)>/i);
       const imgAltMatches = [...beforeSlice.matchAll(/<img\b[^>]*\balt=(["'])([^"']+)\1/gi)];
       const nearestImgAlt = imgAltMatches.length > 0 ? imgAltMatches[imgAltMatches.length - 1][2] : '';
@@ -126,10 +151,17 @@ export function parseYlnimeCatalog(html, baseUrl = 'https://ylnime.com') {
     }
     const imgSrcMatches = [...beforeSlice.matchAll(/<img\b[^>]*\bsrc=(["'])(https?:\/\/[^"']+)\1/gi)];
     const posterUrl = imgSrcMatches.length > 0 ? imgSrcMatches[imgSrcMatches.length - 1][2] : '';
-    if (url.startsWith('https://') && title.length >= 2 && !/^\[?info\]?/i.test(title) && !/^\(live\s*action\)/i.test(title) && !seen.has(url)) {
+    const item = { title, url, provider: 'ylnime' };
+    if (posterUrl.startsWith('https://')) item.poster_url = posterUrl;
+    if (
+      url.startsWith('https://') &&
+      title.length >= 2 &&
+      !/^\[?info\]?/i.test(title) &&
+      !/^\(live\s*action\)/i.test(title) &&
+      !isExcludedCatalogEntry(item) &&
+      !seen.has(url)
+    ) {
       seen.add(url);
-      const item = { title, url, provider: 'ylnime' };
-      if (posterUrl.startsWith('https://')) item.poster_url = posterUrl;
       out.push(item);
     }
   }
@@ -146,9 +178,10 @@ export function parseOtakudesuCatalog(html) {
     const rawText = String(m[2] || '').replace(/<[^>]+>/g, ' ');
     const isOngoing = /\bon-?going\b/i.test(rawText);
     const title = cleanCatalogTitle(rawText);
-    if (url.startsWith('https://') && title.length >= 2 && !seen.has(url)) {
+    const item = { title, url, provider: 'otakudesu', status: isOngoing ? 1 : 2 };
+    if (url.startsWith('https://') && title.length >= 2 && !isExcludedCatalogEntry(item) && !seen.has(url)) {
       seen.add(url);
-      out.push({ title, url, provider: 'otakudesu', status: isOngoing ? 1 : 2 });
+      out.push(item);
     }
   }
   return out;
@@ -164,9 +197,6 @@ const DAY_NAME_TO_NUM = {
   minggu: 7,
 };
 
-/**
- * Mem-parsing halaman /jadwal-rilis/ Otakudesu menjadi peta normalizedKey -> schedule_day (1=Senin..7=Minggu).
- */
 export function parseOtakudesuSchedule(html) {
   const map = new Map();
   const text = String(html || '');
@@ -187,14 +217,6 @@ export function parseOtakudesuSchedule(html) {
   return map;
 }
 
-/**
- * Menggabungkan entri katalog HANYA dari YLnime dan Otakudesu.
- * Provider di luar YLnime dan Otakudesu selalu ditolak.
- */
-/**
- * Mem-parsing halaman /jadwals.php YLnime menjadi peta canonicalKey -> schedule_day (1=Senin..7=Minggu)
- * sebagai pelengkap untuk judul YLnime-only atau kategori Random di Otakudesu.
- */
 export function inferCatalogMediaType(title) {
   const t = String(title || '');
   if (/\b(?:movie|gekijouban|film)\b/i.test(t)) return 'MOVIE';
@@ -239,6 +261,7 @@ export function mergeProviderCatalogs(providerLists, scheduleMap = null) {
   for (const list of providerLists || []) {
     for (const raw of list || []) {
       if (!raw || !allowed.has(raw.provider)) continue;
+      if (isExcludedCatalogEntry(raw)) continue;
       const url = typeof raw.url === 'string' ? raw.url.trim() : '';
       if (!url.startsWith('https://')) continue;
       const title = cleanCatalogTitle(raw.title);
@@ -274,7 +297,7 @@ export function mergeProviderCatalogs(providerLists, scheduleMap = null) {
       }
     }
   }
-  return Array.from(byKey.values());
+  return Array.from(byKey.values()).filter((e) => !isExcludedCatalogEntry(e));
 }
 
 export function isStrictIdentityMatch(sourceTitle, candidateTitle) {
@@ -301,10 +324,6 @@ export function isStrictIdentityMatch(sourceTitle, candidateTitle) {
   return jaccard >= 0.72 || (containment >= 1.0 && minSize >= 2);
 }
 
-/**
- * AniList HANYA menyediakan total eps, rating (score), poster, dan id/idMal untuk judul eps.
- * Tidak pernah mengubah title sumber atau menambahkan entri katalog baru.
- */
 export function applyAniListEnrichment(item, anilistMedia) {
   if (!anilistMedia || !Number.isInteger(anilistMedia.id) || anilistMedia.id <= 0) return item;
   const out = { ...item };

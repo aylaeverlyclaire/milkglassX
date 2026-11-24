@@ -16,6 +16,11 @@ import {
 } from '../middleware/edgeCache';
 import { AppBindings } from '../index';
 import { SOURCE_ID_SCHEMA } from '../utils/sources';
+import {
+  MAX_ALLOWED_EPISODES,
+  ensureCuratedCatalogPatchApplied,
+  isExcludedAnimeRecord,
+} from '../services/curatedPatch.service';
 
 export const ingestRoutes = new Hono<{ Bindings: AppBindings }>();
 
@@ -132,6 +137,16 @@ ingestRoutes.post('/ingest', zValidator('json', ingestEpisodeBodySchema), async 
   const payload = c.req.valid('json');
   const db = c.env.DB;
   const nowSec = Math.floor(Date.now() / 1000);
+
+  if (
+    isExcludedAnimeRecord({
+      id: payload.anime_id,
+      title: payload.anime_title,
+      episodes_total: payload.episode_number,
+    })
+  ) {
+    return c.json({ status: 'error', message: 'Anime termasuk daftar dikecualikan (>500 episode atau franchise diblokir).' }, 403);
+  }
 
   const ensured = await ensureAnimeExistsFastInD1(
     db,
@@ -271,15 +286,15 @@ ingestRoutes.post('/ingest', zValidator('json', ingestEpisodeBodySchema), async 
   });
 });
 
-// AniList tidak lagi menemukan/menambah katalog; endpoint ini hanya melakukan enrich metadata
-// (total eps, rating, poster) untuk entri katalog YLnime & Otakudesu yang sudah ada.
 ingestRoutes.post('/sync-anilist', async (c) => {
+  await ensureCuratedCatalogPatchApplied(c.env.DB);
   const enriched = await backfillIncompleteAnime(c.env.DB, 50);
   await purgeHomeCache(c.req.url);
   return c.json({ status: 'ok', enriched_count: enriched, mode: 'enrichment_only' });
 });
 
 ingestRoutes.post('/catalog-import', async (c) => {
+  await ensureCuratedCatalogPatchApplied(c.env.DB);
   const body = (await c.req.json().catch(() => null)) as {
     media?: unknown;
     scope?: unknown;
@@ -328,15 +343,20 @@ function normalizeHosterTitleKey(title: string): string {
 }
 
 ingestRoutes.get('/catalog-list', async (c) => {
+  await ensureCuratedCatalogPatchApplied(c.env.DB);
   const { results } = await c.env.DB.prepare(
     `SELECT id, title, title_alt, synonyms_json, status, popularity, episodes_total, score, poster_url, genres_json, has_live_source, source_urls_json
      FROM animes
      WHERE has_live_source = 1
+       AND episodes_total <= ?1
        AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%')
      ORDER BY popularity DESC
      LIMIT 8000`
-  ).all<Record<string, unknown>>();
-  return c.json({ status: 'ok', count: (results ?? []).length, data: results ?? [] });
+  )
+    .bind(MAX_ALLOWED_EPISODES)
+    .all<Record<string, unknown>>();
+  const filtered = (results ?? []).filter((r) => !isExcludedAnimeRecord(r));
+  return c.json({ status: 'ok', count: filtered.length, data: filtered });
 });
 
 const syncHostersSchema = z.object({
@@ -378,18 +398,35 @@ const syncHostersSchema = z.object({
 });
 
 ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async (c) => {
+  await ensureCuratedCatalogPatchApplied(c.env.DB);
   const { items, reconcile } = c.req.valid('json');
   const now = Math.floor(Date.now() / 1000);
   let upserted = 0;
+  let skippedExcluded = 0;
   const touchedAnimeIds = new Set<number>();
   const animeMetaUpdates = new Map<number, { episodesTotal: number; isCompleted: boolean }>();
 
   const stmts: D1PreparedStatement[] = [];
   for (const item of items) {
-    const tKey = normalizeHosterTitleKey(item.title);
-    const tAltKey = item.title_alt ? normalizeHosterTitleKey(item.title_alt) : null;
     const epMaxFromPayload = item.episodes.reduce((m, e) => (e.ep > m ? e.ep : m), 0);
     const mergedEpTotal = Math.max(item.episodes_total ?? 0, epMaxFromPayload);
+    if (
+      isExcludedAnimeRecord({
+        id: item.anime_id,
+        title: item.title,
+        title_alt: item.title_alt,
+        episodes_total: mergedEpTotal,
+      })
+    ) {
+      skippedExcluded++;
+      stmts.push(
+        c.env.DB.prepare(`UPDATE animes SET has_live_source = 0, updated_at = ?1 WHERE id = ?2`).bind(now, item.anime_id)
+      );
+      continue;
+    }
+
+    const tKey = normalizeHosterTitleKey(item.title);
+    const tAltKey = item.title_alt ? normalizeHosterTitleKey(item.title_alt) : null;
     const isCompleted = item.is_completed === true;
     if (mergedEpTotal > 0 || isCompleted) {
       const prev = animeMetaUpdates.get(item.anime_id);
@@ -449,7 +486,7 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
       const completedFlag = meta?.isCompleted ? 1 : 0;
       return c.env.DB.prepare(
         `UPDATE animes
-         SET has_live_source = 1,
+         SET has_live_source = CASE WHEN ?2 > ${MAX_ALLOWED_EPISODES} THEN 0 ELSE 1 END,
              episodes_total = CASE WHEN ?2 > episodes_total THEN ?2 ELSE episodes_total END,
              status = CASE WHEN ?3 = 1 THEN 2 ELSE status END,
              updated_at = ?4
@@ -466,10 +503,12 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
     await c.env.DB.prepare(
       `UPDATE animes
        SET has_live_source = CASE
-         WHEN source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%' THEN 1
+         WHEN episodes_total <= ${MAX_ALLOWED_EPISODES}
+          AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%') THEN 1
          ELSE 0
        END`
     ).run();
+    await ensureCuratedCatalogPatchApplied(c.env.DB);
     await purgeHomeCache(c.req.url);
   }
 
@@ -477,6 +516,7 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
     status: 'ok',
     upserted_hosters: upserted,
     touched_animes: touchedAnimeIds.size,
+    skipped_excluded: skippedExcluded,
     reconciled: reconcile,
   });
 });
@@ -522,6 +562,7 @@ const UPSERT_META_SQL = `
 `;
 
 ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSchema), async (c) => {
+  await ensureCuratedCatalogPatchApplied(c.env.DB);
   const { items, scope, prune } = c.req.valid('json');
   const now = Math.floor(Date.now() / 1000);
   const stmts: D1PreparedStatement[] = [];
@@ -530,6 +571,25 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
   let skipped = 0;
 
   for (const item of items) {
+    const targetId = item.anime_id ?? sourceCatalogStableId(item.title);
+    const episodesTotal =
+      typeof item.episodes_total === 'number' && Number.isInteger(item.episodes_total) && item.episodes_total > 0
+        ? item.episodes_total
+        : 0;
+
+    if (
+      isExcludedAnimeRecord({
+        id: targetId,
+        title: item.title,
+        title_alt: item.title_alt,
+        episodes_total: episodesTotal,
+        source_urls: item.source_urls,
+      })
+    ) {
+      skipped++;
+      continue;
+    }
+
     // Kontrak katalog eksklusif: HANYA YLnime dan Otakudesu yang boleh masuk katalog.
     const cleanUrls: Record<string, string> = {};
     for (const [k, v] of Object.entries(item.source_urls)) {
@@ -548,17 +608,12 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
     const titleAlt = item.title_alt?.trim() || item.title;
     const posterUrl = item.poster_url?.trim() || '';
     const score = typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : 0;
-    const episodesTotal =
-      typeof item.episodes_total === 'number' && Number.isInteger(item.episodes_total) && item.episodes_total > 0
-        ? item.episodes_total
-        : 0;
     const genresJson = JSON.stringify(item.genres ?? []);
     const synonymsJson = JSON.stringify(item.synonyms ?? []);
     const mediaType = item.type ?? (/\b(?:movie|gekijouban|film)\b/i.test(item.title) ? 'MOVIE' : /\b(?:ova|oad)\b/i.test(item.title) ? 'OVA' : /\bspecials?\b/i.test(item.title) ? 'SPECIAL' : 'TV');
     const statusVal = item.status ?? 1;
     const scheduleDay = item.schedule_day ?? 0;
     const compact = item.title.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 120);
-    const targetId = item.anime_id ?? sourceCatalogStableId(item.title);
 
     stmts.push(
       c.env.DB.prepare(
@@ -580,12 +635,12 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
            genres_json = CASE WHEN excluded.genres_json != '[]' THEN excluded.genres_json ELSE animes.genres_json END,
            synonyms_json = CASE WHEN excluded.synonyms_json != '[]' THEN excluded.synonyms_json ELSE animes.synonyms_json END,
            episodes_total = CASE WHEN excluded.episodes_total > animes.episodes_total THEN excluded.episodes_total ELSE animes.episodes_total END,
-           source_urls_json = excluded.source_urls_json,
-           has_live_source = 1,
+           source_urls_json = json_patch(CASE WHEN json_valid(animes.source_urls_json) THEN animes.source_urls_json ELSE '{}' END, excluded.source_urls_json),
+           has_live_source = CASE WHEN MAX(animes.episodes_total, excluded.episodes_total) > ${MAX_ALLOWED_EPISODES} THEN 0 ELSE 1 END,
            updated_at = excluded.updated_at
          WHERE animes.episodes_total < excluded.episodes_total
             OR animes.status != excluded.status
-            OR animes.source_urls_json != excluded.source_urls_json
+            OR animes.source_urls_json != json_patch(CASE WHEN json_valid(animes.source_urls_json) THEN animes.source_urls_json ELSE '{}' END, excluded.source_urls_json)
             OR animes.has_live_source != 1
             OR (excluded.score > 0 AND animes.score = 0)
             OR (excluded.poster_url != '' AND (animes.poster_url IS NULL OR animes.poster_url = ''))`
@@ -620,8 +675,10 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
       `UPDATE animes
        SET has_live_source = 0
        WHERE source_urls_json IS NULL
+          OR episodes_total > ${MAX_ALLOWED_EPISODES}
           OR (source_urls_json NOT LIKE '%"ylnime"%' AND source_urls_json NOT LIKE '%"otakudesu"%')`
     ).run();
+    await ensureCuratedCatalogPatchApplied(c.env.DB);
   }
 
   const totalProcessed = updated + inserted;

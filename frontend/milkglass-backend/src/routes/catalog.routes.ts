@@ -9,12 +9,19 @@ import { recheckAfterSec } from '../services/sync-schedule';
 import { getSourceBaseUrls } from '../services/anilist.service';
 import { AppBindings } from '../index';
 import { readDb } from '../utils/db';
-import { CURATED_EXCLUDED_IDS, CURATED_PATCH_MAP, CURATED_PATCH_VERSION, ensureCuratedCatalogPatchApplied } from '../services/curatedPatch.service';
+import {
+  CURATED_PATCH_MAP,
+  CURATED_PATCH_VERSION,
+  MAX_ALLOWED_EPISODES,
+  ensureCuratedCatalogPatchApplied,
+  isExcludedAnimeRecord,
+  isExcludedAnimeText,
+} from '../services/curatedPatch.service';
 
 
 const ALLOWED_CATALOG_PROVIDERS = new Set(['ylnime', 'otakudesu']);
-const CATALOG_SOURCE_FILTER = `(has_live_source = 1 AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%'))`;
-const CATALOG_SOURCE_FILTER_A = `(a.has_live_source = 1 AND (a.source_urls_json LIKE '%"ylnime"%' OR a.source_urls_json LIKE '%"otakudesu"%'))`;
+const CATALOG_SOURCE_FILTER = `(has_live_source = 1 AND episodes_total <= ${MAX_ALLOWED_EPISODES} AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%'))`;
+const CATALOG_SOURCE_FILTER_A = `(a.has_live_source = 1 AND a.episodes_total <= ${MAX_ALLOWED_EPISODES} AND (a.source_urls_json LIKE '%"ylnime"%' OR a.source_urls_json LIKE '%"otakudesu"%'))`;
 
 const DEFAULT_ENGINE_RULES = {
   otakudesu: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'ul.chivsrc > li', search_link: 'h2 > a[href]', episode_box: 'div.episodelist', episode_link: 'ul li a[href]', download_block: 'div.download ul', download_row: 'li', quality_text: 'strong', size_text: 'i', hoster_link: 'a[href]', ajax_nonce_action: 'aa1208d27f29ca340c92c66d1926f13f', ajax_mirror_action: '2a3505c93b0035d3f455df82bf976b84' } },
@@ -90,8 +97,9 @@ function shapeAnimeRow(
 
 function shapeRows(rows: Array<Record<string, unknown>> | undefined) {
   return (rows ?? [])
-    .filter((r) => !CURATED_EXCLUDED_IDS.has(Number(r.id ?? 0)))
-    .map((r) => shapeAnimeRow(r));
+    .filter((r) => !isExcludedAnimeRecord(r))
+    .map((r) => shapeAnimeRow(r))
+    .filter((r) => !isExcludedAnimeRecord(r));
 }
 
 function readSyncMarker(rows: Array<{ key: string; value: string }> | undefined) {
@@ -162,6 +170,7 @@ catalogRoutes.get('/home', edgeCache(300, 600, false), async (c) => {
 });
 
 catalogRoutes.get('/status', edgeCache(60, 120, false), async (c) => {
+  await ensureCuratedCatalogPatchApplied(c.env.DB);
   const db = readDb(c.env);
   const [metaRes, countRes, totalAllRes, hosterRes] = await db.batch([
     db.prepare(META_QUERY),
@@ -206,6 +215,7 @@ catalogRoutes.get(
   edgeCache(7 * 86400, 0, true, { immutable: true, allowedQueryParams: ['v'] }),
   zValidatorQuery(z.object({ v: z.string().regex(/^\d+\.\d+$/).max(40).optional() })),
   async (c) => {
+    await ensureCuratedCatalogPatchApplied(c.env.DB);
     const db = readDb(c.env);
     const { v } = c.req.valid('query');
     const statements: D1PreparedStatement[] = [
@@ -379,14 +389,18 @@ catalogRoutes.get(
     ]);
 
     const anime = animeRes.results?.[0] as Record<string, unknown> | undefined;
-    if (!anime) {
+    if (!anime || isExcludedAnimeRecord(anime)) {
+      return c.json({ status: 'error', message: 'Anime tidak ditemukan.' }, 404);
+    }
+    const shaped = shapeAnimeRow(anime);
+    if (isExcludedAnimeRecord(shaped)) {
       return c.json({ status: 'error', message: 'Anime tidak ditemukan.' }, 404);
     }
 
     return c.json({
       status: 'ok',
       data: {
-        ...shapeAnimeRow(anime),
+        ...shaped,
         episodes: episodesRes.results ?? [],
       },
     });
@@ -461,6 +475,7 @@ catalogRoutes.get(
 );
 
 catalogRoutes.get('/', edgeCache(300), async (c) => {
+  await ensureCuratedCatalogPatchApplied(c.env.DB);
   const rows = await readDb(c.env)
     .prepare(
       `SELECT ${LIST_COLUMNS} FROM animes WHERE ${CATALOG_SOURCE_FILTER} ORDER BY updated_at DESC LIMIT 60`
@@ -723,7 +738,6 @@ catalogRoutes.get(
             /^(?:cover|poster|thumbnail|thumb|image|img|logo|banner|watch|tonton|nonton|detail)$/i.test(t.trim());
           if (sourceId === 'ylnime') {
             if (rawTitle.length < 2 || isGenericTitle(rawTitle)) {
-              // Kartu Bootstrap YLnime memakai <a href="index.php?series=..." class="stretched-link"></a> kosong
               const cardTitleMatch = afterSlice.match(
                 /<(?:h[1-6]|div|span)[^>]*class=(["'])[^"']*card-title[^"']*\1[^>]*>([\s\S]*?)<\/(?:h[1-6]|div|span)>/i
               );
@@ -751,6 +765,9 @@ catalogRoutes.get(
             isGenericTitle(rawTitle) ||
             /^\[?info\]?/i.test(rawTitle) ||
             /^\(live\s*action\)/i.test(rawTitle) ||
+            inferredEps > MAX_ALLOWED_EPISODES ||
+            isExcludedAnimeText(rawTitle) ||
+            isExcludedAnimeText(url) ||
             seenUrls.has(dedupKey)
           ) {
             continue;
@@ -798,8 +815,8 @@ catalogRoutes.get(
       queryD1Search(),
       getSourceBaseUrls(rdb),
     ]);
-    let d1Rows = d1Animes.results ?? [];
-    if (d1Rows.length < 12) {
+    let d1Rows = (d1Animes.results ?? []).filter((r) => !isExcludedAnimeRecord(r));
+    if (d1Rows.length < 12 && !isExcludedAnimeText(q)) {
       const qTokensForPool = qSpaced.split(' ').filter((t) => t.length >= 3).slice(0, 4);
       let poolRows: Array<Record<string, unknown>> = [];
       if (qTokensForPool.length > 0) {
@@ -829,7 +846,7 @@ catalogRoutes.get(
       const fullPool = [...poolRows, ...(topPool ?? [])];
       const seenIds = new Set(d1Rows.map((r) => r.id));
       const scored = (fullPool ?? [])
-        .filter((r) => !seenIds.has(r.id))
+        .filter((r) => !seenIds.has(r.id) && !isExcludedAnimeRecord(r))
         .map((r) => ({ row: r, score: scoreMultilingualRow(qSpaced, qCompact, r) }))
         .filter((x) => x.score > 0)
         .sort((a, b) => b.score - a.score || Number(b.row.popularity || 0) - Number(a.row.popularity || 0))
@@ -838,10 +855,10 @@ catalogRoutes.get(
       d1Rows = [...d1Rows, ...scored];
     }
 
-    // D1-first (<50ms): jika D1 sudah mengembalikan >= 6 hasil relevan, lewati live-scrape eksternal
-    // agar hemat kuota Worker subrequest dan menghindari rate-limit IP situs sumber.
+    // D1-first (<50ms): jika D1 sudah mengembalikan >= 6 hasil relevan, atau jika kueri adalah franchise yang dihapus,
+    // lewati live-scrape eksternal.
     let liveRows: Array<Record<string, unknown>> = [];
-    if (d1Rows.length < 6) {
+    if (d1Rows.length < 6 && !isExcludedAnimeText(q)) {
       const [otakuLive, sameLive] = await Promise.allSettled([
         scrapeSourceSearch('otakudesu', sourceUrls.otakudesu),
         scrapeSourceSearch('ylnime', sourceUrls.ylnime),
@@ -849,7 +866,7 @@ catalogRoutes.get(
       liveRows = [
         ...(otakuLive.status === 'fulfilled' ? otakuLive.value : []),
         ...(sameLive.status === 'fulfilled' ? sameLive.value : []),
-      ];
+      ].filter((r) => !isExcludedAnimeRecord(r));
     }
 
     const shapedD1 = shapeRows(d1Rows);
@@ -874,6 +891,7 @@ catalogRoutes.get(
       return base ? `${base}|s${season}|p${part}` : '';
     };
     for (const row of [...shapedD1, ...liveRows]) {
+      if (isExcludedAnimeRecord(row)) continue;
       const k = canonicalSearchKey(row.title);
       const ka = canonicalSearchKey(row.title_alt);
       if ((k && seenCompactKeys.has(k)) || (ka && seenCompactKeys.has(ka))) continue;

@@ -11,6 +11,7 @@ import { deriveSessionProofKey, hmacSha256Hex, verifyAccessTokenClaims, verifyRe
 import { AppBindings } from '../index';
 import { D1ReadClient, readDb } from '../utils/db';
 import { lookupCuratedEpisodeHosters } from '../services/curatedHosters.service';
+import { CURATED_PATCH_MAP } from '../services/curatedPatch.service';
 
 export const playRoutes = new Hono<{ Bindings: AppBindings }>();
 
@@ -23,15 +24,9 @@ function checkUserQuota(buckets: Map<string, RateBucket>, userId: string, maxPer
   return checkBoundedQuota(buckets, userId, maxPerMin, 60, 2000);
 }
 
-
-// ---------------------------------------------------------------------------------------------
-// Hint bersama (D1): tautan hoster mentah yang terbukti bisa diekstrak oleh klien lain.
-// Hanya PETUNJUK: klien selalu mengekstrak + memverifikasi sendiri. Karena itu server membatasi ketat
-// apa yang boleh disimpan (host hoster dikenal, https, bukan IP/localhost) dan siapa yang boleh menulis.
-// ---------------------------------------------------------------------------------------------
 const HINT_MAX_AGE_SEC = 12 * 3600;
 const HINT_REFRESH_AFTER_SEC = 20 * 60;
-const HINT_MAX_CANDIDATES = 12;
+const HINT_MAX_CANDIDATES = 16;
 const IP_AGNOSTIC_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
   'filedon.co', 'odfiles.com', 'r2.dev', 'r2.cloudflarestorage.com', 'animeverse.id', 'animekita.org',
@@ -61,8 +56,6 @@ export function isKnownHosterUrl(raw: string): boolean {
   if (!u) return false;
   return matchesDomainList(u.hostname, ALL_HOSTER_DOMAINS);
 }
-
-
 
 export function normalizeTitleKey(title: string): string {
   return title
@@ -144,9 +137,10 @@ playRoutes.post('/hint', zValidator('json', hintBodySchema), async (c) => {
   const clean: StoredHint[] = [];
   const seen = new Set<string>();
   for (const cand of candidates) {
-    if (!isKnownHosterUrl(cand.raw_url) || seen.has(cand.raw_url)) continue;
+    const dedupKey = `${cand.quality}|${cand.raw_url}`;
+    if (!isKnownHosterUrl(cand.raw_url) || seen.has(dedupKey)) continue;
     const ref = cand.referer && isPublicHttpsUrl(cand.referer) ? cand.referer : '';
-    seen.add(cand.raw_url);
+    seen.add(dedupKey);
     clean.push({
       source: cand.source,
       quality: cand.quality,
@@ -180,17 +174,16 @@ playRoutes.post('/hint', zValidator('json', hintBodySchema), async (c) => {
       if (!addsCoverage && now - existing.updated_at < HINT_REFRESH_AFTER_SEC) {
         return c.json({ status: 'ok', stored: false, fresh: true });
       }
-      // Additive merge lintas source & resolusi (maks 3 kandidat per resolusi, maks 12 total)
       const perQuality = new Map<string, StoredHint[]>();
       for (const item of [...clean, ...prev]) {
         if (!item || !isKnownHosterUrl(item.raw_url)) continue;
         const bucket = perQuality.get(item.quality) ?? [];
-        if (bucket.length < 3 && !bucket.some((x) => x.raw_url === item.raw_url)) {
+        if (bucket.length < 4 && !bucket.some((x) => x.raw_url === item.raw_url)) {
           bucket.push(item);
           perQuality.set(item.quality, bucket);
         }
       }
-      merged = Array.from(perQuality.values()).flat().slice(0, 12);
+      merged = Array.from(perQuality.values()).flat().slice(0, 16);
     }
     await c.env.DB.prepare(
       `INSERT INTO play_hints (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
@@ -265,14 +258,9 @@ async function lookupHint(db: D1ReadClient, title: string, ep: number): Promise<
   }
 }
 
-// ---------------------------------------------------------------------------------------------
-// URL direct terverifikasi (D1 play_direct). Klien melaporkan otomatis setelah ekstraksi + verifikasi berhasil.
-// Umur pendek (30 mnt) karena URL hoster bisa kedaluwarsa/terikat IP; klien penerima SELALU memverifikasi ulang
-// (probe Range) sebelum memakainya dan jatuh ke scraping lokal bila gagal.
-// ---------------------------------------------------------------------------------------------
 const DIRECT_MAX_AGE_SEC = 30 * 60;
 const DIRECT_REFRESH_AFTER_SEC = 5 * 60;
-const DIRECT_MAX_CANDIDATES = 4;
+const DIRECT_MAX_CANDIDATES = 8;
 
 const directBodySchema = z.object({
   title: z.string().trim().min(2).max(160),
@@ -393,6 +381,387 @@ async function lookupDirect(db: D1ReadClient, title: string, ep: number): Promis
   }
 }
 
+const EDGE_RESOLVE_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+function detectEdgeQuality(raw: string, fallback = '720p'): '1080p' | '720p' | '480p' | '360p' {
+  const s = String(raw || '').toLowerCase();
+  if (s.includes('1080') || s.includes('fullhd') || /\bfhd\b/.test(s)) return '1080p';
+  if (s.includes('720') || s.includes('mp4hd') || /\bhd\b/.test(s)) return '720p';
+  if (s.includes('480') || /\bsd\b/.test(s)) return '480p';
+  if (s.includes('360')) return '360p';
+  return (fallback === '1080p' || fallback === '720p' || fallback === '480p' || fallback === '360p') ? fallback : '720p';
+}
+
+function pixeldrainToDirectApi(url: string): string | null {
+  const m = url.match(/(?:pixeldrain\.(?:com|net|lu)|pdrain\.com)\/(?:u|api\/file)\/([A-Za-z0-9_-]+)/i);
+  return m ? `https://pixeldrain.com/api/file/${m[1]}` : null;
+}
+
+function extractEpisodeNumberOnEdge(text: string, url: string): number | null {
+  const combined = `${text || ''} ${url || ''}`;
+  const m =
+    combined.match(/(?:episode|eps?|ep)[\s\-_]*0*(\d{1,4})(?!(?:\.\d|\d))/i) ||
+    String(url || '').match(/[?&]episode=[a-z0-9_-]+-0*(\d{1,4})(?:[&#]|$)/i) ||
+    combined.match(/-0*(\d{1,4})(?:[-/]|$)/);
+  if (m) {
+    const n = Number.parseInt(m[1], 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 2000) return n;
+  }
+  if (/^(?:episode\s+)?(?:movie|film|ova|special)$/i.test(String(text || '').trim())) {
+    return 1;
+  }
+  return null;
+}
+
+async function fetchEdgeHtml(url: string, referer: string, timeoutMs = 2000): Promise<string | null> {
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent': EDGE_RESOLVE_UA,
+        Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
+        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8',
+        Referer: referer,
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!resp.ok) return null;
+    const text = await resp.text();
+    return text.length >= 128 ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseYlnimeEpisodeHtmlOnEdge(
+  html: string,
+  pageUrl: string,
+  defaultQ: '1080p' | '720p' | '480p' | '360p',
+  directOut: StoredDirect[],
+  hintsOut: StoredHint[],
+  seenDirect: Set<string>,
+  seenHint: Set<string>
+): Map<'1080p' | '720p' | '480p', string> {
+  const pushCandidate = (rawUrl: string, hoster: string, q: '1080p' | '720p' | '480p' | '360p', container: 'MP4' | 'MKV' | 'HLS' = 'MP4') => {
+    const cleanUrl = rawUrl.trim().replace(/&amp;/g, '&').replace(/ /g, '%20');
+    if (!cleanUrl.startsWith('https://')) return;
+    const pdDirect = pixeldrainToDirectApi(cleanUrl);
+    const directTarget = pdDirect || (/\.(?:animeverse\.id|animekita\.org)\//i.test(cleanUrl) ? cleanUrl : null);
+    if (directTarget && isAcceptableDirect({ hoster, direct_url: directTarget })) {
+      const dk = `${q}|${directTarget}`;
+      if (!seenDirect.has(dk)) {
+        seenDirect.add(dk);
+        directOut.push({
+          source: 'ylnime',
+          quality: q,
+          hoster: pdDirect ? 'Pixeldrain' : hoster,
+          direct_url: directTarget,
+          referer: pageUrl,
+          supports_range: container !== 'HLS',
+          container,
+          is_hls: container === 'HLS',
+        });
+      }
+    }
+    if (isKnownHosterUrl(cleanUrl)) {
+      const hk = `${q}|${cleanUrl}`;
+      if (!seenHint.has(hk)) {
+        seenHint.add(hk);
+        hintsOut.push({
+          source: 'ylnime',
+          quality: q,
+          hoster,
+          raw_url: cleanUrl,
+          referer: pageUrl,
+          container,
+        });
+      }
+    }
+  };
+
+  // 1) JSON inline `const streams = [{"reso":"720p","link":"..."}]`
+  const streamsM = html.match(/(?:const|let|var)\s+streams\s*=\s*(\[[\s\S]*?\])\s*;/);
+  if (streamsM) {
+    try {
+      const arr = JSON.parse(streamsM[1]);
+      if (Array.isArray(arr)) {
+        for (const it of arr) {
+          const link = String(it?.link || '').trim();
+          if (!link) continue;
+          const q = detectEdgeQuality(`${it?.reso || ''} ${it?.quality || ''} ${it?.label || ''} ${link}`, defaultQ);
+          const low = link.toLowerCase();
+          const host = low.includes('pixeldrain.') ? 'Pixeldrain' : low.includes('animekita.') ? 'AnimeKita' : 'Animeverse';
+          pushCandidate(link, host, q, low.includes('.m3u8') ? 'HLS' : 'MP4');
+        }
+      }
+    } catch {}
+  }
+
+  // 2) Tag <source ...> atau <video ...> dengan atribut size/label/data-reso
+  const sourceTagRe = /<(?:source|video)\b([^>]+)>/gi;
+  let sm: RegExpExecArray | null;
+  while ((sm = sourceTagRe.exec(html)) !== null) {
+    const attrs = sm[1];
+    const srcM = attrs.match(/\b(?:src|data-src|data-video)\s*=\s*(["'])(https?:\/\/[^"']+)\1/i);
+    if (!srcM) continue;
+    const srcUrl = srcM[2];
+    const sizeOrLabel =
+      (attrs.match(/\b(?:size|label|data-reso|data-quality|res)\s*=\s*(["'])([^"']+)\1/i)?.[2]) || '';
+    const q = detectEdgeQuality(`${sizeOrLabel} ${srcUrl}`, defaultQ);
+    const low = srcUrl.toLowerCase();
+    const host = low.includes('pixeldrain.') ? 'Pixeldrain' : 'Animeverse';
+    pushCandidate(srcUrl, host, q, low.includes('.m3u8') ? 'HLS' : 'MP4');
+  }
+
+  // 3) Tautan download Pixeldrain / Filedon / GoFile / Buzzheavier beserta konteks resolusi sekitarnya
+  const anchorRe = /<a\b([^>]*?)\bhref=(["'])(https?:\/\/[^"']+)\2([^>]*)>([\s\S]*?)<\/a>/gi;
+  let am: RegExpExecArray | null;
+  while ((am = anchorRe.exec(html)) !== null) {
+    const href = am[3].trim().replace(/&amp;/g, '&');
+    if (!isKnownHosterUrl(href)) continue;
+    const inner = am[5].replace(/<[^>]+>/g, ' ').trim();
+    const beforeCtx = html.slice(Math.max(0, am.index - 220), am.index).replace(/<[^>]+>/g, ' ');
+    const q = detectEdgeQuality(`${ am[1] } ${ am[4] } ${inner} ${href} ${beforeCtx}`, defaultQ);
+    const low = href.toLowerCase();
+    const host = low.includes('pixeldrain') || low.includes('pdrain')
+      ? 'Pixeldrain'
+      : low.includes('filedon') || low.includes('odfiles')
+        ? 'ODFiles'
+        : low.includes('gofile')
+          ? 'GoFile'
+          : low.includes('buzzheavier')
+            ? 'Buzzheavier'
+            : inner.slice(0, 32) || 'Hoster';
+    pushCandidate(href, host, q, low.includes('.mkv') ? 'MKV' : 'MP4');
+  }
+
+  // 4) Kumpulkan link tab ?reso=480p, ?reso=720p, ?reso=1080p jika ada
+  const resoTabs = new Map<'1080p' | '720p' | '480p', string>();
+  const tabRe = /<a\b[^>]*\bhref=(["'])([^"']*reso=(?:1080p|720p|480p)[^"']*)\1[^>]*>/gi;
+  let tm: RegExpExecArray | null;
+  while ((tm = tabRe.exec(html)) !== null) {
+    const rawHref = tm[2].trim().replace(/&amp;/g, '&');
+    const q = detectEdgeQuality(rawHref, '720p');
+    if (q === '1080p' || q === '720p' || q === '480p') {
+      const fullUrl = rawHref.startsWith('http')
+        ? rawHref
+        : rawHref.startsWith('?')
+          ? `https://ylnime.com/index.php${rawHref}`
+          : `https://ylnime.com/${rawHref.replace(/^\/+/, '')}`;
+      if (!resoTabs.has(q)) resoTabs.set(q, fullUrl);
+    }
+  }
+  return resoTabs;
+}
+
+/**
+ * Resolusi Live On-Demand di Cloudflare Edge (<1.2 dtk) untuk SELURUH anime & SELURUH episode di katalog:
+ * Mengambil source_urls_json dari D1, memanen kandidat multi-resolusi 480p-1080p dari YLnime/Otakudesu,
+ * mengembalikan direct_candidates + client_extract_candidates, dan menyimpannya ke D1 secara asinkron.
+ */
+async function resolveLiveFromSourceUrlsOnEdge(
+  rdb: D1ReadClient,
+  writeDb: D1Database,
+  title: string,
+  ep: number,
+  animeId?: number,
+  execCtx?: ExecutionContext
+): Promise<{ direct: StoredDirect[]; hints: StoredHint[] }> {
+  const direct: StoredDirect[] = [];
+  const hints: StoredHint[] = [];
+  const seenDirect = new Set<string>();
+  const seenHint = new Set<string>();
+
+  try {
+    let row: { id: number; title: string; title_alt?: string; source_urls_json?: string } | null = null;
+    if (animeId && animeId > 0) {
+      row = await rdb
+        .prepare(`SELECT id, title, title_alt, source_urls_json FROM animes WHERE id = ?1 LIMIT 1`)
+        .bind(animeId)
+        .first<{ id: number; title: string; title_alt?: string; source_urls_json?: string }>();
+    }
+    if (!row) {
+      const normCompact = title.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 120);
+      if (normCompact.length >= 2) {
+        row = await rdb
+          .prepare(
+            `SELECT id, title, title_alt, source_urls_json
+             FROM animes
+             WHERE has_live_source = 1 AND (norm_compact = ?1 OR lower(title) = ?2 OR lower(title_alt) = ?2)
+             ORDER BY popularity DESC
+             LIMIT 1`
+          )
+          .bind(normCompact, title.toLowerCase().trim())
+          .first<{ id: number; title: string; title_alt?: string; source_urls_json?: string }>();
+      }
+    }
+
+    const sourceUrls: Record<string, string> = {};
+    if (row?.source_urls_json && row.source_urls_json.trim().startsWith('{')) {
+      try {
+        Object.assign(sourceUrls, JSON.parse(row.source_urls_json));
+      } catch {}
+    }
+    const resolvedId = row?.id ?? animeId ?? 0;
+    const patch = resolvedId > 0 ? CURATED_PATCH_MAP.get(resolvedId) : undefined;
+    if (patch?.source_urls) {
+      Object.assign(sourceUrls, patch.source_urls);
+    }
+
+    const ylSeriesUrl = typeof sourceUrls.ylnime === 'string' && sourceUrls.ylnime.startsWith('https://')
+      ? sourceUrls.ylnime.trim()
+      : '';
+    if (ylSeriesUrl) {
+      let seriesHtml = await fetchEdgeHtml(ylSeriesUrl, 'https://ylnime.com/', 1800);
+      let usedSeriesUrl = ylSeriesUrl;
+      const findYlEpUrl = (html: string): string | null => {
+        const re = /<a\b[^>]*\bhref=(["'])([^"']*episode=[^"']+)\1[^>]*>([\s\S]*?)<\/a>/gi;
+        let m: RegExpExecArray | null;
+        const allLinks: string[] = [];
+        while ((m = re.exec(html)) !== null) {
+          const rawHref = m[2].trim().replace(/&amp;/g, '&');
+          const full = rawHref.startsWith('http')
+            ? rawHref
+            : rawHref.startsWith('?')
+              ? `https://ylnime.com/index.php${rawHref}`
+              : `https://ylnime.com/${rawHref.replace(/^\/+/, '')}`;
+          if (!allLinks.includes(full)) allLinks.push(full);
+          const text = m[3].replace(/<[^>]+>/g, ' ').trim();
+          const num = extractEpisodeNumberOnEdge(text, full);
+          if (num === ep) return full;
+        }
+        if (ep === 1 && allLinks.length === 1) return allLinks[0];
+        return null;
+      };
+
+      let epUrl = seriesHtml ? findYlEpUrl(seriesHtml) : null;
+      if (!epUrl) {
+        const altSeriesUrl = /(?:%2f|\/)+$/i.test(ylSeriesUrl)
+          ? ylSeriesUrl.replace(/(?:%2f|\/)+$/i, '')
+          : `${ylSeriesUrl}%2F`;
+        if (altSeriesUrl !== ylSeriesUrl) {
+          const altHtml = await fetchEdgeHtml(altSeriesUrl, 'https://ylnime.com/', 1600);
+          if (altHtml) {
+            const altEp = findYlEpUrl(altHtml);
+            if (altEp) {
+              epUrl = altEp;
+              usedSeriesUrl = altSeriesUrl;
+              seriesHtml = altHtml;
+            }
+          }
+        }
+      }
+
+      if (epUrl) {
+        const baseEpUrl = epUrl.replace(/[?&]reso=[^&#]+/gi, '');
+        const sep = baseEpUrl.includes('?') ? '&' : '?';
+        const epHtml1080 = await fetchEdgeHtml(`${baseEpUrl}${sep}reso=1080p`, usedSeriesUrl, 1800);
+        if (epHtml1080) {
+          const no1080 = /1080p tidak tersedia/i.test(epHtml1080);
+          const primaryDefaultQ = no1080 ? '720p' : '1080p';
+          const resoTabs = parseYlnimeEpisodeHtmlOnEdge(
+            epHtml1080,
+            `${baseEpUrl}${sep}reso=${primaryDefaultQ}`,
+            primaryDefaultQ,
+            direct,
+            hints,
+            seenDirect,
+            seenHint
+          );
+          const coveredQuals = new Set([...direct.map((d) => d.quality), ...hints.map((h) => h.quality)]);
+          const missingResos: Array<'1080p' | '720p' | '480p'> = (['720p', '480p'] as const).filter(
+            (rq) => !coveredQuals.has(rq) && (resoTabs.has(rq) || coveredQuals.size <= 1)
+          );
+          if (missingResos.length > 0) {
+            await Promise.allSettled(
+              missingResos.map(async (rq) => {
+                const targetTabUrl = resoTabs.get(rq) || `${baseEpUrl}${sep}reso=${rq}`;
+                const tabHtml = await fetchEdgeHtml(targetTabUrl, usedSeriesUrl, 1200);
+                if (tabHtml) {
+                  parseYlnimeEpisodeHtmlOnEdge(tabHtml, targetTabUrl, rq, direct, hints, seenDirect, seenHint);
+                }
+              })
+            );
+          }
+        }
+      }
+    }
+
+    // Simpan otomatis hasil panen multi-resolusi 480p-1080p ke D1 di latar belakang agar request berikutnya <80ms
+    if ((direct.length > 0 || hints.length > 0) && execCtx) {
+      const targetAnimeId = resolvedId;
+      const targetTitle = row?.title || title;
+      const targetTitleAlt = row?.title_alt || null;
+      execCtx.waitUntil(
+        (async () => {
+          const now = Math.floor(Date.now() / 1000);
+          const key = hintKey(title, ep);
+          const stmts: D1PreparedStatement[] = [];
+          if (direct.length > 0) {
+            stmts.push(
+              writeDb
+                .prepare(
+                  `INSERT INTO play_direct (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
+                   ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+                )
+                .bind(key, JSON.stringify(direct.slice(0, 12)), now)
+            );
+          }
+          if (hints.length > 0) {
+            stmts.push(
+              writeDb
+                .prepare(
+                  `INSERT INTO play_hints (key, payload, updated_at, report_count) VALUES (?1, ?2, ?3, 1)
+                   ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+                )
+                .bind(key, JSON.stringify(hints.slice(0, 16)), now)
+            );
+          }
+          if (targetAnimeId > 0 && hints.length > 0) {
+            const tKey = normalizeTitleKey(targetTitle);
+            const tAltKey = targetTitleAlt ? normalizeTitleKey(targetTitleAlt) : null;
+            for (const h of hints.slice(0, 12)) {
+              stmts.push(
+                writeDb
+                  .prepare(
+                    `INSERT INTO episode_hosters
+                       (anime_id, episode_number, title_key, title_alt_key, url, quality, hoster, provider, container, referer, is_live, last_verified_at, fail_count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, 0)
+                     ON CONFLICT(anime_id, episode_number, url) DO UPDATE SET
+                       quality = excluded.quality,
+                       hoster = excluded.hoster,
+                       is_live = 1,
+                       last_verified_at = excluded.last_verified_at`
+                  )
+                  .bind(
+                    targetAnimeId,
+                    ep,
+                    tKey,
+                    tAltKey,
+                    h.raw_url,
+                    h.quality,
+                    h.hoster,
+                    h.source,
+                    (h.container || 'mp4').toLowerCase(),
+                    h.referer || '',
+                    now
+                  )
+              );
+            }
+          }
+          if (stmts.length > 0) {
+            await writeDb.batch(stmts);
+          }
+        })().catch(() => {})
+      );
+    }
+  } catch {}
+
+  return { direct, hints };
+}
+
 const resolveQuerySchema = z.object({
   anime_id: z.coerce.number().int().positive().optional(),
   title: z.string().trim().min(1).max(160),
@@ -436,7 +805,7 @@ playRoutes.get(
     }
   },
   zValidator('query', resolveQuerySchema),
-  edgeCache(900, 120, true, { allowedQueryParams: ['anime_id', 'title', 'ep'], privateClientCache: true, normalizeTitleParam: true }),
+  edgeCache(900, 120, true, { allowedQueryParams: ['anime_id', 'title', 'ep', 'q'], privateClientCache: true, normalizeTitleParam: true }),
   async (c) => {
     const { anime_id, title, ep, q } = c.req.valid('query');
 
@@ -452,8 +821,9 @@ playRoutes.get(
     const mergedHints: StoredHint[] = [];
     const seenUrls = new Set<string>();
     for (const item of [...(curatedHosters ?? []), ...(indexedHosters ?? []), ...(hinted ?? [])]) {
-      if (!seenUrls.has(item.raw_url)) {
-        seenUrls.add(item.raw_url);
+      const dk = `${item.quality}|${item.raw_url}`;
+      if (!seenUrls.has(dk)) {
+        seenUrls.add(dk);
         mergedHints.push(item);
       }
     }
@@ -473,10 +843,27 @@ playRoutes.get(
       });
     }
 
+    // 2) Jalur On-Demand Live Edge Resolver dari source_urls_json di D1 agar seluruh anime & episode
+    //    tetap mendapat kandidat direct & 480p-1080p dalam <1.5 detik meski belum diindeks cron.
+    const edgeLive = await resolveLiveFromSourceUrlsOnEdge(rdb, c.env.DB, title, ep, anime_id, c.executionCtx);
+    if (edgeLive.direct.length > 0 || edgeLive.hints.length > 0) {
+      const hosterScores: Record<string, number> = {};
+      for (const [hoster, st] of globalStats.entries()) {
+        hosterScores[hoster] = Math.round(scoreAsnStat(st) * 1000) / 1000;
+      }
+      return c.json({
+        status: 'ok',
+        data: {
+          direct_candidates: rankByAsn(edgeLive.direct, q, globalStats),
+          client_extract_candidates: rankByAsn(edgeLive.hints, q, globalStats),
+          hoster_scores: hosterScores,
+          source: 'edge_live_source_urls',
+        },
+      });
+    }
+
     const handlerBase = getCfHandlerBaseUrl(c.env);
     if (!handlerBase) {
-      // Miss biasa (resolver server memang tidak dipasang): 200 kosong, bukan 503, supaya klien tidak
-      // menganggap server mati dan tetap bertanya lagi untuk episode lain. Tidak di-cache.
       c.header('X-Milkglass-ShortCache', '20');
       return c.json({ status: 'ok', data: { direct_candidates: [], client_extract_candidates: [] } });
     }
@@ -504,7 +891,6 @@ playRoutes.get(
       const upstream = await fetch(`${handlerBase}/resolve?${params.toString()}`, {
         method: 'GET',
         headers,
-        // Klien menyerah di ~3,5 dtk dan kini balapan dengan cascade lokal; menahan Worker 25 dtk hanya buang kuota.
         signal: AbortSignal.timeout(3_200),
       });
       if (!upstream.ok) {
@@ -743,7 +1129,6 @@ playRoutes.post(
   }
 );
 
-// Wave 3: Episode-level Playback Failure & TTFF Telemetry + Automated GitHub Issue Alerting (Option B)
 const SLOW_ALERT_THRESHOLD_MS = 5000;
 const GITHUB_ISSUE_DEDUP_SEC = 24 * 3600;
 const DEFAULT_TELEMETRY_REPO = 'aylaeverlyclaire/milkglassX';
@@ -835,7 +1220,6 @@ playRoutes.post(
     const nowSec = Math.floor(Date.now() / 1000);
     const tKey = normalizeTitleKey(report.title);
 
-    // 1) Update hoster_asn_stats in the same request when hoster is known
     const normHoster = report.hoster ? normalizeHosterKey(report.hoster) : 'unknown';
     if (normHoster !== 'unknown') {
       const ok = report.status !== 'failed';
@@ -868,7 +1252,6 @@ playRoutes.post(
       } catch {}
     }
 
-    // 2) Persist structured episode playback report to D1
     let reportId = 0;
     try {
       const res = await c.env.DB.prepare(
@@ -903,7 +1286,6 @@ playRoutes.post(
       return c.json({ status: 'ok', stored: false, degraded: true });
     }
 
-    // 3) Option B: Auto-open GitHub Issue on failure or severe slow playback (>5s) with 24h per-episode deduplication
     const shouldAlert = report.status === 'failed' || report.ttff_ms > SLOW_ALERT_THRESHOLD_MS;
     let issueScheduled = false;
     if (shouldAlert && c.env.GITHUB_TELEMETRY_TOKEN?.trim()) {

@@ -298,3 +298,20 @@ test('parseEpisodeHostersFromHtml menerima domain desustream.net untuk mirror od
   const rows = parseEpisodeHostersFromHtml(html, 'https://otakudesu.blog/episode/mgexpl-episode-9-sub-indo/');
   assert.ok(rows.some((r) => r.url.startsWith('https://desustream.net/dstream/odcdn/')));
 });
+
+test('parseEpisodeHostersFromHtml extracts 480p, 720p, and 1080p from <source size> and context-labeled Pixeldrain links', () => {
+  const html = `
+    <video id="player">
+      <source src="https://s3.animeverse.id/ro/hash-a.mp4" type="video/mp4" size="1080" label="1080p" />
+      <source src="https://s3.animeverse.id/ro/hash-b.mp4" type="video/mp4" size="720" label="720p" />
+      <source src="https://s3.animeverse.id/ro/hash-c.mp4" type="video/mp4" size="480" label="480p" />
+    </video>
+    <div class="card"><h6>Download 1080p</h6><a href="https://pixeldrain.com/u/pd1080">Pixeldrain</a></div>
+    <div class="card"><h6>Download 480p</h6><a href="https://pixeldrain.com/u/pd480">Pixeldrain</a></div>
+  `;
+  const rows = parseEpisodeHostersFromHtml(html, 'https://ylnime.com/index.php?series=frieren&episode=al-1-1', 'ylnime');
+  const quals = new Set(rows.map((r) => r.quality));
+  assert.equal(quals.has('1080p'), true);
+  assert.equal(quals.has('720p'), true);
+  assert.equal(quals.has('480p'), true);
+});

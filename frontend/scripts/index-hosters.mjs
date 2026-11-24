@@ -2,6 +2,7 @@
 import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { POPULAR_PRIORITY_TITLES, prioritizePopularCatalog, buildCuratedHostersPatchPayload } from './lib/popular-priority.mjs';
+import { isExcludedCatalogAnime } from './lib/catalog-sync.mjs';
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -415,12 +416,35 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
     } catch {}
   }
 
+  const sourceTagRe = /<(?:source|video)\b([^>]+)>/gi;
+  let stm;
+  while ((stm = sourceTagRe.exec(html)) !== null) {
+    const attrs = stm[1];
+    const srcM = attrs.match(/\b(?:src|data-src|data-video)\s*=\s*(["'])(https?:\/\/[^"']+)\1/i);
+    if (!srcM) continue;
+    const vUrl = srcM[2].trim().replace(/&amp;/g, '&');
+    if (isBlacklistedUrl('Animeverse', vUrl)) continue;
+    const sizeHint = (attrs.match(/\b(?:size|label|data-reso|data-quality|res)\s*=\s*(["'])([^"']+)\1/i)?.[2]) || '';
+    const q = parseQuality(`${sizeHint} ${vUrl}`) || parseQuality(pageUrl) || '720p';
+    const dk = `${q}|${vUrl}`;
+    if (seen.has(dk)) continue;
+    seen.add(dk);
+    results.push({
+      url: vUrl,
+      quality: q,
+      hoster: vUrl.toLowerCase().includes('pixeldrain.') ? 'Pixeldrain' : 'Animeverse',
+      provider,
+      container: vUrl.toLowerCase().includes('.m3u8') ? 'hls' : 'mp4',
+      referer: pageUrl,
+    });
+  }
+
   const videoSrcRe = /(?:(?:src|data-src|data-video|data-url)\s*=\s*|["'](?:file|src|url|video_url|stream_url)["']\s*:\s*)["'](https?:\/\/(?:[^"']+\.(?:mp4|m3u8)[^"']*|(?:www\.)?pixeldrain\.(?:com|lu)\/(?:u|api\/file)\/[^"']+))["']/gi;
   let vm;
   while ((vm = videoSrcRe.exec(html)) !== null) {
     const vUrl = vm[1].trim().replace(/&amp;/g, '&');
     if (isBlacklistedUrl('YLnimeVideo', vUrl)) continue;
-    const q = parseQuality(vUrl) || '720p';
+    const q = parseQuality(vUrl) || parseQuality(pageUrl) || '720p';
     const dk = `${q}|${vUrl}`;
     if (seen.has(dk)) continue;
     seen.add(dk);
@@ -505,7 +529,8 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
       const label = m[2].replace(/<[^>]+>/g, '').trim() || 'Hoster';
       if (isBlacklistedUrl(label, href)) continue;
       if (!isKnownHoster(href)) continue;
-      const quality = parseQuality(`${label} ${href}`) || '720p';
+      const beforeCtx = html.slice(Math.max(0, m.index - 220), m.index).replace(/<[^>]+>/g, ' ');
+      const quality = parseQuality(`${label} ${href} ${beforeCtx}`) || parseQuality(pageUrl) || '720p';
       const dedupKey = `${quality}|${href}`;
       if (seen.has(dedupKey)) continue;
       seen.add(dedupKey);
@@ -548,6 +573,7 @@ export function buildSourceFirstCatalog(catalog, providerIndices) {
   const syncItems = [];
 
   for (const anime of catalog) {
+    if (isExcludedCatalogAnime(anime.title, anime.episodes_total, anime.source_urls_json || anime.source_urls)) continue;
     const titles = extractMatchableTitles(anime);
     const hits = [];
     const sourceUrls = {};
@@ -584,6 +610,7 @@ export function buildSourceFirstCatalog(catalog, providerIndices) {
   for (const pIdx of providerIndices) {
     for (const cand of pIdx.list) {
       if (!cand.url || !cand.url.startsWith('https://') || claimedUrls.has(cand.url)) continue;
+      if (isExcludedCatalogAnime(cand.title, 0, cand.url)) continue;
       const cleanTitle = String(cand.title || '')
         .replace(/\(Episode[^)]*\)/gi, '')
         .replace(/\b(?:Subtitle Indonesia|Sub Indo|BD)\b/gi, '')
@@ -706,7 +733,8 @@ async function main() {
     fetchJson(`${workerUrl}/v1/catalog/sources`).catch(() => ({ sources: [] })),
   ]);
 
-  const allCatalog = Array.isArray(catJson.data) ? catJson.data : (Array.isArray(catJson) ? catJson : []);
+  const rawCatalog = Array.isArray(catJson.data) ? catJson.data : (Array.isArray(catJson) ? catJson : []);
+  const allCatalog = rawCatalog.filter((a) => !isExcludedCatalogAnime(a?.title, a?.episodes_total, a?.source_urls_json || a?.source_urls));
   const catalog = prioritizePopularCatalog(allCatalog, maxAnimes, popularOnly, parseTitleMeta, extractMatchableTitles);
   console.log(
     `Catalog queue: ${catalog.length} anime (Top-${POPULAR_PRIORITY_TITLES.length} popular prioritized, popularOnly=${popularOnly})`
@@ -891,7 +919,36 @@ async function main() {
         for (const epItem of eps) {
           try {
             const epHtml = await fetchText(epItem.url, usedUrl, 15000);
-            const hosters = parseEpisodeHostersFromHtml(epHtml, epItem.url, source.provider);
+            let hosters = parseEpisodeHostersFromHtml(epHtml, epItem.url, source.provider);
+            if (source.provider === 'ylnime' && epItem.url.startsWith('http')) {
+              const coveredQ = new Set(hosters.map((h) => h.quality));
+              const missingResos = ['1080p', '720p', '480p'].filter((r) => !coveredQ.has(r));
+              if (missingResos.length > 0 && coveredQ.size < 3) {
+                const baseEpUrl = epItem.url.replace(/([?&])reso=[^&#]+&?/gi, '$1').replace(/[?&]$/, '');
+                const sep = baseEpUrl.includes('?') ? '&' : '?';
+                const extraResults = await Promise.allSettled(
+                  missingResos.slice(0, 2).map(async (reso) => {
+                    const rUrl = `${baseEpUrl}${sep}reso=${reso}`;
+                    const rHtml = await fetchText(rUrl, usedUrl, 10000);
+                    return parseEpisodeHostersFromHtml(rHtml, rUrl, source.provider).map((h) => ({
+                      ...h,
+                      quality: h.quality || reso,
+                    }));
+                  })
+                );
+                const seenH = new Set(hosters.map((h) => `${h.quality}|${h.url}`));
+                for (const er of extraResults) {
+                  if (er.status !== 'fulfilled') continue;
+                  for (const h of er.value) {
+                    const k = `${h.quality}|${h.url}`;
+                    if (!seenH.has(k)) {
+                      seenH.add(k);
+                      hosters.push(h);
+                    }
+                  }
+                }
+              }
+            }
             if (hosters.length === 0 && source.provider === 'ylnime' && epItem.url.startsWith('http')) {
               const no1080 = /1080p tidak tersedia/i.test(epHtml);
               const playerUrl =

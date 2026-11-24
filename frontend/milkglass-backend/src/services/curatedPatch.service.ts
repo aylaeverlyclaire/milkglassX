@@ -13,6 +13,49 @@ const META_TARGET_KEY = 'curated_patch_target';
 const BATCH_SIZE = 50;
 const MAX_ROWS_PER_PASS = 400;
 
+export const MAX_ALLOWED_EPISODES = 500;
+
+const BANNED_FRANCHISE_RE =
+  /\b(?:detective[\s\-_]*conan|meitantei[\s\-_]*conan|case[\s\-_]*closed|naruto|boruto|one[\s\-_]*piece|1piece)\b/i;
+
+export function isExcludedAnimeText(raw: unknown): boolean {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return false;
+  return BANNED_FRANCHISE_RE.test(raw);
+}
+
+export function isExcludedAnimeRecord(row: {
+  id?: unknown;
+  title?: unknown;
+  title_alt?: unknown;
+  title_native?: unknown;
+  episodes_total?: unknown;
+  source_urls_json?: unknown;
+  source_urls?: unknown;
+}): boolean {
+  const numId = Number(row.id ?? 0);
+  if (Number.isInteger(numId) && numId > 0 && CURATED_EXCLUDED_IDS.has(numId)) {
+    return true;
+  }
+  const eps = Number(row.episodes_total ?? 0);
+  if (Number.isFinite(eps) && eps > MAX_ALLOWED_EPISODES) {
+    return true;
+  }
+  if (
+    isExcludedAnimeText(row.title) ||
+    isExcludedAnimeText(row.title_alt) ||
+    isExcludedAnimeText(row.title_native) ||
+    isExcludedAnimeText(row.source_urls_json)
+  ) {
+    return true;
+  }
+  if (row.source_urls && typeof row.source_urls === 'object') {
+    for (const v of Object.values(row.source_urls as Record<string, unknown>)) {
+      if (isExcludedAnimeText(v)) return true;
+    }
+  }
+  return false;
+}
+
 let appliedInIsolateVersion = 0;
 
 export interface CuratedPatchEntry {
@@ -32,7 +75,7 @@ interface CompactPatchRow {
   u?: Record<string, string>;
 }
 
-export const CURATED_PATCH_VERSION = 6;
+export const CURATED_PATCH_VERSION = 7;
 
 export const CURATED_EXCLUDED_IDS: ReadonlySet<number> = new Set(
   (excludedIdsRaw as number[]).filter((id) => Number.isInteger(id) && id > 0)
@@ -49,7 +92,16 @@ const rawRows: CompactPatchRow[] = [
 ];
 
 const validEntries: CuratedPatchEntry[] = rawRows
-  .filter((r) => Boolean(r && Number.isInteger(r.id) && r.id > 0 && !CURATED_EXCLUDED_IDS.has(r.id)))
+  .filter(
+    (r) =>
+      Boolean(
+        r &&
+          Number.isInteger(r.id) &&
+          r.id > 0 &&
+          !CURATED_EXCLUDED_IDS.has(r.id) &&
+          (r.e ?? 0) <= MAX_ALLOWED_EPISODES
+      )
+  )
   .map((r) => ({
     id: r.id,
     type: r.t || 'TV',
@@ -92,35 +144,85 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
     const nowSec = Math.floor(Date.now() / 1000);
 
     const stmts: D1PreparedStatement[] = [];
-    if (cursor === 0 && CURATED_EXCLUDED_IDS.size > 0) {
-      for (const excludedId of CURATED_EXCLUDED_IDS) {
-        stmts.push(
-          db
-            .prepare(`UPDATE animes SET has_live_source = 0, updated_at = ?1 WHERE id = ?2 AND has_live_source != 0`)
-            .bind(nowSec, excludedId)
-        );
-      }
-    }
-    for (const entry of slice) {
+    if (cursor === 0) {
       stmts.push(
         db
           .prepare(
             `UPDATE animes
-             SET episodes_total = CASE WHEN ?1 > episodes_total THEN ?1 ELSE episodes_total END,
-                 status = ?2,
-                 type = COALESCE(NULLIF(?3, ''), type),
-                 updated_at = ?4
-             WHERE id = ?5
-               AND (episodes_total < ?1 OR status != ?2 OR type != COALESCE(NULLIF(?3, ''), type))`
+             SET has_live_source = 0, updated_at = ?1
+             WHERE has_live_source != 0
+               AND (
+                 episodes_total > ?2
+                 OR lower(title) LIKE '%detective conan%'
+                 OR lower(title) LIKE '%meitantei conan%'
+                 OR lower(title) LIKE '%case closed%'
+                 OR lower(title) LIKE '%naruto%'
+                 OR lower(title) LIKE '%boruto%'
+                 OR lower(title) LIKE '%one piece%'
+                 OR lower(title_alt) LIKE '%detective conan%'
+                 OR lower(title_alt) LIKE '%meitantei conan%'
+                 OR lower(title_alt) LIKE '%case closed%'
+                 OR lower(title_alt) LIKE '%naruto%'
+                 OR lower(title_alt) LIKE '%boruto%'
+                 OR lower(title_alt) LIKE '%one piece%'
+               )`
           )
-          .bind(
-            entry.episodes_total ?? 0,
-            entry.status ?? 2,
-            entry.type ?? 'TV',
-            nowSec,
-            entry.id
-          )
+          .bind(nowSec, MAX_ALLOWED_EPISODES)
       );
+      if (CURATED_EXCLUDED_IDS.size > 0) {
+        for (const excludedId of CURATED_EXCLUDED_IDS) {
+          stmts.push(
+            db
+              .prepare(`UPDATE animes SET has_live_source = 0, updated_at = ?1 WHERE id = ?2 AND has_live_source != 0`)
+              .bind(nowSec, excludedId)
+          );
+        }
+      }
+    }
+    for (const entry of slice) {
+      if (entry.source_urls && Object.keys(entry.source_urls).length > 0) {
+        const patchUrlsJson = JSON.stringify(entry.source_urls);
+        stmts.push(
+          db
+            .prepare(
+              `UPDATE animes
+               SET episodes_total = CASE WHEN ?1 > episodes_total THEN ?1 ELSE episodes_total END,
+                   status = ?2,
+                   type = COALESCE(NULLIF(?3, ''), type),
+                   source_urls_json = json_patch(CASE WHEN json_valid(source_urls_json) THEN source_urls_json ELSE '{}' END, ?4),
+                   updated_at = ?5
+               WHERE id = ?6`
+            )
+            .bind(
+              entry.episodes_total ?? 0,
+              entry.status ?? 2,
+              entry.type ?? 'TV',
+              patchUrlsJson,
+              nowSec,
+              entry.id
+            )
+        );
+      } else {
+        stmts.push(
+          db
+            .prepare(
+              `UPDATE animes
+               SET episodes_total = CASE WHEN ?1 > episodes_total THEN ?1 ELSE episodes_total END,
+                   status = ?2,
+                   type = COALESCE(NULLIF(?3, ''), type),
+                   updated_at = ?4
+               WHERE id = ?5
+                 AND (episodes_total < ?1 OR status != ?2 OR type != COALESCE(NULLIF(?3, ''), type))`
+            )
+            .bind(
+              entry.episodes_total ?? 0,
+              entry.status ?? 2,
+              entry.type ?? 'TV',
+              nowSec,
+              entry.id
+            )
+        );
+      }
     }
 
     const upsertMeta = (key: string, value: string) =>
