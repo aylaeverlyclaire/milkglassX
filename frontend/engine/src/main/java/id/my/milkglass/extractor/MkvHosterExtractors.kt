@@ -297,7 +297,7 @@ class LinkUnshortener(
         return null
     }
 
-    private fun isTerminalHoster(lowerUrl: String): Boolean {
+    internal fun isTerminalHoster(lowerUrl: String): Boolean {
         return lowerUrl.contains("pixeldrain.com") ||
             lowerUrl.contains("pixeldrain.net") ||
             lowerUrl.contains("pixeldrain.lu") ||
@@ -332,7 +332,7 @@ class LinkUnshortener(
             lowerUrl.contains("odstream.xyz") ||
             lowerUrl.contains("ondesu.cc") ||
             lowerUrl.contains("ondesuh.cc") ||
-            lowerUrl.contains("desustream.") ||
+            (lowerUrl.contains("desustream.") && !lowerUrl.contains("link.desustream.") && !lowerUrl.contains("/safelink")) ||
             lowerUrl.contains("blogger.com") ||
             lowerUrl.contains("googlevideo.com") ||
             lowerUrl.contains("ok.ru") ||
