@@ -144,6 +144,21 @@ data class ParsedTitle(
 
 internal object TitleMatcher {
     private val nonWord = Regex("[^a-z0-9\\s]+")
+    private val diacriticsRegex = Regex("\\p{M}+")
+
+    private fun foldDiacritics(input: String): String {
+        val decomposed = java.text.Normalizer.normalize(input, java.text.Normalizer.Form.NFD)
+        return diacriticsRegex.replace(decomposed, "")
+            .replace('×', 'x')
+            .replace('×', 'x')
+            .replace("ø", "o")
+            .replace("Ø", "O")
+            .replace("ß", "ss")
+            .replace("æ", "ae")
+            .replace("Æ", "AE")
+            .replace("œ", "oe")
+            .replace("Œ", "OE")
+    }
     private val brackets = Regex("[\\[\\](){}]")
     private val stopWords = setOf(
         "sub", "indo", "subtitle", "indonesia", "batch", "bd", "episode", "eps",
@@ -194,7 +209,7 @@ internal object TitleMatcher {
 
     private fun parseUncached(input: String): ParsedTitle {
         val cleanedPlusOva = Regex("""\+\s*(?:ova|oad|special)\b""", RegexOption.IGNORE_CASE).replace(input, " ")
-        val noBrackets = brackets.replace(cleanedPlusOva.replace('\u00D7', 'x'), " ")
+        val noBrackets = brackets.replace(foldDiacritics(cleanedPlusOva), " ")
         var season: Int? = null
         for (p in seasonPatterns) {
             val m = p.find(noBrackets)
@@ -250,7 +265,7 @@ internal object TitleMatcher {
     }
 
     fun tokenize(input: String): Set<String> {
-        val normalized = brackets.replace(input.replace('\u00D7', 'x'), " ")
+        val normalized = brackets.replace(foldDiacritics(input), " ")
             .replace(symbolSeason2Regex, " season 2 ")
             .replace(ordinalSeasonRegex, "season $1")
             .replace(shortSeasonRegex, "season $1")
@@ -282,7 +297,7 @@ internal object TitleMatcher {
      * Lapis 1: Normalisasi kanonis + fonetik/Romaji (tahan simbol, tag noise, ejaan UK/US, & Romaji).
      */
     internal fun normalizePhoneticTokens(raw: String): List<String> {
-        val cleaned = parenBracketStripRegex.replace(raw.replace('\u00D7', 'x'), " ")
+        val cleaned = parenBracketStripRegex.replace(foldDiacritics(raw), " ")
             .lowercase(Locale.ROOT)
             .replace("judgement", "judgment")
             .replace("colour", "color")
@@ -442,7 +457,7 @@ internal object TitleMatcher {
     }
 
     fun searchQueries(animeTitle: String): List<String> {
-        val withoutParen = animeTitle.replace(Regex("""\([^)]*\)"""), " ")
+        val withoutParen = foldDiacritics(animeTitle).replace(Regex("""\([^)]*\)"""), " ")
         val parenInner = Regex("""\(([^)]+)\)""").find(animeTitle)?.groupValues?.getOrNull(1)?.trim().orEmpty()
         val p = parse(withoutParen)
         val cleanFull = nonWord.replace(brackets.replace(withoutParen, " "), " ")
@@ -1067,15 +1082,28 @@ class MkvCascadeResolver(
         val wants1080p = qualityOrder.firstOrNull() == MkvQuality.P1080
         val embedHas1080p = embeds.any { it.quality == MkvQuality.P1080 }
 
-        // Tahap 1: HANYA Embed-First yang aktif lebih dulu (kecuali user khusus memilih 1080p dan embed tidak punya 1080p)
-        if (preferStreamingEmbeds && embeds.isNotEmpty() && (!wants1080p || embedHas1080p)) {
-            val embedBatch = if (wants1080p) {
-                embeds.sortedByDescending { it.quality == MkvQuality.P1080 }.take(4)
-            } else {
-                embeds.take(4)
+        // Tahap 1 (Sub-Second Zero-WebView Race): Balapkan Tier 0 Direct-API/CDN (s3.animeverse.id, animekita, Pixeldrain, Filedon, GoFile)
+        // BERSAMA Tier 1 HTTP-only Embeds sejak t=0ms agar pemenang tercepat (0.4-0.9s) langsung diputar tanpa menunggu 6.8s.
+        if (preferStreamingEmbeds) {
+            val zeroWebViewPool = candidates
+                .filter { StreamingFirstGuards.zeroWebViewTier(it) <= 1 }
+                .distinctBy { it.rawUrl }
+                .take(6)
+            if (zeroWebViewPool.isNotEmpty()) {
+                val fastWin = raceExtractCandidates(zeroWebViewPool, maxResults = maxResults, timeoutMs = 3_200L)
+                if (fastWin.isNotEmpty()) return fastWin
             }
-            val embedWin = raceExtractCandidates(embedBatch, maxResults = maxResults, timeoutMs = 6_800L)
-            if (embedWin.isNotEmpty()) return embedWin
+            // Fallback ke embed berbasis WebView (Tier 3) jika seluruh jalur Zero-WebView gagal
+            val webViewEmbeds = embeds
+                .filter { StreamingFirstGuards.zeroWebViewTier(it) >= 2 }
+                .take(3)
+            if (webViewEmbeds.isNotEmpty()) {
+                val remMs = TimeUnit.NANOSECONDS.toMillis(totalDeadlineNs - System.nanoTime())
+                if (remMs > 500L) {
+                    val embedWin = raceExtractCandidates(webViewEmbeds, maxResults = maxResults, timeoutMs = remMs.coerceAtMost(5_500L))
+                    if (embedWin.isNotEmpty()) return embedWin
+                }
+            }
         }
 
         // Tahap 2: Fallback otomatis ke 4 hoster cepat (Pixeldrain, GoFile, Buzzheavier, Filedon/Odfiles)
