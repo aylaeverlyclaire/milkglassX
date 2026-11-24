@@ -582,9 +582,17 @@ class StreamResolver(
         }
 
         if (resolved.isNotEmpty()) {
-            val verified = cascadeResolver.verifyDirect(resolved)
-            resolved.clear()
-            resolved.addAll(verified)
+            val trusted = resolved.filter { id.my.milkglass.extractor.EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(it.directUrl) }
+            if (trusted.isNotEmpty()) {
+                val rest = resolved.filterNot { id.my.milkglass.extractor.EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(it.directUrl) }
+                resolved.clear()
+                resolved.addAll(trusted)
+                resolved.addAll(rest)
+            } else {
+                val verified = cascadeResolver.verifyDirect(resolved)
+                resolved.clear()
+                resolved.addAll(verified)
+            }
         }
 
         val clientArrAll = data.optJSONArray("client_extract_candidates")
@@ -607,13 +615,15 @@ class StreamResolver(
                 if (!rawUrl.startsWith("https://")) continue
                 val qual = MkvQuality.fromText(obj.optString("quality")) ?: continue
                 val hoster = obj.optString("hoster").ifBlank { "Hoster" }
+                val isEmbed = obj.optBoolean("is_stream_embed", isEmbedCandidateUrl(rawUrl, hoster))
                 val cand = RawMkvCandidate(
                     source = SourcePriority.entries.firstOrNull { it.id == obj.optString("source") } ?: SourcePriority.OTAKUDESU,
                     quality = qual,
                     hosterLabel = hoster,
                     rawUrl = rawUrl,
                     pageReferer = obj.optString("referer").trim(),
-                    container = MediaContainer.detect("", hoster, rawUrl)
+                    container = MediaContainer.detect("", hoster, rawUrl),
+                    isStreamEmbed = isEmbed
                 )
                 if (qual == preferredQuality) exactRaws.add(cand) else fallbackRaws.add(cand)
             }
@@ -692,7 +702,8 @@ class StreamResolver(
         preferredRes: String = "1080p",
         title: String = "",
         romajiTitle: String = "",
-        maxAgeMs: Long = RESOLVED_CACHE_TTL_MS
+        maxAgeMs: Long = RESOLVED_CACHE_TTL_MS,
+        anilistId: Int? = null
     ): Boolean {
         val preferredQuality = MkvQuality.fromText(preferredRes) ?: MkvQuality.P1080
         val sessionCacheKey = "${slug.lowercase()}#${preferredQuality.label}#std"
@@ -717,7 +728,8 @@ class StreamResolver(
                 episodeNum = episodeNum,
                 preferredQuality = preferredQuality,
                 preferCompatibleContainer = false,
-                joined = null
+                joined = null,
+                anilistId = anilistId
             )
             if (outcome !is RaceOutcome.Candidates || outcome.list.isEmpty()) {
                 mine.complete(null)
@@ -938,6 +950,29 @@ class StreamResolver(
         private const val SERVER_MISS_STREAK_LIMIT = 3
         private const val SERVER_QUIET_MS = 10L * 60L * 1000L
         private const val SERVER_HINT_TIMEOUT_MS = 3_500L
+
+        fun isEmbedCandidateUrl(rawUrl: String, hosterLabel: String = ""): Boolean {
+            val lowUrl = rawUrl.lowercase()
+            val lowHost = hosterLabel.lowercase()
+            if (lowUrl.contains("pixeldrain.") || lowUrl.contains(".animeverse.id/") || lowUrl.contains(".animekita.org/")) {
+                return false
+            }
+            return lowHost == "ylnimeplayer" ||
+                lowHost.contains("embed") ||
+                lowUrl.contains("desustream.") ||
+                lowUrl.contains("odstream.") ||
+                lowUrl.contains("ondesu.") ||
+                lowUrl.contains("ondesuh.") ||
+                lowUrl.contains("blogger.com/video") ||
+                lowUrl.contains("otakuwatch") ||
+                lowUrl.contains("icefile.web.id") ||
+                lowUrl.contains("filemoon.") ||
+                lowUrl.contains("vidhide") ||
+                lowUrl.contains("streamruby.") ||
+                lowUrl.contains("rubyvidhub.") ||
+                lowUrl.contains("filedon.co/embed/") ||
+                (lowUrl.contains("ylnime.com/index.php") && !lowUrl.contains(".mp4") && !lowUrl.contains(".m3u8"))
+        }
 
         fun buildEpisodeSlug(romajiOrTitle: String, episode: Int): String {
             val clean = romajiOrTitle.lowercase()

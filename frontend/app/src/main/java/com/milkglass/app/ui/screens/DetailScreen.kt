@@ -144,6 +144,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
                 } else {
                     PlayerManager.PREBUFFER_HEAD_BYTES
                 },
+                anilistId = a.id,
             )
         }
     }

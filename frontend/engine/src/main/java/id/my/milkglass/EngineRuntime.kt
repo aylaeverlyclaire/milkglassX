@@ -500,7 +500,8 @@ class EngineRuntime private constructor(private val appContext: Context) {
         preferredRes: String = "1080p",
         maxAgeMs: Long = Long.MAX_VALUE,
         prebuffer: Boolean = false,
-        prebufferHeadBytes: Long = PlayerManager.PREBUFFER_HEAD_BYTES
+        prebufferHeadBytes: Long = PlayerManager.PREBUFFER_HEAD_BYTES,
+        anilistId: Int? = null
     ) {
         if (episode < 0) return
         val searchTitle = romajiTitle.ifBlank { title }.trim()
@@ -519,7 +520,8 @@ class EngineRuntime private constructor(private val appContext: Context) {
                     preferredRes = preferredRes,
                     title = title,
                     romajiTitle = romajiTitle,
-                    maxAgeMs = maxAgeMs
+                    maxAgeMs = maxAgeMs,
+                    anilistId = anilistId
                 )
                 if (ok && prebuffer && latestPrefetchKey == key) {
                     val cachedSession = streamResolver.getCachedSession(slug, preferredRes)
