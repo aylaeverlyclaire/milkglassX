@@ -174,7 +174,7 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
             rt.seedSourceUrls(d.anime.title, d.anime.romaji, d.anime.sourceUrls)
             val batchItems = buildList {
                 d.cl.take(3).forEach { cw ->
-                    val cwEp = ctl.continueInfo(cw).episode ?: 1
+                    val cwEp = ctl.continueInfo(cw)?.episode ?: 1
                     rt.seedSourceUrls(cw.title, cw.romaji, cw.sourceUrls)
                     add(id.my.milkglass.resolver.StreamResolver.BatchPrefetchItem(cw.id, cw.title, cw.romaji, cwEp))
                 }

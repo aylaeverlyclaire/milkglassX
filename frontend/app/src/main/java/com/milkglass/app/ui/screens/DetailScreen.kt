@@ -48,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import id.my.milkglass.EngineRuntime
 import id.my.milkglass.player.PlayerManager
+import id.my.milkglass.resolver.StreamResolver
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.flow.first
 import com.milkglass.app.ui.common.ArtBackdrop
@@ -140,7 +141,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
             val surroundEps = listOf(targetEp, targetEp + 1, targetEp + 2, targetEp + 3, targetEp - 1)
                 .filter { it in 1..mx && ctl.episodeAccess(a, it) == Access.Ok }
                 .distinct()
-                .map { epNum -> id.my.milkglass.resolver.StreamResolver.BatchPrefetchItem(a.id, a.title, a.romaji, epNum) }
+                .map { epNum -> StreamResolver.BatchPrefetchItem(a.id, a.title, a.romaji, epNum) }
             if (surroundEps.isNotEmpty()) {
                 rt.prefetchEpisodeBatch(surroundEps, ctl.preferredQuality)
             }
