@@ -1,43 +1,63 @@
-import curatedPatch from '../../data/curated_catalog_patch.json';
+import p1 from '../../data/curated_catalog_patch_p1.json';
+import p2 from '../../data/curated_catalog_patch_p2.json';
+import p3 from '../../data/curated_catalog_patch_p3.json';
+import p4 from '../../data/curated_catalog_patch_p4.json';
+import p5 from '../../data/curated_catalog_patch_p5.json';
 
 const META_VERSION_KEY = 'curated_patch_version';
 const META_CURSOR_KEY = 'curated_patch_cursor';
 const META_TARGET_KEY = 'curated_patch_target';
-const BATCH_SIZE = 100;
-const MAX_ROWS_PER_PASS = 1000;
+const BATCH_SIZE = 50;
+const MAX_ROWS_PER_PASS = 400;
 
 let appliedInIsolateVersion = 0;
 
 export interface CuratedPatchEntry {
   id: number;
-  title: string;
+  title?: string;
   type: string;
   status: number;
   episodes_total: number;
   source_urls?: Record<string, string>;
 }
 
-const rawEntries = (curatedPatch.entries ?? []) as unknown as CuratedPatchEntry[];
-export const CURATED_PATCH_VERSION: number = Number(curatedPatch?.version ?? 0) || 0;
+interface CompactPatchRow {
+  id: number;
+  t?: string;
+  s?: number;
+  e?: number;
+}
 
-const validEntries: CuratedPatchEntry[] = rawEntries.filter((e) =>
-  Boolean(e && Number.isInteger(e.id) && e.id > 0)
-);
+export const CURATED_PATCH_VERSION = 4;
+
+const rawRows: CompactPatchRow[] = [
+  ...(p1 as CompactPatchRow[]),
+  ...(p2 as CompactPatchRow[]),
+  ...(p3 as CompactPatchRow[]),
+  ...(p4 as CompactPatchRow[]),
+  ...(p5 as CompactPatchRow[]),
+];
+
+const validEntries: CuratedPatchEntry[] = rawRows
+  .filter((r) => Boolean(r && Number.isInteger(r.id) && r.id > 0))
+  .map((r) => ({
+    id: r.id,
+    type: r.t || 'TV',
+    status: Number.isInteger(r.s) ? Number(r.s) : 2,
+    episodes_total: Number.isInteger(r.e) ? Number(r.e) : 0,
+  }));
 
 export const CURATED_PATCH_MAP: ReadonlyMap<number, CuratedPatchEntry> = new Map(
   validEntries.map((e) => [e.id, e])
 );
 
 export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<void> {
-  const targetVersion = Number(curatedPatch?.version ?? 0);
-  if (!Number.isFinite(targetVersion) || targetVersion <= 0) return;
+  const targetVersion = CURATED_PATCH_VERSION;
   if (appliedInIsolateVersion >= targetVersion) return;
 
   try {
     const metaRows = await db
-      .prepare(
-        `SELECT key, value FROM catalog_meta WHERE key IN (?1, ?2, ?3)`
-      )
+      .prepare(`SELECT key, value FROM catalog_meta WHERE key IN (?1, ?2, ?3)`)
       .bind(META_VERSION_KEY, META_CURSOR_KEY, META_TARGET_KEY)
       .all<{ key: string; value: string }>();
 
@@ -62,7 +82,6 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
 
     const stmts: D1PreparedStatement[] = [];
     for (const entry of slice) {
-      const urlsJson = entry.source_urls ? JSON.stringify(entry.source_urls) : null;
       stmts.push(
         db
           .prepare(
@@ -70,15 +89,14 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
              SET episodes_total = CASE WHEN ?1 > episodes_total THEN ?1 ELSE episodes_total END,
                  status = ?2,
                  type = COALESCE(NULLIF(?3, ''), type),
-                 source_urls_json = COALESCE(?4, source_urls_json),
-                 updated_at = ?5
-             WHERE id = ?6`
+                 updated_at = ?4
+             WHERE id = ?5
+               AND (episodes_total < ?1 OR status != ?2 OR type != COALESCE(NULLIF(?3, ''), type))`
           )
           .bind(
             entry.episodes_total ?? 0,
             entry.status ?? 2,
             entry.type ?? 'TV',
-            urlsJson,
             nowSec,
             entry.id
           )
