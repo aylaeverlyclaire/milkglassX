@@ -233,6 +233,7 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                     } else {
                         PlayerManager.PREBUFFER_HEAD_BYTES
                     },
+                    anilistId = e.anime.id,
                 )
             }
         }

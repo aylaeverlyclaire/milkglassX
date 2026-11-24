@@ -627,7 +627,7 @@ class StreamResolver(
                 )
                 if (qual == preferredQuality) exactRaws.add(cand) else fallbackRaws.add(cand)
             }
-            val raws = if (exactRaws.isNotEmpty()) exactRaws else fallbackRaws
+            val raws = exactRaws + fallbackRaws
             for (media in cascadeResolver.resolveFromRaw(raws, preferredQuality, preferCompatibleContainer)) {
                 val host = media.directUrl.toHttpUrlOrNull()?.host ?: continue
                 if (runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host); true }.getOrDefault(false).not()) continue
