@@ -32,7 +32,7 @@ class EpisodeMetaTest {
             mapOf(
                 0 to EpisodeMeta(null, "https://x/0.jpg"),
                 1 to EpisodeMeta("Cruelty", "https://x/1.jpg"),
-                2 to EpisodeMeta("Nihongo", null),
+                2 to EpisodeMeta("Nihongo", "https://x/2.jpg"),
                 5 to EpisodeMeta("Romaji", null),
             ),
             parseAniZipEpisodes(json),
