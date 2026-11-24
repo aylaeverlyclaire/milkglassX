@@ -741,9 +741,12 @@ async function main() {
 
   const rawCatalog = Array.isArray(catJson.data) ? catJson.data : (Array.isArray(catJson) ? catJson : []);
   const allCatalog = rawCatalog.filter((a) => !isExcludedCatalogAnime(a?.title, a?.episodes_total, a?.source_urls_json || a?.source_urls));
-  const catalog = prioritizePopularCatalog(allCatalog, maxAnimes, popularOnly, parseTitleMeta, extractMatchableTitles);
+  const shardTotal = Math.max(1, Number.parseInt(process.env.SHARD_TOTAL || '1', 10) || 1);
+  const shardIndex = Math.max(0, Math.min(shardTotal - 1, Number.parseInt(process.env.SHARD_INDEX || '0', 10) || 0));
+  const prioritized = prioritizePopularCatalog(allCatalog, maxAnimes, popularOnly, parseTitleMeta, extractMatchableTitles);
+  const catalog = shardTotal > 1 ? prioritized.filter((_, idx) => idx % shardTotal === shardIndex) : prioritized;
   console.log(
-    `Catalog queue: ${catalog.length} anime (Top-${POPULAR_PRIORITY_TITLES.length} popular prioritized, popularOnly=${popularOnly})`
+    `Catalog queue: ${catalog.length}/${prioritized.length} anime (shard ${shardIndex + 1}/${shardTotal}, Top-${POPULAR_PRIORITY_TITLES.length} popular prioritized, popularOnly=${popularOnly})`
   );
   const sourcesMap = new Map((srcJson.sources || []).map((s) => [s.id, s.base_url]));
   const ylBase = (sourcesMap.get('ylnime') || 'https://ylnime.com').replace(/\/+$/, '');
@@ -1022,7 +1025,7 @@ async function main() {
     }
   });
 
-  await flushBatch(syncedAnimes >= 100);
+  await flushBatch(syncedAnimes >= 100 && shardIndex === 0);
   if (exportFile && exportedEntries.length > 0) {
     const patchObj = buildCuratedHostersPatchPayload(exportedEntries, Number.parseInt(process.env.CURATED_HOSTERS_VERSION || '1', 10) || 1);
     writeFileSync(exportFile, JSON.stringify(patchObj) + '\n', 'utf8');

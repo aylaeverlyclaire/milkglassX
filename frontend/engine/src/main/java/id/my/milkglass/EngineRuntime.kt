@@ -498,6 +498,43 @@ class EngineRuntime private constructor(private val appContext: Context) {
         }
     }
 
+    @Volatile
+    private var lastTlsPrewarmAtMs: Long = 0L
+
+    fun prewarmCoreHostConnections() {
+        val now = System.currentTimeMillis()
+        if (now - lastTlsPrewarmAtMs < 4L * 60_000L) return
+        lastTlsPrewarmAtMs = now
+        backgroundScope.launch {
+            val hosts = listOf(
+                "${MilkglassEndpoints.DEFAULT_BACKEND_BASE_URL}/v1/health",
+                "https://s3.animeverse.id/",
+                "https://pixeldrain.com/",
+                "https://filedon.co/"
+            )
+            hosts.forEach { target ->
+                launch {
+                    runCatching {
+                        val req = Request.Builder().url(target).head().build()
+                        clients.streamingClient.newCall(req).execute().use { }
+                    }
+                }
+            }
+        }
+    }
+
+    fun prefetchEpisodeBatch(
+        items: List<StreamResolver.BatchPrefetchItem>,
+        preferredRes: String = "1080p"
+    ) {
+        if (items.isEmpty()) return
+        backgroundScope.launch {
+            runCatching {
+                streamResolver.prefetchBatchFromServer(items, preferredRes, preferCompatibleContainer = false)
+            }
+        }
+    }
+
     fun prefetchEpisode(
         title: String,
         romajiTitle: String,

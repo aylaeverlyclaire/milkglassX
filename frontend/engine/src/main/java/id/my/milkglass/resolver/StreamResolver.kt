@@ -586,17 +586,12 @@ class StreamResolver(
         }
 
         if (resolved.isNotEmpty()) {
+            // Zero-Probe Direct Handoff: urutkan CDN binary terpercaya di depan dan serahkan langsung ke FailoverHttpDataSource tanpa 1x RTT probe ganda.
             val trusted = resolved.filter { id.my.milkglass.extractor.EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(it.directUrl) }
-            if (trusted.isNotEmpty()) {
-                val rest = resolved.filterNot { id.my.milkglass.extractor.EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(it.directUrl) }
-                resolved.clear()
-                resolved.addAll(trusted)
-                resolved.addAll(rest)
-            } else {
-                val verified = cascadeResolver.verifyDirect(resolved)
-                resolved.clear()
-                resolved.addAll(verified)
-            }
+            val rest = resolved.filterNot { id.my.milkglass.extractor.EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(it.directUrl) }
+            resolved.clear()
+            resolved.addAll(trusted)
+            resolved.addAll(rest)
         }
 
         val clientArrAll = data.optJSONArray("client_extract_candidates")
@@ -629,11 +624,8 @@ class StreamResolver(
             cascadeResolver.mergeExternalCandidates(searchTitle, episodeNum, allServerRaws)
         }
 
-        val hasExactPreferredDirect = resolved.any { it.quality == preferredQuality }
-        val serverHasPreferredRaw = allServerRaws.any { it.quality == preferredQuality }
         val needClientExtract =
             resolved.isEmpty() ||
-                (!hasExactPreferredDirect && serverHasPreferredRaw) ||
                 (preferCompatibleContainer && resolved.none { it.container == MediaContainer.MP4 || it.container == MediaContainer.HLS })
         if (needClientExtract && allServerRaws.isNotEmpty()) {
             val exactRaws = allServerRaws.filter { it.quality == preferredQuality }
@@ -674,6 +666,135 @@ class StreamResolver(
             resolved.sortedBy { if (it.quality == preferredQuality) 0 else 1 }
         }
         return Triple(ordered, knownQualities, hadAnyServerEntry)
+    }
+
+    data class BatchPrefetchItem(
+        val animeId: Int?,
+        val title: String,
+        val romajiTitle: String,
+        val episode: Int
+    )
+
+    fun prefetchBatchFromServer(
+        items: List<BatchPrefetchItem>,
+        preferredRes: String = "1080p",
+        preferCompatibleContainer: Boolean = false
+    ): Int {
+        if (items.isEmpty()) return 0
+        val now = System.currentTimeMillis()
+        if (now < serverResolverDisabledUntilMs) return 0
+        val preferredQuality = MkvQuality.fromText(preferredRes) ?: MkvQuality.P1080
+        val modeTag = if (preferCompatibleContainer) "compat" else "std"
+
+        val pending = items.filter { item ->
+            val searchTitle = item.romajiTitle.ifBlank { item.title }.trim()
+            if (searchTitle.length < 2 || item.episode < 0) return@filter false
+            val slug = buildEpisodeSlug(searchTitle, item.episode)
+            val cacheKey = "${slug.lowercase()}#${preferredQuality.label}#$modeTag"
+            val existing = resolvedCache[cacheKey]
+            existing == null || now - existing.cachedAtMs > RESOLVED_CACHE_TTL_MS / 2
+        }.take(12)
+        if (pending.isEmpty()) return 0
+
+        val reqItems = org.json.JSONArray()
+        for (it in pending) {
+            val searchTitle = it.romajiTitle.ifBlank { it.title }.trim()
+            val obj = JSONObject()
+                .put("title", searchTitle)
+                .put("ep", it.episode)
+                .put("q", preferredQuality.label)
+            if (it.animeId != null && it.animeId > 0) obj.put("anime_id", it.animeId)
+            reqItems.put(obj)
+        }
+        val payload = JSONObject().put("items", reqItems).toString()
+        val url = "${backendBaseUrl.trimEnd('/')}/v1/play/resolve-batch"
+        val body = runCatching {
+            val req = Request.Builder()
+                .url(url)
+                .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .header("Accept", "application/json")
+                .build()
+            serverHintClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                resp.body?.string()
+            }
+        }.getOrNull() ?: return 0
+
+        val dataObj = runCatching { JSONObject(body).optJSONObject("data") }.getOrNull() ?: return 0
+        var populated = 0
+        for (item in pending) {
+            val searchTitle = item.romajiTitle.ifBlank { item.title }.trim()
+            val normKey = searchTitle
+                .lowercase(java.util.Locale.ROOT)
+                .replace(Regex("[^a-z0-9]+"), " ")
+                .trim()
+                .replace(Regex("\\s+"), " ")
+                .take(120) + "#" + item.episode
+            val entryObj = dataObj.optJSONObject(normKey) ?: continue
+            val directs = entryObj.optJSONArray("direct_candidates")
+            val resolved = mutableListOf<ResolvedMkvMedia>()
+            val serverQualities = linkedSetOf<MkvQuality>()
+            if (directs != null) {
+                for (i in 0 until directs.length()) {
+                    val obj = directs.optJSONObject(i) ?: continue
+                    val directUrl = obj.optString("direct_url").trim()
+                    if (directUrl.isBlank() || id.my.milkglass.source.DeadCandidateCache.isDead(directUrl)) continue
+                    val host = directUrl.toHttpUrlOrNull()?.host ?: continue
+                    val qual = MkvQuality.fromText(obj.optString("quality")) ?: continue
+                    serverQualities.add(qual)
+                    if (runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host); true }.getOrDefault(false).not()) continue
+                    val src = SourcePriority.entries.firstOrNull { it.id == obj.optString("source") } ?: SourcePriority.YLNIME
+                    val cont = runCatching { MediaContainer.valueOf(obj.optString("container").uppercase()) }.getOrDefault(MediaContainer.MP4)
+                    resolved.add(
+                        ResolvedMkvMedia(
+                            source = src,
+                            quality = qual,
+                            hoster = obj.optString("hoster").ifBlank { host },
+                            directUrl = directUrl,
+                            referer = obj.optString("referer").takeIf { it.isNotBlank() },
+                            supportsRange = obj.optBoolean("supports_range", true),
+                            container = cont,
+                            isHls = obj.optBoolean("is_hls", false),
+                            rawUrl = directUrl
+                        )
+                    )
+                }
+            }
+            val clientArr = entryObj.optJSONArray("client_extract_candidates")
+            val raws = ArrayList<RawMkvCandidate>()
+            if (clientArr != null) {
+                for (i in 0 until minOf(clientArr.length(), 12)) {
+                    val obj = clientArr.optJSONObject(i) ?: continue
+                    val rawUrl = obj.optString("raw_url").trim()
+                    if (!rawUrl.startsWith("https://") || id.my.milkglass.source.DeadCandidateCache.isDead(rawUrl)) continue
+                    val qual = MkvQuality.fromText(obj.optString("quality")) ?: continue
+                    serverQualities.add(qual)
+                    val hoster = obj.optString("hoster").ifBlank { "Hoster" }
+                    raws.add(
+                        RawMkvCandidate(
+                            source = SourcePriority.entries.firstOrNull { it.id == obj.optString("source") } ?: SourcePriority.YLNIME,
+                            quality = qual,
+                            hosterLabel = hoster,
+                            rawUrl = rawUrl,
+                            pageReferer = obj.optString("referer").trim(),
+                            container = MediaContainer.detect("", hoster, rawUrl),
+                            isStreamEmbed = obj.optBoolean("is_stream_embed", isEmbedCandidateUrl(rawUrl, hoster))
+                        )
+                    )
+                }
+            }
+            if (raws.isNotEmpty()) {
+                cascadeResolver.mergeExternalCandidates(searchTitle, item.episode, raws)
+            }
+            if (resolved.isNotEmpty()) {
+                val ordered = resolved.sortedBy { if (it.quality == preferredQuality) 0 else 1 }
+                val slug = buildEpisodeSlug(searchTitle, item.episode)
+                val cacheKey = "${slug.lowercase()}#${preferredQuality.label}#$modeTag"
+                resolvedCache[cacheKey] = cacheEntryFor(ordered, serverQualities.toList())
+                populated++
+            }
+        }
+        return populated
     }
 
     fun invalidateCache(slug: String) {

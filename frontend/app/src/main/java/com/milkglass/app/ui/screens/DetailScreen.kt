@@ -118,6 +118,7 @@ fun DetailScreen(ctl: AppController, id: Int) {
     LaunchedEffect(a.id, ctl.online) {
         if (ctl.online && (a.sourceUrls.isNotEmpty() || a.romaji.isNotBlank())) {
             val rt = EngineRuntime.get(detailCtx)
+            rt.prewarmCoreHostConnections()
             rt.seedSourceUrls(a.title, a.romaji, a.sourceUrls)
             val live = rt.probeLiveEpisodes(a.title, a.romaji, a.sourceUrls)
             if (live != null && (live.maxEpisode > 0 || live.hasEpisodeZero)) {
@@ -134,7 +135,15 @@ fun DetailScreen(ctl: AppController, id: Int) {
         }
         if (targetEp != null && ctl.online && ctl.episodeAccess(a, targetEp) == Access.Ok) {
             val rt = EngineRuntime.get(detailCtx)
+            rt.prewarmCoreHostConnections()
             rt.seedSourceUrls(a.title, a.romaji, a.sourceUrls)
+            val surroundEps = listOf(targetEp, targetEp + 1, targetEp + 2, targetEp + 3, targetEp - 1)
+                .filter { it in 1..mx && ctl.episodeAccess(a, it) == Access.Ok }
+                .distinct()
+                .map { epNum -> id.my.milkglass.resolver.StreamResolver.BatchPrefetchItem(a.id, a.title, a.romaji, epNum) }
+            if (surroundEps.isNotEmpty()) {
+                rt.prefetchEpisodeBatch(surroundEps, ctl.preferredQuality)
+            }
             val metered = com.milkglass.app.core.poster.isMeteredNetwork(detailCtx)
             rt.prefetchEpisode(
                 a.title, a.romaji, targetEp, ctl.preferredQuality,
@@ -146,6 +155,14 @@ fun DetailScreen(ctl: AppController, id: Int) {
                 },
                 anilistId = a.id,
             )
+            val nextEp = targetEp + 1
+            if (nextEp <= mx && ctl.episodeAccess(a, nextEp) == Access.Ok) {
+                rt.prefetchEpisode(
+                    a.title, a.romaji, nextEp, ctl.preferredQuality,
+                    prebuffer = false,
+                    anilistId = a.id,
+                )
+            }
         }
     }
 

@@ -1051,10 +1051,10 @@ class PlayerManager(
         @Volatile
         private var sharedDbProvider: DatabaseProvider? = null
 
-        const val PREBUFFER_HEAD_BYTES = 2L * 1024L * 1024L
-        const val PREBUFFER_METERED_HEAD_BYTES = 512L * 1024L
-        private const val PREBUFFER_MKV_TAIL_BYTES = 256L * 1024L
-        private const val PREBUFFER_MP4_TAIL_BYTES = 512L * 1024L
+        const val PREBUFFER_HEAD_BYTES = 384L * 1024L
+        const val PREBUFFER_METERED_HEAD_BYTES = 256L * 1024L
+        private const val PREBUFFER_MKV_TAIL_BYTES = 128L * 1024L
+        private const val PREBUFFER_MP4_TAIL_BYTES = 256L * 1024L
 
         private val _isVideoBuffering = MutableStateFlow(false)
         val isVideoBuffering: StateFlow<Boolean> = _isVideoBuffering.asStateFlow()

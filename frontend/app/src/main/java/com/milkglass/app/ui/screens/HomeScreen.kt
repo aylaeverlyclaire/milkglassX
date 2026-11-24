@@ -170,9 +170,27 @@ fun HomeScreen(ctl: AppController, scroll: ScrollState, onSelectTab: (String) ->
         if (ctl.online && ctl.episodeAccess(d.anime, ep) == com.milkglass.app.core.app.Access.Ok) {
             kotlinx.coroutines.delay(250)
             val rt = id.my.milkglass.EngineRuntime.get(heroCtx)
+            rt.prewarmCoreHostConnections()
             rt.seedSourceUrls(d.anime.title, d.anime.romaji, d.anime.sourceUrls)
+            val batchItems = buildList {
+                d.cl.take(3).forEach { cw ->
+                    val cwEp = ctl.continueInfo(cw).episode ?: 1
+                    rt.seedSourceUrls(cw.title, cw.romaji, cw.sourceUrls)
+                    add(id.my.milkglass.resolver.StreamResolver.BatchPrefetchItem(cw.id, cw.title, cw.romaji, cwEp))
+                }
+                d.trending.take(3).forEach { trAnime ->
+                    if (none { it.animeId == trAnime.id }) {
+                        rt.seedSourceUrls(trAnime.title, trAnime.romaji, trAnime.sourceUrls)
+                        add(id.my.milkglass.resolver.StreamResolver.BatchPrefetchItem(trAnime.id, trAnime.title, trAnime.romaji, 1))
+                    }
+                }
+            }
+            if (batchItems.isNotEmpty()) {
+                rt.prefetchEpisodeBatch(batchItems, ctl.preferredQuality)
+            }
             rt.prefetchEpisode(
                 d.anime.title, d.anime.romaji, ep, ctl.preferredQuality,
+                anilistId = d.anime.id,
             )
         }
     }

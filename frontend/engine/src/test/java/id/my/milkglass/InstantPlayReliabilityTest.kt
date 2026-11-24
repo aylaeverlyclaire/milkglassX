@@ -604,4 +604,17 @@ class InstantPlayReliabilityTest {
         assertFalse(HosterFilter.isBlacklisted("Pdrain", "https://desustream.com/safelink/link/?id=ok1"))
         assertFalse(HosterFilter.isBlacklisted("Filedon", "https://desustream.com/safelink/link/?id=ok2"))
     }
+
+    @Test
+    fun dualEndPrebufferHeadBudgetFitsSubSecondTarget() {
+        assertTrue(id.my.milkglass.player.PlayerManager.PREBUFFER_HEAD_BYTES <= 512L * 1024L)
+        assertTrue(id.my.milkglass.player.PlayerManager.PREBUFFER_METERED_HEAD_BYTES <= 256L * 1024L)
+        val batchItem = id.my.milkglass.resolver.StreamResolver.BatchPrefetchItem(
+            animeId = 927635193,
+            title = "Emiya-san Chi no Kyou no Gohan",
+            romajiTitle = "Emiya-san Chi no Kyou no Gohan",
+            episode = 2
+        )
+        assertEquals(2, batchItem.episode)
+    }
 }
