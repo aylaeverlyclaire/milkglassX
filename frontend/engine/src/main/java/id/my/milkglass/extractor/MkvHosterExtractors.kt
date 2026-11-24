@@ -32,7 +32,7 @@ data class ExtractedDirectMedia(
 object HosterFilter {
     // Hoster lambat, sering gagal, arsip, atau shortener diblokir total.
     private val blacklistedTokens = listOf(
-        "mega.nz", "mega.co.nz", "megaup", "otakufiles", "zippyshare",
+        "mega.nz", "mega.co.nz", "megaup", "mega", "solidfiles", "otakufiles", "zippyshare", "zippy", "acefile", "uptobox", "anonfiles", "bayfiles", "4shared", "vikingfile",
         "mirrored.to", "acefile.co", "(rar)", ".rar", "(zip)", "terabox", "shrinkearn",
         "krakenfiles", "kfiles", "streamtape", "mixdrop", "dood", "doodstream",
         "qiwi.gg", "mediafire", "kuramadrive", "drive.google", "gdrive",
@@ -1179,9 +1179,9 @@ class MkvHosterExtractorRegistry(
     private val verifiedUrlTtlMs = 5L * 60L * 1000L
     private val fastProbeClient by lazy {
         clients.mediaAndApiClient.newBuilder()
-            .connectTimeout(2_500, TimeUnit.MILLISECONDS)
-            .readTimeout(3_000, TimeUnit.MILLISECONDS)
-            .callTimeout(4_000, TimeUnit.MILLISECONDS)
+            .connectTimeout(1_800, TimeUnit.MILLISECONDS)
+            .readTimeout(2_200, TimeUnit.MILLISECONDS)
+            .callTimeout(2_800, TimeUnit.MILLISECONDS)
             .build()
     }
 

@@ -1,4 +1,5 @@
 import { sha1Hex } from '../utils/crypto';
+import { CURATED_PATCH_VERSION } from '../services/curatedPatch.service';
 import { Context, Next } from 'hono';
 
 export interface EdgeCacheOptions {
@@ -64,6 +65,12 @@ export function normalizeCacheTitle(raw: string): string {
     .trim()
     .replace(/\s+/g, ' ')
     .slice(0, 120);
+}
+
+function withPatchVersionKey(rawUrl: string | URL): string {
+  const u = typeof rawUrl === 'string' ? new URL(rawUrl) : new URL(rawUrl.toString());
+  u.searchParams.set('__pv', String(CURATED_PATCH_VERSION));
+  return u.toString();
 }
 
 async function weakEtag(body: string): Promise<string> {
@@ -135,6 +142,7 @@ export function edgeCache(
       const asn = Number.isInteger(rawAsn) && rawAsn > 0 ? rawAsn : 0;
       normalizedUrl.searchParams.set('__asn', String(asn));
     }
+    normalizedUrl.searchParams.set('__pv', String(CURATED_PATCH_VERSION));
     const cacheKey = new Request(normalizedUrl.toString(), {
       method: 'GET',
     });
@@ -231,9 +239,9 @@ export async function purgeEdgeCacheForIngest(
     const origin = new URL(requestUrl).origin;
     const cache = (caches as unknown as { default: Cache }).default;
     const urlsToPurge = [
-      `${origin}/v1/catalog/home`,
-      `${origin}/v1/catalog/anime/${animeId}`,
-      `${origin}/v1/catalog/episode/${episodeId}`,
+      withPatchVersionKey(`${origin}/v1/catalog/home`),
+      withPatchVersionKey(`${origin}/v1/catalog/anime/${animeId}`),
+      withPatchVersionKey(`${origin}/v1/catalog/episode/${episodeId}`),
     ];
     await Promise.all(
       urlsToPurge.map((u) => cache.delete(new Request(u, { method: 'GET' })))
@@ -248,7 +256,7 @@ export async function purgeHomeCache(requestUrl: string): Promise<void> {
     const cache = (caches as unknown as { default: Cache }).default;
     await Promise.all(
       ['home', 'status'].map((name) =>
-        cache.delete(new Request(`${origin}/v1/catalog/${name}`, { method: 'GET' }))
+        cache.delete(new Request(withPatchVersionKey(`${origin}/v1/catalog/${name}`), { method: 'GET' }))
       )
     );
   } catch {
@@ -261,7 +269,7 @@ export async function purgeSourcesCache(requestUrl: string): Promise<void> {
     const cache = (caches as unknown as { default: Cache }).default;
     await Promise.all(
       ['sources', 'rules'].map((name) =>
-        cache.delete(new Request(`${origin}/v1/catalog/${name}`, { method: 'GET' }))
+        cache.delete(new Request(withPatchVersionKey(`${origin}/v1/catalog/${name}`), { method: 'GET' }))
       )
     );
   } catch {
@@ -281,6 +289,7 @@ export async function purgePlayResolveCache(
     u.searchParams.set('ep', String(ep));
     u.searchParams.set('title', normTitle);
     u.searchParams.sort();
+    u.searchParams.set('__pv', String(CURATED_PATCH_VERSION));
     await cache.delete(new Request(u.toString(), { method: 'GET' }));
   } catch {
   }

@@ -88,6 +88,10 @@ test('selectEpisodesToIndex always keeps Episode 1 plus latest episodes', () => 
   const eps = Array.from({ length: 12 }, (_, i) => ({ ep: i + 1, url: `https://x/ep-${i + 1}` }));
   const picked = selectEpisodesToIndex(eps, 4);
   assert.deepEqual(picked.map((e) => e.ep), [1, 10, 11, 12]);
+  const picked8 = selectEpisodesToIndex(eps, 8);
+  assert.deepEqual(picked8.map((e) => e.ep), [1, 2, 3, 4, 9, 10, 11, 12]);
+  assert.equal(isBlacklistedUrl('Solidfiles', 'https://link.desustream.com/?id=dead1'), true);
+  assert.equal(isBlacklistedUrl('Mega', 'https://link.desustream.com/?id=dead2'), true);
 });
 
 test('extractMatchableTitles merges title, title_alt, and Latin synonyms_json safely', () => {

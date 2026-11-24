@@ -10,6 +10,7 @@ import { getSourceBaseUrls } from '../services/anilist.service';
 import { AppBindings } from '../index';
 import { readDb } from '../utils/db';
 import {
+  CURATED_EXCLUDED_IDS_SQL_LIST,
   CURATED_PATCH_MAP,
   CURATED_PATCH_VERSION,
   MAX_ALLOWED_EPISODES,
@@ -20,8 +21,12 @@ import {
 
 
 const ALLOWED_CATALOG_PROVIDERS = new Set(['ylnime', 'otakudesu']);
-const CATALOG_SOURCE_FILTER = `(has_live_source = 1 AND episodes_total <= ${MAX_ALLOWED_EPISODES} AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%'))`;
-const CATALOG_SOURCE_FILTER_A = `(a.has_live_source = 1 AND a.episodes_total <= ${MAX_ALLOWED_EPISODES} AND (a.source_urls_json LIKE '%"ylnime"%' OR a.source_urls_json LIKE '%"otakudesu"%'))`;
+const EXCLUDED_ID_FILTER =
+  CURATED_EXCLUDED_IDS_SQL_LIST.length > 0 ? ` AND id NOT IN (${CURATED_EXCLUDED_IDS_SQL_LIST})` : '';
+const EXCLUDED_ID_FILTER_A =
+  CURATED_EXCLUDED_IDS_SQL_LIST.length > 0 ? ` AND a.id NOT IN (${CURATED_EXCLUDED_IDS_SQL_LIST})` : '';
+const CATALOG_SOURCE_FILTER = `(has_live_source = 1 AND episodes_total <= ${MAX_ALLOWED_EPISODES}${EXCLUDED_ID_FILTER} AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%'))`;
+const CATALOG_SOURCE_FILTER_A = `(a.has_live_source = 1 AND a.episodes_total <= ${MAX_ALLOWED_EPISODES}${EXCLUDED_ID_FILTER_A} AND (a.source_urls_json LIKE '%"ylnime"%' OR a.source_urls_json LIKE '%"otakudesu"%'))`;
 
 const DEFAULT_ENGINE_RULES = {
   otakudesu: { search_path: '/?s={q}&post_type=anime', selectors: { search_item: 'ul.chivsrc > li', search_link: 'h2 > a[href]', episode_box: 'div.episodelist', episode_link: 'ul li a[href]', download_block: 'div.download ul', download_row: 'li', quality_text: 'strong', size_text: 'i', hoster_link: 'a[href]', ajax_nonce_action: 'aa1208d27f29ca340c92c66d1926f13f', ajax_mirror_action: '2a3505c93b0035d3f455df82bf976b84' } },
@@ -311,6 +316,9 @@ catalogRoutes.get(
   async (c) => {
     await ensureCuratedCatalogPatchApplied(c.env.DB);
     const { q, genre, status, schedule_day, page } = c.req.valid('query');
+    if (q && isExcludedAnimeText(q)) {
+      return c.json({ status: 'ok', data: [], meta: { page, limit: 24 } });
+    }
     const limit = 24;
     const offset = (page - 1) * limit;
     const conditions = [CATALOG_SOURCE_FILTER];
@@ -632,8 +640,15 @@ catalogRoutes.get(
     const qSpaced = normalizeSearchSpaced(q);
     const qCompact = qSpaced.replace(/\s+/g, '');
     const minLen = CJK_CHAR_RE.test(qCompact) ? 1 : 2;
-    if (qCompact.length < minLen) {
-      return c.json({ status: 'ok', query: q, data: [], metadata: [], resolution_mode: 'CLIENT_CASCADE_MKV' });
+    if (qCompact.length < minLen || isExcludedAnimeText(rawQ) || isExcludedAnimeText(q)) {
+      return c.json({
+        status: 'ok',
+        query: q,
+        search_source: 'd1_primary',
+        resolution_mode: 'CLIENT_CASCADE_MKV',
+        data: [],
+        metadata: [],
+      });
     }
 
     const escapedQ = escapeSqlLike(q);
@@ -855,8 +870,6 @@ catalogRoutes.get(
       d1Rows = [...d1Rows, ...scored];
     }
 
-    // D1-first (<50ms): jika D1 sudah mengembalikan >= 6 hasil relevan, atau jika kueri adalah franchise yang dihapus,
-    // lewati live-scrape eksternal.
     let liveRows: Array<Record<string, unknown>> = [];
     if (d1Rows.length < 6 && !isExcludedAnimeText(q)) {
       const [otakuLive, sameLive] = await Promise.allSettled([

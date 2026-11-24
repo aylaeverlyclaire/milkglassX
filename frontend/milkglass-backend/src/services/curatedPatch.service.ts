@@ -11,7 +11,7 @@ const META_VERSION_KEY = 'curated_patch_version';
 const META_CURSOR_KEY = 'curated_patch_cursor';
 const META_TARGET_KEY = 'curated_patch_target';
 const BATCH_SIZE = 50;
-const MAX_ROWS_PER_PASS = 400;
+const MAX_ROWS_PER_PASS = 250;
 
 export const MAX_ALLOWED_EPISODES = 500;
 
@@ -75,11 +75,13 @@ interface CompactPatchRow {
   u?: Record<string, string>;
 }
 
-export const CURATED_PATCH_VERSION = 7;
+export const CURATED_PATCH_VERSION = 8;
 
 export const CURATED_EXCLUDED_IDS: ReadonlySet<number> = new Set(
   (excludedIdsRaw as number[]).filter((id) => Number.isInteger(id) && id > 0)
 );
+
+export const CURATED_EXCLUDED_IDS_SQL_LIST = Array.from(CURATED_EXCLUDED_IDS).join(',');
 
 const rawRows: CompactPatchRow[] = [
   ...(p1 as CompactPatchRow[]),
@@ -144,41 +146,43 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
     const nowSec = Math.floor(Date.now() / 1000);
 
     const stmts: D1PreparedStatement[] = [];
-    if (cursor === 0) {
+    // Pastikan pembersihan franchise terlarang & >500 episode selalu dieksekusi dalam 2 statement ringkas
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE animes
+           SET has_live_source = 0, updated_at = ?1
+           WHERE has_live_source != 0
+             AND (
+               episodes_total > ?2
+               OR lower(title) LIKE '%detective conan%'
+               OR lower(title) LIKE '%meitantei conan%'
+               OR lower(title) LIKE '%case closed%'
+               OR lower(title) LIKE '%naruto%'
+               OR lower(title) LIKE '%boruto%'
+               OR lower(title) LIKE '%one piece%'
+               OR COALESCE(lower(title_alt), '') LIKE '%detective conan%'
+               OR COALESCE(lower(title_alt), '') LIKE '%meitantei conan%'
+               OR COALESCE(lower(title_alt), '') LIKE '%case closed%'
+               OR COALESCE(lower(title_alt), '') LIKE '%naruto%'
+               OR COALESCE(lower(title_alt), '') LIKE '%boruto%'
+               OR COALESCE(lower(title_alt), '') LIKE '%one piece%'
+             )`
+        )
+        .bind(nowSec, MAX_ALLOWED_EPISODES)
+    );
+    if (CURATED_EXCLUDED_IDS_SQL_LIST.length > 0) {
       stmts.push(
         db
           .prepare(
             `UPDATE animes
              SET has_live_source = 0, updated_at = ?1
-             WHERE has_live_source != 0
-               AND (
-                 episodes_total > ?2
-                 OR lower(title) LIKE '%detective conan%'
-                 OR lower(title) LIKE '%meitantei conan%'
-                 OR lower(title) LIKE '%case closed%'
-                 OR lower(title) LIKE '%naruto%'
-                 OR lower(title) LIKE '%boruto%'
-                 OR lower(title) LIKE '%one piece%'
-                 OR lower(title_alt) LIKE '%detective conan%'
-                 OR lower(title_alt) LIKE '%meitantei conan%'
-                 OR lower(title_alt) LIKE '%case closed%'
-                 OR lower(title_alt) LIKE '%naruto%'
-                 OR lower(title_alt) LIKE '%boruto%'
-                 OR lower(title_alt) LIKE '%one piece%'
-               )`
+             WHERE has_live_source != 0 AND id IN (${CURATED_EXCLUDED_IDS_SQL_LIST})`
           )
-          .bind(nowSec, MAX_ALLOWED_EPISODES)
+          .bind(nowSec)
       );
-      if (CURATED_EXCLUDED_IDS.size > 0) {
-        for (const excludedId of CURATED_EXCLUDED_IDS) {
-          stmts.push(
-            db
-              .prepare(`UPDATE animes SET has_live_source = 0, updated_at = ?1 WHERE id = ?2 AND has_live_source != 0`)
-              .bind(nowSec, excludedId)
-          );
-        }
-      }
     }
+
     for (const entry of slice) {
       if (entry.source_urls && Object.keys(entry.source_urls).length > 0) {
         const patchUrlsJson = JSON.stringify(entry.source_urls);
@@ -186,10 +190,14 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
           db
             .prepare(
               `UPDATE animes
-               SET episodes_total = CASE WHEN ?1 > episodes_total THEN ?1 ELSE episodes_total END,
+               SET episodes_total = MAX(episodes_total, ?1),
                    status = ?2,
                    type = COALESCE(NULLIF(?3, ''), type),
-                   source_urls_json = json_patch(CASE WHEN json_valid(source_urls_json) THEN source_urls_json ELSE '{}' END, ?4),
+                   source_urls_json = CASE
+                     WHEN source_urls_json IS NOT NULL AND json_valid(source_urls_json)
+                     THEN json_patch(source_urls_json, ?4)
+                     ELSE ?4
+                   END,
                    updated_at = ?5
                WHERE id = ?6`
             )
@@ -207,7 +215,7 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
           db
             .prepare(
               `UPDATE animes
-               SET episodes_total = CASE WHEN ?1 > episodes_total THEN ?1 ELSE episodes_total END,
+               SET episodes_total = MAX(episodes_total, ?1),
                    status = ?2,
                    type = COALESCE(NULLIF(?3, ''), type),
                    updated_at = ?4

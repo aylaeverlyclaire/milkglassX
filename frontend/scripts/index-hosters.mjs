@@ -12,7 +12,7 @@ const BLACKLISTED_HOSTER_PATTERNS = [
   'adf.ly', 'bit.ly', 'tinyurl.com', 't.me', 'telegram', 'discord',
   'facebook.com', 'twitter.com', 'instagram.com', 'youtube.com', 'youtu.be',
   'saweria', 'trakteer', 'paypal', 'javascript:', 'mailto:', '#',
-  'mirrored.to', 'acefile.co', 'mega.nz', 'mega.co.nz', 'megaup',
+  'mirrored.to', 'acefile.co', 'acefile', 'mega.nz', 'mega.co.nz', 'megaup', 'mega', 'solidfiles', 'zippyshare', 'zippy', 'uptobox', 'anonfiles', 'bayfiles', '4shared',
   'racaty', '(rar)', '.rar', '(zip)', '.zip', 'terabox',
   'krakenfiles', 'kfiles', 'mediafire', 'qiwi.gg', 'drive.google',
   'kuramadrive', 'fileditch', 'mixdrop', 'streamtape', 'dood',
@@ -198,7 +198,7 @@ export function isBlacklistedUrl(label, url) {
   // yang sudah di-unwrap otomatis oleh MkvHosterExtractors.kt di Engine.
   const isOtakudesuDesuSafelink =
     (urlLow.includes('link.desustream.') || urlLow.includes('desustream.com/safelink') || urlLow.includes('desudrive.com/safelink')) &&
-    !/mega|acefile|kraken|viking|mirrored|racaty|zippy|otakufiles/i.test(String(label || ''));
+    !/mega|solidfiles|acefile|kraken|viking|mirrored|racaty|zippy|otakufiles|uptobox|anonfiles|bayfiles|4shared/i.test(String(label || ''));
   return BLACKLISTED_HOSTER_PATTERNS.some((p) => {
     if (p === 'safelink' && isOtakudesuDesuSafelink) return false;
     return low.includes(p);
@@ -640,16 +640,22 @@ export function selectEpisodesToIndex(episodes, maxEps) {
   if (episodes.length <= maxEps) return episodes;
   const picked = [];
   const seen = new Set();
-  const first = episodes[0];
-  if (first) {
-    picked.push(first);
-    seen.add(first.ep);
-  }
-  const tail = episodes.slice(-(maxEps - picked.length));
-  for (const e of tail) {
-    if (!seen.has(e.ep)) {
+  const headCount = maxEps <= 4 ? 1 : Math.min(episodes.length, Math.ceil(maxEps / 2));
+  for (let i = 0; i < headCount; i++) {
+    const e = episodes[i];
+    if (e && !seen.has(e.ep)) {
       picked.push(e);
       seen.add(e.ep);
+    }
+  }
+  const rem = maxEps - picked.length;
+  if (rem > 0) {
+    const tail = episodes.slice(-rem);
+    for (const e of tail) {
+      if (!seen.has(e.ep)) {
+        picked.push(e);
+        seen.add(e.ep);
+      }
     }
   }
   return picked;
@@ -982,7 +988,7 @@ async function main() {
             }
           }
         }
-        if (epHostersMap.size >= Math.min(maxEps, 4)) break;
+        if (epHostersMap.size >= eps.length && Array.from(epHostersMap.values()).every((list) => list.length >= 3)) break;
       } catch (err) {
         if (diagLogs < 6) {
           diagLogs++;

@@ -1,6 +1,7 @@
 package id.my.milkglass
 
 import id.my.milkglass.extractor.EmbedMediaSniffer
+import id.my.milkglass.extractor.HosterFilter
 import id.my.milkglass.extractor.MkvHosterExtractorRegistry
 import id.my.milkglass.net.IsolatedHttpClients
 import id.my.milkglass.source.CascadeResult
@@ -592,5 +593,15 @@ class InstantPlayReliabilityTest {
             preferCompatibleContainer = true
         )
         assertEquals(c2.directUrl, chosen?.directUrl)
+    }
+
+    @Test
+    fun hosterFilterBlocksSolidfilesMegaAndAcefileLabelsEvenInsideSafelinks() {
+        assertTrue(HosterFilter.isBlacklisted("Solidfiles", "https://link.desustream.com/?id=dead1"))
+        assertTrue(HosterFilter.isBlacklisted("Mega", "https://link.desustream.com/?id=dead2"))
+        assertTrue(HosterFilter.isBlacklisted("Acefile", "https://desustream.com/safelink/link/?id=dead3"))
+        assertTrue(HosterFilter.isBlacklisted("Zippy", "https://desustream.com/safelink/link/?id=dead4"))
+        assertFalse(HosterFilter.isBlacklisted("Pdrain", "https://desustream.com/safelink/link/?id=ok1"))
+        assertFalse(HosterFilter.isBlacklisted("Filedon", "https://desustream.com/safelink/link/?id=ok2"))
     }
 }

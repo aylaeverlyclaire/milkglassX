@@ -11,7 +11,6 @@ import { deriveSessionProofKey, hmacSha256Hex, verifyAccessTokenClaims, verifyRe
 import { AppBindings } from '../index';
 import { D1ReadClient, readDb } from '../utils/db';
 import { lookupCuratedEpisodeHosters } from '../services/curatedHosters.service';
-import { CURATED_PATCH_MAP } from '../services/curatedPatch.service';
 
 export const playRoutes = new Hono<{ Bindings: AppBindings }>();
 
@@ -30,17 +29,19 @@ const HINT_MAX_CANDIDATES = 16;
 const IP_AGNOSTIC_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
   'filedon.co', 'odfiles.com', 'r2.dev', 'r2.cloudflarestorage.com', 'animeverse.id', 'animekita.org',
-  'blogger.googleusercontent.com', 'video-downloads.googleusercontent.com', 'odcloud.net', 'buzzheavier.com', 'qiwi.gg', 'spyderrock.com',
-  'mediafire.com', 'krakenfiles.com', 'kfiles.io', 'wibufile.com', 'uqni.net',
-  'drive.google.com', 'drive.usercontent.google.com',
+  'blogger.googleusercontent.com', 'video-downloads.googleusercontent.com', 'odcloud.net', 'buzzheavier.com', 'spyderrock.com',
+  'wibufile.com', 'uqni.net',
 ];
 const IP_LOCKED_HOSTER_DOMAINS = [
   'gofile.io', 'desustream.info', 'desustream.com', 'desustream.net', 'ondesu.com', 'ondesu.cc', 'ondesuh.cc', 'odstream.xyz', 'mp4upload.com',
-  'blogger.com', 'googlevideo.com', 'yourupload.com', 'vidhidepre.com', 'vidhide.com', 'odvidhide.com',
-  'streamruby.com', 'rubyvidhub.com', 'filemoon.sx', 'berkasdrive.com', 'mitedrive.com', 'short.ink',
+  'blogger.com', 'googlevideo.com', 'vidhidepre.com', 'vidhide.com', 'odvidhide.com',
+  'streamruby.com', 'rubyvidhub.com', 'filemoon.sx', 'short.ink',
   'icefile.web.id',
 ];
 const ALL_HOSTER_DOMAINS = [...IP_AGNOSTIC_HOSTER_DOMAINS, ...IP_LOCKED_HOSTER_DOMAINS];
+
+const BLACKLISTED_HOSTER_LABEL_RE =
+  /\b(?:solidfiles|mega|megaup|zippy(?:share)?|acefile|kraken(?:files)?|kfiles|mirrored|terabox|shrinkearn|streamtape|mixdrop|dood(?:stream)?|qiwi|mediafire|kuramadrive|gdrive|google\s*drive|drive\.google|yourupload|berkasdrive|mitedrive|fileditch|racaty|1fichier|send\.now|send\.cm|tusfiles|userscloud|moedesu|nekocloud|ondesuhd|filesim|letsup|desufiles|otakufiles|vikingfile|uptobox|anonfiles|bayfiles|4shared)\b/i;
 
 function matchesDomainList(host: string, domains: readonly string[]): boolean {
   const h = host.toLowerCase();
@@ -55,6 +56,13 @@ export function isKnownHosterUrl(raw: string): boolean {
   const u = isSafePublicHttpsUrl(raw);
   if (!u) return false;
   return matchesDomainList(u.hostname, ALL_HOSTER_DOMAINS);
+}
+
+export function isPlayableHosterCandidate(hoster: string | undefined, rawUrl: string): boolean {
+  if (!isKnownHosterUrl(rawUrl)) return false;
+  if (hoster && BLACKLISTED_HOSTER_LABEL_RE.test(hoster)) return false;
+  if (BLACKLISTED_HOSTER_LABEL_RE.test(rawUrl)) return false;
+  return true;
 }
 
 export function normalizeTitleKey(title: string): string {
@@ -138,7 +146,7 @@ playRoutes.post('/hint', zValidator('json', hintBodySchema), async (c) => {
   const seen = new Set<string>();
   for (const cand of candidates) {
     const dedupKey = `${cand.quality}|${cand.raw_url}`;
-    if (!isKnownHosterUrl(cand.raw_url) || seen.has(dedupKey)) continue;
+    if (!isPlayableHosterCandidate(cand.hoster, cand.raw_url) || seen.has(dedupKey)) continue;
     const ref = cand.referer && isPublicHttpsUrl(cand.referer) ? cand.referer : '';
     seen.add(dedupKey);
     clean.push({
@@ -163,7 +171,7 @@ playRoutes.post('/hint', zValidator('json', hintBodySchema), async (c) => {
       let prev: StoredHint[] = [];
       try {
         const parsed = JSON.parse(existing.payload) as StoredHint[];
-        if (Array.isArray(parsed)) prev = parsed;
+        if (Array.isArray(parsed)) prev = parsed.filter((h) => h && isPlayableHosterCandidate(h.hoster, h.raw_url));
       } catch {}
       const prevQualities = new Set(prev.map((h) => h.quality));
       const prevSources = new Set(prev.map((h) => h.source));
@@ -176,7 +184,7 @@ playRoutes.post('/hint', zValidator('json', hintBodySchema), async (c) => {
       }
       const perQuality = new Map<string, StoredHint[]>();
       for (const item of [...clean, ...prev]) {
-        if (!item || !isKnownHosterUrl(item.raw_url)) continue;
+        if (!item || !isPlayableHosterCandidate(item.hoster, item.raw_url)) continue;
         const bucket = perQuality.get(item.quality) ?? [];
         if (bucket.length < 4 && !bucket.some((x) => x.raw_url === item.raw_url)) {
           bucket.push(item);
@@ -229,14 +237,17 @@ async function lookupEpisodeHosters(db: D1ReadClient, title: string, ep: number,
         referer: string;
       }>();
     if (!results || results.length === 0) return null;
-    return results.map((r) => ({
-      raw_url: r.url,
-      quality: r.quality || '720p',
-      hoster: r.hoster || 'Hoster',
-      source: r.provider || 'otakudesu',
-      container: r.container || 'mp4',
-      referer: r.referer || '',
-    }));
+    const filtered = results
+      .filter((r) => isPlayableHosterCandidate(r.hoster, r.url))
+      .map((r) => ({
+        raw_url: r.url,
+        quality: r.quality || '720p',
+        hoster: r.hoster || 'Hoster',
+        source: r.provider || 'otakudesu',
+        container: r.container || 'mp4',
+        referer: r.referer || '',
+      }));
+    return filtered.length > 0 ? filtered : null;
   } catch {
     return null;
   }
@@ -251,7 +262,7 @@ async function lookupHint(db: D1ReadClient, title: string, ep: number): Promise<
     if (!row) return null;
     if (Math.floor(Date.now() / 1000) - row.updated_at > HINT_MAX_AGE_SEC) return null;
     const arr = JSON.parse(row.payload) as StoredHint[];
-    const ok = (Array.isArray(arr) ? arr : []).filter((h) => h && isKnownHosterUrl(h.raw_url));
+    const ok = (Array.isArray(arr) ? arr : []).filter((h) => h && isPlayableHosterCandidate(h.hoster, h.raw_url));
     return ok.length ? ok : null;
   } catch {
     return null;
@@ -294,6 +305,7 @@ type StoredDirect = {
 };
 
 export function isAcceptableDirect(c: { hoster: string; direct_url: string }): boolean {
+  if (c.hoster && BLACKLISTED_HOSTER_LABEL_RE.test(c.hoster)) return false;
   const u = isSafePublicHttpsUrl(c.direct_url);
   if (!u) return false;
   return matchesDomainList(u.hostname, IP_AGNOSTIC_HOSTER_DOMAINS);
@@ -384,316 +396,238 @@ async function lookupDirect(db: D1ReadClient, title: string, ep: number): Promis
 const EDGE_RESOLVE_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-function detectEdgeQuality(raw: string, fallback = '720p'): '1080p' | '720p' | '480p' | '360p' {
-  const s = String(raw || '').toLowerCase();
-  if (s.includes('1080') || s.includes('fullhd') || /\bfhd\b/.test(s)) return '1080p';
-  if (s.includes('720') || s.includes('mp4hd') || /\bhd\b/.test(s)) return '720p';
-  if (s.includes('480') || /\bsd\b/.test(s)) return '480p';
-  if (s.includes('360')) return '360p';
-  return (fallback === '1080p' || fallback === '720p' || fallback === '480p' || fallback === '360p') ? fallback : '720p';
-}
-
 function pixeldrainToDirectApi(url: string): string | null {
   const m = url.match(/(?:pixeldrain\.(?:com|net|lu)|pdrain\.com)\/(?:u|api\/file)\/([A-Za-z0-9_-]+)/i);
   return m ? `https://pixeldrain.com/api/file/${m[1]}` : null;
 }
 
-function extractEpisodeNumberOnEdge(text: string, url: string): number | null {
-  const combined = `${text || ''} ${url || ''}`;
-  const m =
-    combined.match(/(?:episode|eps?|ep)[\s\-_]*0*(\d{1,4})(?!(?:\.\d|\d))/i) ||
-    String(url || '').match(/[?&]episode=[a-z0-9_-]+-0*(\d{1,4})(?:[&#]|$)/i) ||
-    combined.match(/-0*(\d{1,4})(?:[-/]|$)/);
-  if (m) {
-    const n = Number.parseInt(m[1], 10);
-    if (Number.isFinite(n) && n >= 0 && n <= 2000) return n;
+/**
+ * Promosi otomatis kandidat episode_hosters / play_hints yang sudah berupa stream CDN langsung
+ * (s3.animeverse.id, animekita.org, r2.dev, blogger.googleusercontent.com, atau Pixeldrain API)
+ * menjadi direct_candidates agar klien Android langsung mengambil jalur 0-hop instant direct (<2 detik).
+ */
+function promoteDirectFromHints(hints: StoredHint[], existingDirect: StoredDirect[] | null): StoredDirect[] {
+  const out: StoredDirect[] = [...(existingDirect ?? [])];
+  const seen = new Set<string>(out.map((d) => `${d.quality}|${d.direct_url}`));
+
+  for (const h of hints) {
+    const raw = (h.raw_url || '').trim();
+    if (!raw.startsWith('https://')) continue;
+    const pdDirect = pixeldrainToDirectApi(raw);
+    const isDirectCdn =
+      /^https:\/\/(?:[^/]+\.)?(?:animeverse\.id|animekita\.org|r2\.dev|r2\.cloudflarestorage\.com)\//i.test(raw) ||
+      /^https:\/\/(?:blogger|video-downloads)\.googleusercontent\.com\//i.test(raw);
+    const directUrl = pdDirect || (isDirectCdn ? raw : null);
+    if (!directUrl) continue;
+
+    const hosterLabel = pdDirect
+      ? 'Pixeldrain'
+      : /animekita\.org/i.test(directUrl)
+        ? 'AnimeKita'
+        : /animeverse\.id/i.test(directUrl)
+          ? 'Animeverse'
+          : h.hoster || 'DirectCDN';
+    if (!isAcceptableDirect({ hoster: hosterLabel, direct_url: directUrl })) continue;
+
+    const quality = h.quality || '720p';
+    const key = `${quality}|${directUrl}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const upperContainer = (h.container || (directUrl.toLowerCase().includes('.m3u8') ? 'HLS' : 'MP4')).toUpperCase();
+    const isHls = upperContainer === 'HLS' || directUrl.toLowerCase().includes('.m3u8');
+    out.push({
+      source: h.source || 'ylnime',
+      quality,
+      hoster: hosterLabel,
+      direct_url: directUrl,
+      referer: h.referer || 'https://ylnime.com/',
+      supports_range: !isHls,
+      container: isHls ? 'HLS' : upperContainer === 'MKV' ? 'MKV' : 'MP4',
+      is_hls: isHls,
+    });
   }
-  if (/^(?:episode\s+)?(?:movie|film|ova|special)$/i.test(String(text || '').trim())) {
-    return 1;
-  }
-  return null;
+  return out;
 }
 
-async function fetchEdgeHtml(url: string, referer: string, timeoutMs = 2000): Promise<string | null> {
+/**
+ * Menginterpolasi URL objek S3 `s3.animeverse.id/mp4/series_{sid}/{qual}/ep_{id}/{file}.mp4`
+ * dari episode sibling untuk episode target & multi-resolusi (1080p, 720p, 480p).
+ */
+function interpolateS3AnimeverseCandidates(
+  siblingUrl: string,
+  siblingEp: number,
+  targetEp: number,
+  siblingReferer = ''
+): Array<{ quality: '1080p' | '720p' | '480p'; url: string; referer: string }> {
+  const m = siblingUrl.match(
+    /^(https:\/\/[^/]*animeverse\.id\/mp4\/series_\d+\/)(1080p|720p|480p|360p)\/ep_(\d+)\/([^?#]+)$/i
+  );
+  if (!m) return [];
+  const [, prefix, origQual, epIdStr, fileName] = m;
+  const targetEpId = Number(epIdStr) + (targetEp - siblingEp);
+  if (!Number.isInteger(targetEpId) || targetEpId <= 0) return [];
+
+  let newFileBase = fileName;
+  if (targetEp !== siblingEp) {
+    const epRe =
+      /(^|(?:%20|[ _.\-]|ep|episode))(0*\d{1,4})(?=(?:%20|[ _.\-\[\]()v]|%5[bB]|\.(?:mp4|mkv))|$)/gi;
+    const matches = [...fileName.matchAll(epRe)].filter((x) => Number(x[2]) === siblingEp);
+    if (matches.length === 0) return [];
+    const lastMatch = matches[matches.length - 1];
+    const padLen = lastMatch[2].length;
+    const paddedTarget = String(targetEp).padStart(padLen, '0');
+    const idx = (lastMatch.index ?? 0) + lastMatch[1].length;
+    newFileBase = fileName.slice(0, idx) + paddedTarget + fileName.slice(idx + lastMatch[2].length);
+  }
+
+  const targetReferer = siblingReferer
+    ? siblingReferer.replace(/([?&]episode=[a-z0-9_-]+-)0*\d+/i, `$1${targetEp}`)
+    : 'https://ylnime.com/';
+
+  const out: Array<{ quality: '1080p' | '720p' | '480p'; url: string; referer: string }> = [];
+  const seen = new Set<string>();
+  for (const q of ['1080p', '720p', '480p'] as const) {
+    const u1 = `${prefix}${q}/ep_${targetEpId}/${newFileBase}`;
+    if (!seen.has(u1)) {
+      seen.add(u1);
+      out.push({ quality: q, url: u1, referer: targetReferer });
+    }
+    const newFileWithQ = newFileBase.replace(new RegExp(origQual, 'gi'), q);
+    if (newFileWithQ !== newFileBase) {
+      const u2 = `${prefix}${q}/ep_${targetEpId}/${newFileWithQ}`;
+      if (!seen.has(u2)) {
+        seen.add(u2);
+        out.push({ quality: q, url: u2, referer: targetReferer });
+      }
+    }
+  }
+  return out;
+}
+
+async function probeS3VideoStreamOnEdge(url: string, referer: string, timeoutMs = 650): Promise<boolean> {
   try {
     const resp = await fetch(url, {
       method: 'GET',
       headers: {
         'User-Agent': EDGE_RESOLVE_UA,
-        Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
-        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8',
-        Referer: referer,
+        Range: 'bytes=0-15',
+        Referer: referer || 'https://ylnime.com/',
       },
       redirect: 'follow',
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!resp.ok) return null;
-    const text = await resp.text();
-    return text.length >= 128 ? text : null;
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    const ok = (resp.status === 206 || resp.status === 200) && !ct.includes('text/html');
+    resp.body?.cancel().catch(() => {});
+    return ok;
   } catch {
-    return null;
+    return false;
   }
-}
-
-function parseYlnimeEpisodeHtmlOnEdge(
-  html: string,
-  pageUrl: string,
-  defaultQ: '1080p' | '720p' | '480p' | '360p',
-  directOut: StoredDirect[],
-  hintsOut: StoredHint[],
-  seenDirect: Set<string>,
-  seenHint: Set<string>
-): Map<'1080p' | '720p' | '480p', string> {
-  const pushCandidate = (rawUrl: string, hoster: string, q: '1080p' | '720p' | '480p' | '360p', container: 'MP4' | 'MKV' | 'HLS' = 'MP4') => {
-    const cleanUrl = rawUrl.trim().replace(/&amp;/g, '&').replace(/ /g, '%20');
-    if (!cleanUrl.startsWith('https://')) return;
-    const pdDirect = pixeldrainToDirectApi(cleanUrl);
-    const directTarget = pdDirect || (/\.(?:animeverse\.id|animekita\.org)\//i.test(cleanUrl) ? cleanUrl : null);
-    if (directTarget && isAcceptableDirect({ hoster, direct_url: directTarget })) {
-      const dk = `${q}|${directTarget}`;
-      if (!seenDirect.has(dk)) {
-        seenDirect.add(dk);
-        directOut.push({
-          source: 'ylnime',
-          quality: q,
-          hoster: pdDirect ? 'Pixeldrain' : hoster,
-          direct_url: directTarget,
-          referer: pageUrl,
-          supports_range: container !== 'HLS',
-          container,
-          is_hls: container === 'HLS',
-        });
-      }
-    }
-    if (isKnownHosterUrl(cleanUrl)) {
-      const hk = `${q}|${cleanUrl}`;
-      if (!seenHint.has(hk)) {
-        seenHint.add(hk);
-        hintsOut.push({
-          source: 'ylnime',
-          quality: q,
-          hoster,
-          raw_url: cleanUrl,
-          referer: pageUrl,
-          container,
-        });
-      }
-    }
-  };
-
-  // 1) JSON inline `const streams = [{"reso":"720p","link":"..."}]`
-  const streamsM = html.match(/(?:const|let|var)\s+streams\s*=\s*(\[[\s\S]*?\])\s*;/);
-  if (streamsM) {
-    try {
-      const arr = JSON.parse(streamsM[1]);
-      if (Array.isArray(arr)) {
-        for (const it of arr) {
-          const link = String(it?.link || '').trim();
-          if (!link) continue;
-          const q = detectEdgeQuality(`${it?.reso || ''} ${it?.quality || ''} ${it?.label || ''} ${link}`, defaultQ);
-          const low = link.toLowerCase();
-          const host = low.includes('pixeldrain.') ? 'Pixeldrain' : low.includes('animekita.') ? 'AnimeKita' : 'Animeverse';
-          pushCandidate(link, host, q, low.includes('.m3u8') ? 'HLS' : 'MP4');
-        }
-      }
-    } catch {}
-  }
-
-  // 2) Tag <source ...> atau <video ...> dengan atribut size/label/data-reso
-  const sourceTagRe = /<(?:source|video)\b([^>]+)>/gi;
-  let sm: RegExpExecArray | null;
-  while ((sm = sourceTagRe.exec(html)) !== null) {
-    const attrs = sm[1];
-    const srcM = attrs.match(/\b(?:src|data-src|data-video)\s*=\s*(["'])(https?:\/\/[^"']+)\1/i);
-    if (!srcM) continue;
-    const srcUrl = srcM[2];
-    const sizeOrLabel =
-      (attrs.match(/\b(?:size|label|data-reso|data-quality|res)\s*=\s*(["'])([^"']+)\1/i)?.[2]) || '';
-    const q = detectEdgeQuality(`${sizeOrLabel} ${srcUrl}`, defaultQ);
-    const low = srcUrl.toLowerCase();
-    const host = low.includes('pixeldrain.') ? 'Pixeldrain' : 'Animeverse';
-    pushCandidate(srcUrl, host, q, low.includes('.m3u8') ? 'HLS' : 'MP4');
-  }
-
-  // 3) Tautan download Pixeldrain / Filedon / GoFile / Buzzheavier beserta konteks resolusi sekitarnya
-  const anchorRe = /<a\b([^>]*?)\bhref=(["'])(https?:\/\/[^"']+)\2([^>]*)>([\s\S]*?)<\/a>/gi;
-  let am: RegExpExecArray | null;
-  while ((am = anchorRe.exec(html)) !== null) {
-    const href = am[3].trim().replace(/&amp;/g, '&');
-    if (!isKnownHosterUrl(href)) continue;
-    const inner = am[5].replace(/<[^>]+>/g, ' ').trim();
-    const beforeCtx = html.slice(Math.max(0, am.index - 220), am.index).replace(/<[^>]+>/g, ' ');
-    const q = detectEdgeQuality(`${ am[1] } ${ am[4] } ${inner} ${href} ${beforeCtx}`, defaultQ);
-    const low = href.toLowerCase();
-    const host = low.includes('pixeldrain') || low.includes('pdrain')
-      ? 'Pixeldrain'
-      : low.includes('filedon') || low.includes('odfiles')
-        ? 'ODFiles'
-        : low.includes('gofile')
-          ? 'GoFile'
-          : low.includes('buzzheavier')
-            ? 'Buzzheavier'
-            : inner.slice(0, 32) || 'Hoster';
-    pushCandidate(href, host, q, low.includes('.mkv') ? 'MKV' : 'MP4');
-  }
-
-  // 4) Kumpulkan link tab ?reso=480p, ?reso=720p, ?reso=1080p jika ada
-  const resoTabs = new Map<'1080p' | '720p' | '480p', string>();
-  const tabRe = /<a\b[^>]*\bhref=(["'])([^"']*reso=(?:1080p|720p|480p)[^"']*)\1[^>]*>/gi;
-  let tm: RegExpExecArray | null;
-  while ((tm = tabRe.exec(html)) !== null) {
-    const rawHref = tm[2].trim().replace(/&amp;/g, '&');
-    const q = detectEdgeQuality(rawHref, '720p');
-    if (q === '1080p' || q === '720p' || q === '480p') {
-      const fullUrl = rawHref.startsWith('http')
-        ? rawHref
-        : rawHref.startsWith('?')
-          ? `https://ylnime.com/index.php${rawHref}`
-          : `https://ylnime.com/${rawHref.replace(/^\/+/, '')}`;
-      if (!resoTabs.has(q)) resoTabs.set(q, fullUrl);
-    }
-  }
-  return resoTabs;
 }
 
 /**
- * Resolusi Live On-Demand di Cloudflare Edge (<1.2 dtk) untuk SELURUH anime & SELURUH episode di katalog:
- * Mengambil source_urls_json dari D1, memanen kandidat multi-resolusi 480p-1080p dari YLnime/Otakudesu,
- * mengembalikan direct_candidates + client_extract_candidates, dan menyimpannya ke D1 secara asinkron.
+ * Resolusi Sibling Episode S3/CDN di Cloudflare Edge (<650ms):
+ * Ketika episode `ep` belum ada di D1 `episode_hosters`, ambil episode sibling terdekat dari anime yang sama
+ * di `episode_hosters`, interpolasi URL `s3.animeverse.id` lintas 1080p/720p/480p, verifikasi byte-range
+ * secara paralel dalam <650ms, dan simpan otomatis ke D1 di latar belakang.
  */
-async function resolveLiveFromSourceUrlsOnEdge(
+async function resolveSiblingEpisodeOnEdge(
   rdb: D1ReadClient,
   writeDb: D1Database,
   title: string,
   ep: number,
   animeId?: number,
-  execCtx?: { waitUntil(promise: Promise<unknown>): void }
+  execCtx?: { waitUntil?: (promise: Promise<unknown>) => void }
 ): Promise<{ direct: StoredDirect[]; hints: StoredHint[] }> {
   const direct: StoredDirect[] = [];
   const hints: StoredHint[] = [];
-  const seenDirect = new Set<string>();
-  const seenHint = new Set<string>();
+  const tKey = normalizeTitleKey(title);
+  if (!tKey && !animeId) return { direct, hints };
 
   try {
-    let row: { id: number; title: string; title_alt?: string; source_urls_json?: string } | null = null;
-    if (animeId && animeId > 0) {
-      row = await rdb
-        .prepare(`SELECT id, title, title_alt, source_urls_json FROM animes WHERE id = ?1 LIMIT 1`)
-        .bind(animeId)
-        .first<{ id: number; title: string; title_alt?: string; source_urls_json?: string }>();
-    }
-    if (!row) {
-      const normCompact = title.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 120);
-      if (normCompact.length >= 2) {
-        row = await rdb
+    const query = animeId
+      ? rdb
           .prepare(
-            `SELECT id, title, title_alt, source_urls_json
-             FROM animes
-             WHERE has_live_source = 1 AND (norm_compact = ?1 OR lower(title) = ?2 OR lower(title_alt) = ?2)
-             ORDER BY popularity DESC
-             LIMIT 1`
+            `SELECT anime_id, episode_number, url, quality, hoster, provider, container, referer
+             FROM episode_hosters
+             WHERE is_live = 1
+               AND (anime_id = ?1 OR title_key = ?2 OR title_alt_key = ?2)
+               AND url LIKE '%animeverse.id/mp4/series_%'
+             ORDER BY (CASE WHEN anime_id = ?1 THEN 0 ELSE 1 END) ASC, ABS(episode_number - ?3) ASC
+             LIMIT 4`
           )
-          .bind(normCompact, title.toLowerCase().trim())
-          .first<{ id: number; title: string; title_alt?: string; source_urls_json?: string }>();
-      }
-    }
+          .bind(animeId, tKey, ep)
+      : rdb
+          .prepare(
+            `SELECT anime_id, episode_number, url, quality, hoster, provider, container, referer
+             FROM episode_hosters
+             WHERE is_live = 1
+               AND (title_key = ?1 OR title_alt_key = ?1)
+               AND url LIKE '%animeverse.id/mp4/series_%'
+             ORDER BY ABS(episode_number - ?2) ASC
+             LIMIT 4`
+          )
+          .bind(tKey, ep);
 
-    const sourceUrls: Record<string, string> = {};
-    if (row?.source_urls_json && row.source_urls_json.trim().startsWith('{')) {
-      try {
-        Object.assign(sourceUrls, JSON.parse(row.source_urls_json));
-      } catch {}
-    }
-    const resolvedId = row?.id ?? animeId ?? 0;
-    const patch = resolvedId > 0 ? CURATED_PATCH_MAP.get(resolvedId) : undefined;
-    if (patch?.source_urls) {
-      Object.assign(sourceUrls, patch.source_urls);
-    }
+    const { results } = await query.all<{
+      anime_id: number;
+      episode_number: number;
+      url: string;
+      quality: string;
+      hoster: string;
+      provider: string;
+      container: string;
+      referer: string;
+    }>();
+    if (!results || results.length === 0) return { direct, hints };
 
-    const ylSeriesUrl = typeof sourceUrls.ylnime === 'string' && sourceUrls.ylnime.startsWith('https://')
-      ? sourceUrls.ylnime.trim()
-      : '';
-    if (ylSeriesUrl) {
-      let seriesHtml = await fetchEdgeHtml(ylSeriesUrl, 'https://ylnime.com/', 1800);
-      let usedSeriesUrl = ylSeriesUrl;
-      const findYlEpUrl = (html: string): string | null => {
-        const re = /<a\b[^>]*\bhref=(["'])([^"']*episode=[^"']+)\1[^>]*>([\s\S]*?)<\/a>/gi;
-        let m: RegExpExecArray | null;
-        const allLinks: string[] = [];
-        while ((m = re.exec(html)) !== null) {
-          const rawHref = m[2].trim().replace(/&amp;/g, '&');
-          const full = rawHref.startsWith('http')
-            ? rawHref
-            : rawHref.startsWith('?')
-              ? `https://ylnime.com/index.php${rawHref}`
-              : `https://ylnime.com/${rawHref.replace(/^\/+/, '')}`;
-          if (!allLinks.includes(full)) allLinks.push(full);
-          const text = m[3].replace(/<[^>]+>/g, ' ').trim();
-          const num = extractEpisodeNumberOnEdge(text, full);
-          if (num === ep) return full;
-        }
-        if (ep === 1 && allLinks.length === 1) return allLinks[0];
-        return null;
-      };
-
-      let epUrl = seriesHtml ? findYlEpUrl(seriesHtml) : null;
-      if (!epUrl) {
-        const altSeriesUrl = /(?:%2f|\/)+$/i.test(ylSeriesUrl)
-          ? ylSeriesUrl.replace(/(?:%2f|\/)+$/i, '')
-          : `${ylSeriesUrl}%2F`;
-        if (altSeriesUrl !== ylSeriesUrl) {
-          const altHtml = await fetchEdgeHtml(altSeriesUrl, 'https://ylnime.com/', 1600);
-          if (altHtml) {
-            const altEp = findYlEpUrl(altHtml);
-            if (altEp) {
-              epUrl = altEp;
-              usedSeriesUrl = altSeriesUrl;
-              seriesHtml = altHtml;
-            }
-          }
-        }
-      }
-
-      if (epUrl) {
-        const baseEpUrl = epUrl.replace(/[?&]reso=[^&#]+/gi, '');
-        const sep = baseEpUrl.includes('?') ? '&' : '?';
-        const epHtml1080 = await fetchEdgeHtml(`${baseEpUrl}${sep}reso=1080p`, usedSeriesUrl, 1800);
-        if (epHtml1080) {
-          const no1080 = /1080p tidak tersedia/i.test(epHtml1080);
-          const primaryDefaultQ = no1080 ? '720p' : '1080p';
-          const resoTabs = parseYlnimeEpisodeHtmlOnEdge(
-            epHtml1080,
-            `${baseEpUrl}${sep}reso=${primaryDefaultQ}`,
-            primaryDefaultQ,
-            direct,
-            hints,
-            seenDirect,
-            seenHint
-          );
-          const coveredQuals = new Set([...direct.map((d) => d.quality), ...hints.map((h) => h.quality)]);
-          const missingResos: Array<'1080p' | '720p' | '480p'> = (['720p', '480p'] as const).filter(
-            (rq) => !coveredQuals.has(rq) && (resoTabs.has(rq) || coveredQuals.size <= 1)
-          );
-          if (missingResos.length > 0) {
-            await Promise.allSettled(
-              missingResos.map(async (rq) => {
-                const targetTabUrl = resoTabs.get(rq) || `${baseEpUrl}${sep}reso=${rq}`;
-                const tabHtml = await fetchEdgeHtml(targetTabUrl, usedSeriesUrl, 1200);
-                if (tabHtml) {
-                  parseYlnimeEpisodeHtmlOnEdge(tabHtml, targetTabUrl, rq, direct, hints, seenDirect, seenHint);
-                }
-              })
-            );
-          }
+    const candidatePool: Array<{ quality: '1080p' | '720p' | '480p'; url: string; referer: string; animeId: number }> = [];
+    const seenUrls = new Set<string>();
+    for (const row of results.slice(0, 2)) {
+      const interpolated = interpolateS3AnimeverseCandidates(row.url, row.episode_number, ep, row.referer);
+      for (const cand of interpolated) {
+        if (!seenUrls.has(cand.url)) {
+          seenUrls.add(cand.url);
+          candidatePool.push({ ...cand, animeId: row.anime_id || animeId || 0 });
         }
       }
     }
+    if (candidatePool.length === 0) return { direct, hints };
 
-    // Simpan otomatis hasil panen multi-resolusi 480p-1080p ke D1 di latar belakang agar request berikutnya <80ms
-    if ((direct.length > 0 || hints.length > 0) && execCtx) {
-      const targetAnimeId = resolvedId;
-      const targetTitle = row?.title || title;
-      const targetTitleAlt = row?.title_alt || null;
+    const probeResults = await Promise.allSettled(
+      candidatePool.map(async (cand) => {
+        const alive = await probeS3VideoStreamOnEdge(cand.url, cand.referer, 650);
+        return alive ? cand : null;
+      })
+    );
+
+    let resolvedAnimeId = animeId || results[0]?.anime_id || 0;
+    for (const pr of probeResults) {
+      if (pr.status !== 'fulfilled' || !pr.value) continue;
+      const hit = pr.value;
+      if (hit.animeId > 0) resolvedAnimeId = hit.animeId;
+      direct.push({
+        source: 'ylnime',
+        quality: hit.quality,
+        hoster: 'Animeverse',
+        direct_url: hit.url,
+        referer: hit.referer,
+        supports_range: true,
+        container: 'MP4',
+        is_hls: false,
+      });
+      hints.push({
+        source: 'ylnime',
+        quality: hit.quality,
+        hoster: 'Animeverse',
+        raw_url: hit.url,
+        referer: hit.referer,
+        container: 'mp4',
+      });
+    }
+
+    if ((direct.length > 0 || hints.length > 0) && execCtx?.waitUntil) {
       execCtx.waitUntil(
         (async () => {
           const now = Math.floor(Date.now() / 1000);
@@ -719,9 +653,7 @@ async function resolveLiveFromSourceUrlsOnEdge(
                 .bind(key, JSON.stringify(hints.slice(0, 16)), now)
             );
           }
-          if (targetAnimeId > 0 && hints.length > 0) {
-            const tKey = normalizeTitleKey(targetTitle);
-            const tAltKey = targetTitleAlt ? normalizeTitleKey(targetTitleAlt) : null;
+          if (resolvedAnimeId > 0 && hints.length > 0) {
             for (const h of hints.slice(0, 12)) {
               stmts.push(
                 writeDb
@@ -736,15 +668,15 @@ async function resolveLiveFromSourceUrlsOnEdge(
                        last_verified_at = excluded.last_verified_at`
                   )
                   .bind(
-                    targetAnimeId,
+                    resolvedAnimeId,
                     ep,
                     tKey,
-                    tAltKey,
+                    tKey,
                     h.raw_url,
                     h.quality,
                     h.hoster,
                     h.source,
-                    (h.container || 'mp4').toLowerCase(),
+                    'mp4',
                     h.referer || '',
                     now
                   )
@@ -821,13 +753,16 @@ playRoutes.get(
     const mergedHints: StoredHint[] = [];
     const seenUrls = new Set<string>();
     for (const item of [...(curatedHosters ?? []), ...(indexedHosters ?? []), ...(hinted ?? [])]) {
+      if (!isPlayableHosterCandidate(item.hoster, item.raw_url)) continue;
       const dk = `${item.quality}|${item.raw_url}`;
       if (!seenUrls.has(dk)) {
         seenUrls.add(dk);
         mergedHints.push(item);
       }
     }
-    if (direct || mergedHints.length > 0) {
+
+    const promotedDirect = promoteDirectFromHints(mergedHints, direct);
+    if (promotedDirect.length > 0 || mergedHints.length > 0) {
       const hosterScores: Record<string, number> = {};
       for (const [hoster, st] of globalStats.entries()) {
         hosterScores[hoster] = Math.round(scoreAsnStat(st) * 1000) / 1000;
@@ -835,17 +770,24 @@ playRoutes.get(
       return c.json({
         status: 'ok',
         data: {
-          direct_candidates: rankByAsn(direct ?? [], q, globalStats),
+          direct_candidates: rankByAsn(promotedDirect, q, globalStats),
           client_extract_candidates: rankByAsn(mergedHints, q, globalStats),
           hoster_scores: hosterScores,
-          source: direct ? 'direct' : curatedHosters ? 'curated_hosters' : indexedHosters ? 'catalog_hosters' : 'hint',
+          source: direct
+            ? 'direct'
+            : promotedDirect.length > 0
+              ? 'promoted_direct'
+              : curatedHosters
+                ? 'curated_hosters'
+                : indexedHosters
+                  ? 'catalog_hosters'
+                  : 'hint',
         },
       });
     }
 
-    // 2) Jalur On-Demand Live Edge Resolver dari source_urls_json di D1 agar seluruh anime & episode
-    //    tetap mendapat kandidat direct & 480p-1080p dalam <1.5 detik meski belum diindeks cron.
-    const edgeLive = await resolveLiveFromSourceUrlsOnEdge(rdb, c.env.DB, title, ep, anime_id, c.executionCtx);
+    // 2) Jalur cepat Sibling Episode S3/CDN Interpolation (<650ms) untuk episode yang belum diindeks cron
+    const edgeLive = await resolveSiblingEpisodeOnEdge(rdb, c.env.DB, title, ep, anime_id, c.executionCtx);
     if (edgeLive.direct.length > 0 || edgeLive.hints.length > 0) {
       const hosterScores: Record<string, number> = {};
       for (const [hoster, st] of globalStats.entries()) {
@@ -857,7 +799,7 @@ playRoutes.get(
           direct_candidates: rankByAsn(edgeLive.direct, q, globalStats),
           client_extract_candidates: rankByAsn(edgeLive.hints, q, globalStats),
           hoster_scores: hosterScores,
-          source: 'edge_live_source_urls',
+          source: 'edge_sibling_s3',
         },
       });
     }
