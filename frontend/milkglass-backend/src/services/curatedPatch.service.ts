@@ -3,6 +3,7 @@ import p2 from '../../data/curated_catalog_patch_p2.json';
 import p3 from '../../data/curated_catalog_patch_p3.json';
 import p4 from '../../data/curated_catalog_patch_p4.json';
 import p5 from '../../data/curated_catalog_patch_p5.json';
+import p6 from '../../data/curated_catalog_patch_p6.json';
 
 const META_VERSION_KEY = 'curated_patch_version';
 const META_CURSOR_KEY = 'curated_patch_cursor';
@@ -28,7 +29,7 @@ interface CompactPatchRow {
   e?: number;
 }
 
-export const CURATED_PATCH_VERSION = 4;
+export const CURATED_PATCH_VERSION = 5;
 
 const rawRows: CompactPatchRow[] = [
   ...(p1 as CompactPatchRow[]),
@@ -36,6 +37,7 @@ const rawRows: CompactPatchRow[] = [
   ...(p3 as CompactPatchRow[]),
   ...(p4 as CompactPatchRow[]),
   ...(p5 as CompactPatchRow[]),
+  ...(p6 as CompactPatchRow[]),
 ];
 
 const validEntries: CuratedPatchEntry[] = rawRows
