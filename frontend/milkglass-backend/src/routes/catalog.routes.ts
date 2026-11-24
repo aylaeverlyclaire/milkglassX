@@ -9,7 +9,7 @@ import { recheckAfterSec } from '../services/sync-schedule';
 import { getSourceBaseUrls } from '../services/anilist.service';
 import { AppBindings } from '../index';
 import { readDb } from '../utils/db';
-import { CURATED_PATCH_MAP, CURATED_PATCH_VERSION, ensureCuratedCatalogPatchApplied } from '../services/curatedPatch.service';
+import { CURATED_EXCLUDED_IDS, CURATED_PATCH_MAP, CURATED_PATCH_VERSION, ensureCuratedCatalogPatchApplied } from '../services/curatedPatch.service';
 
 
 const ALLOWED_CATALOG_PROVIDERS = new Set(['ylnime', 'otakudesu']);
@@ -29,6 +29,16 @@ const LIST_COLUMNS = `id, mal_id, title, title_alt, score, type, status, schedul
                 genres_json, episodes_total, next_airing_at, next_airing_ep, source_urls_json`;
 
 const META_QUERY = `SELECT key, value FROM catalog_meta WHERE key IN ('last_import_at', 'last_full_import_at')`;
+
+function decodeHtmlEntities(input: unknown): unknown {
+  if (typeof input !== 'string' || !input.includes('&')) return input;
+  return input
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
 
 function shapeAnimeRow(
   row: Record<string, unknown>
@@ -57,24 +67,31 @@ function shapeAnimeRow(
       }
     } catch {}
   }
-  const rowId = Number(rest.id ?? 0);
+  const cleanedRest = {
+    ...rest,
+    title: decodeHtmlEntities(rest.title),
+    ...(rest.title_alt !== undefined ? { title_alt: decodeHtmlEntities(rest.title_alt) } : {}),
+  };
+  const rowId = Number(cleanedRest.id ?? 0);
   const patch = Number.isInteger(rowId) && rowId > 0 ? CURATED_PATCH_MAP.get(rowId) : undefined;
   if (patch) {
     const mergedUrls = { ...source_urls, ...(patch.source_urls ?? {}) };
     return {
-      ...rest,
-      type: patch.type || rest.type,
+      ...cleanedRest,
+      type: patch.type || cleanedRest.type,
       status: patch.status,
-      episodes_total: Math.max(Number(rest.episodes_total ?? 0), patch.episodes_total),
+      episodes_total: Math.max(Number(cleanedRest.episodes_total ?? 0), patch.episodes_total),
       genres,
       source_urls: mergedUrls,
     };
   }
-  return { ...rest, genres, source_urls };
+  return { ...cleanedRest, genres, source_urls };
 }
 
 function shapeRows(rows: Array<Record<string, unknown>> | undefined) {
-  return (rows ?? []).map((r) => shapeAnimeRow(r));
+  return (rows ?? [])
+    .filter((r) => !CURATED_EXCLUDED_IDS.has(Number(r.id ?? 0)))
+    .map((r) => shapeAnimeRow(r));
 }
 
 function readSyncMarker(rows: Array<{ key: string; value: string }> | undefined) {
