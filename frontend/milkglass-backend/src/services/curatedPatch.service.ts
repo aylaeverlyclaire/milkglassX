@@ -4,6 +4,8 @@ import p3 from '../../data/curated_catalog_patch_p3.json';
 import p4 from '../../data/curated_catalog_patch_p4.json';
 import p5 from '../../data/curated_catalog_patch_p5.json';
 import p6 from '../../data/curated_catalog_patch_p6.json';
+import p7 from '../../data/curated_catalog_patch_p7.json';
+import excludedIdsRaw from '../../data/curated_excluded_ids.json';
 
 const META_VERSION_KEY = 'curated_patch_version';
 const META_CURSOR_KEY = 'curated_patch_cursor';
@@ -27,9 +29,14 @@ interface CompactPatchRow {
   t?: string;
   s?: number;
   e?: number;
+  u?: Record<string, string>;
 }
 
-export const CURATED_PATCH_VERSION = 5;
+export const CURATED_PATCH_VERSION = 6;
+
+export const CURATED_EXCLUDED_IDS: ReadonlySet<number> = new Set(
+  (excludedIdsRaw as number[]).filter((id) => Number.isInteger(id) && id > 0)
+);
 
 const rawRows: CompactPatchRow[] = [
   ...(p1 as CompactPatchRow[]),
@@ -38,15 +45,17 @@ const rawRows: CompactPatchRow[] = [
   ...(p4 as CompactPatchRow[]),
   ...(p5 as CompactPatchRow[]),
   ...(p6 as CompactPatchRow[]),
+  ...(p7 as CompactPatchRow[]),
 ];
 
 const validEntries: CuratedPatchEntry[] = rawRows
-  .filter((r) => Boolean(r && Number.isInteger(r.id) && r.id > 0))
+  .filter((r) => Boolean(r && Number.isInteger(r.id) && r.id > 0 && !CURATED_EXCLUDED_IDS.has(r.id)))
   .map((r) => ({
     id: r.id,
     type: r.t || 'TV',
     status: Number.isInteger(r.s) ? Number(r.s) : 2,
     episodes_total: Number.isInteger(r.e) ? Number(r.e) : 0,
+    ...(r.u && typeof r.u === 'object' ? { source_urls: r.u } : {}),
   }));
 
 export const CURATED_PATCH_MAP: ReadonlyMap<number, CuratedPatchEntry> = new Map(
@@ -83,6 +92,15 @@ export async function ensureCuratedCatalogPatchApplied(db: D1Database): Promise<
     const nowSec = Math.floor(Date.now() / 1000);
 
     const stmts: D1PreparedStatement[] = [];
+    if (cursor === 0 && CURATED_EXCLUDED_IDS.size > 0) {
+      for (const excludedId of CURATED_EXCLUDED_IDS) {
+        stmts.push(
+          db
+            .prepare(`UPDATE animes SET has_live_source = 0, updated_at = ?1 WHERE id = ?2 AND has_live_source != 0`)
+            .bind(nowSec, excludedId)
+        );
+      }
+    }
     for (const entry of slice) {
       stmts.push(
         db
