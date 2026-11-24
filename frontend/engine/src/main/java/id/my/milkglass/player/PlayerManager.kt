@@ -282,6 +282,61 @@ class PlayerManager(
                 ?: activeStreamSession?.localHttpUrl
             if (!badDirectUrl.isNullOrBlank()) {
                 id.my.milkglass.source.DeadCandidateCache.markDead(badDirectUrl)
+                if (req != null && (friendly.reason == FailureReason.HTTP_403 || friendly.reason == FailureReason.NOT_FOUND || friendly.reason == FailureReason.TIMEOUT)) {
+                    val reportCode = when (friendly.reason) {
+                        FailureReason.HTTP_403 -> 403
+                        FailureReason.NOT_FOUND -> 404
+                        else -> 504
+                    }
+                    val searchTitle = req.romajiTitle.ifBlank { req.title }.trim()
+                    val epNum = resolver.extractEpisodeNumber(req.slug)
+                    if (searchTitle.length >= 2 && epNum >= 0) {
+                        resolver.reportDeadDirectUrl(searchTitle, epNum, badDirectUrl, reportCode)
+                    }
+                }
+            }
+            val currentSession = activeStreamSession
+            if (req != null && currentSession != null && (friendly.reason == FailureReason.CODEC || isTransportError)) {
+                val backup = selectNextFailoverCandidate(
+                    candidates = currentSession.candidates,
+                    failedUrl = badDirectUrl.orEmpty(),
+                    preferCompatibleContainer = friendly.reason == FailureReason.CODEC || req.preferCompatibleContainer
+                )
+                if (backup != null) {
+                    val remaining = reorderFailoverCandidates(currentSession.candidates, badDirectUrl.orEmpty(), backup)
+                    val backupHeaders = buildMap {
+                        currentSession.headers["User-Agent"]?.let { put("User-Agent", it) }
+                        if (!backup.referer.isNullOrBlank()) put("Referer", backup.referer)
+                        putAll(backup.extraHeaders)
+                    }
+                    val backupIsHls = backup.isHls || backup.container == MediaContainer.HLS
+                    activeStreamSession = currentSession.copy(
+                        localHttpUrl = backup.directUrl,
+                        activeResolution = backup.quality.label,
+                        resolvedSourceId = backup.source.id,
+                        resolvedHoster = backup.hoster,
+                        isHls = backupIsHls,
+                        headers = backupHeaders,
+                        candidates = remaining
+                    )
+                    _snapshot.update {
+                        if (it.sessionId != sid) it else it.copy(
+                            activeResolution = backup.quality.label,
+                            resolvedSourceId = backup.source.id,
+                            resolvedHoster = backup.hoster,
+                            error = null
+                        )
+                    }
+                    val resumeMs = getCurrentPosition().takeIf { it > 0L } ?: _snapshot.value.positionMs
+                    prepareMedia(
+                        mediaUrl = backup.directUrl,
+                        headers = backupHeaders,
+                        isHls = backupIsHls,
+                        startPositionMs = resumeMs,
+                        cacheKey = null
+                    )
+                    return
+                }
             }
             if (req != null && friendly.reason == FailureReason.CODEC && (!req.preferCompatibleContainer || req.urlRefreshAttempts < 1)) {
                 val keysToClear = activeCacheKeys.toList()
@@ -943,6 +998,32 @@ class PlayerManager(
     }
 
     companion object {
+        internal fun reorderFailoverCandidates(
+            candidates: List<id.my.milkglass.source.ResolvedMkvMedia>,
+            failedUrl: String,
+            chosenBackup: id.my.milkglass.source.ResolvedMkvMedia
+        ): List<id.my.milkglass.source.ResolvedMkvMedia> =
+            listOf(chosenBackup) + candidates.filterNot {
+                it.directUrl == failedUrl || it.directUrl == chosenBackup.directUrl
+            }
+
+        internal fun selectNextFailoverCandidate(
+            candidates: List<id.my.milkglass.source.ResolvedMkvMedia>,
+            failedUrl: String,
+            preferCompatibleContainer: Boolean
+        ): id.my.milkglass.source.ResolvedMkvMedia? {
+            val alive = candidates.filter { cand ->
+                cand.directUrl != failedUrl &&
+                    !id.my.milkglass.source.DeadCandidateCache.isDead(cand.directUrl)
+            }
+            if (alive.isEmpty()) return null
+            return if (preferCompatibleContainer) {
+                alive.firstOrNull { it.isHls || it.container == MediaContainer.MP4 || it.container == MediaContainer.HLS }
+                    ?: alive.first()
+            } else {
+                alive.first()
+            }
+        }
         private const val DEFAULT_USER_AGENT = "Milkglass/1.0 (Android; Media3)"
 
         private val assTagRegex = Regex("\\u007B[^\\u007D]*\\u007D")

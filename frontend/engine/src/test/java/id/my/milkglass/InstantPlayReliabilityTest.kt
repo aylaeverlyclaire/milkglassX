@@ -353,4 +353,149 @@ class InstantPlayReliabilityTest {
         )
         assertEquals(0, StreamingFirstGuards.zeroWebViewTier(s3Cand))
     }
+
+    @Test
+    fun titleMatcherFoldsUnicodeDiacriticsAndMacronsWithoutSplittingWords() {
+        assertTrue(TitleMatcher.score("Kabushikigaisha Magi-Lumière", "Kabushikigaisha Magi-Lumiere") >= 0.90)
+        assertTrue(TitleMatcher.score("Ōsama Ranking", "Osama Ranking") >= 0.90)
+        assertTrue(TitleMatcher.score("Pokémon", "Pokemon") >= 0.90)
+        val queries = TitleMatcher.searchQueries("Kabushikigaisha Magi-Lumière")
+        assertTrue(queries.any { it.equals("Kabushikigaisha Magi Lumiere", ignoreCase = true) })
+    }
+
+    @Test
+    fun streamResolverDetectsEmbedCandidatesFromServerSplitPlane() {
+        assertTrue(id.my.milkglass.resolver.StreamResolver.isEmbedCandidateUrl("https://desustream.info/dstream/odstream/v2/index.php?id=abc", "odstream"))
+        assertTrue(id.my.milkglass.resolver.StreamResolver.isEmbedCandidateUrl("https://www.blogger.com/video.g?token=xyz", "Blogger"))
+        assertTrue(id.my.milkglass.resolver.StreamResolver.isEmbedCandidateUrl("https://ylnime.com/index.php?series=spy&episode=1", "YLnimePlayer"))
+        assertFalse(id.my.milkglass.resolver.StreamResolver.isEmbedCandidateUrl("https://pixeldrain.com/u/abc123", "Pixeldrain"))
+        assertFalse(id.my.milkglass.resolver.StreamResolver.isEmbedCandidateUrl("https://s3.animeverse.id/ro/ep1.mp4", "Animeverse"))
+    }
+
+    @Test
+    fun linkUnshortenerFollowsDesustreamSafelinkRedirectsInsteadOfTreatingThemAsTerminal() {
+        val unshortener = id.my.milkglass.extractor.LinkUnshortener(IsolatedHttpClients(null))
+        assertFalse(unshortener.isTerminalHoster("https://link.desustream.com/?id=d2JkL0hDRWxReWo4YUlhaDBY"))
+        assertFalse(unshortener.isTerminalHoster("https://desustream.com/safelink/link/?id=abc"))
+        assertTrue(unshortener.isTerminalHoster("https://desustream.net/dstream/odcdn/?id=abc"))
+        assertTrue(unshortener.isTerminalHoster("https://pixeldrain.com/u/QBiBZBkn"))
+        assertTrue(unshortener.isTerminalHoster("https://filedon.co/view/mi90XWN9Zq"))
+    }
+
+    @Test
+    fun playerManagerSelectsInstantFailoverCandidateAndPrefersCompatibleContainerOnCodecError() {
+        id.my.milkglass.source.DeadCandidateCache.clear()
+        val mkv1 = id.my.milkglass.source.ResolvedMkvMedia(
+            SourcePriority.OTAKUDESU, MkvQuality.P1080, "Pixeldrain",
+            "https://pixeldrain.com/api/file/broken1", null, true, container = MediaContainer.MKV
+        )
+        val mkv2 = id.my.milkglass.source.ResolvedMkvMedia(
+            SourcePriority.OTAKUDESU, MkvQuality.P1080, "ODFiles",
+            "https://cdn.r2.example/ep1.mkv", null, true, container = MediaContainer.MKV
+        )
+        val mp4 = id.my.milkglass.source.ResolvedMkvMedia(
+            SourcePriority.YLNIME, MkvQuality.P720, "Animeverse",
+            "https://s3.animeverse.id/ro/ep1.mp4", null, true, container = MediaContainer.MP4
+        )
+        val all = listOf(mkv1, mkv2, mp4)
+        val nextTransport = id.my.milkglass.player.PlayerManager.selectNextFailoverCandidate(all, mkv1.directUrl, preferCompatibleContainer = false)
+        assertEquals(mkv2.directUrl, nextTransport?.directUrl)
+        val nextCodec = id.my.milkglass.player.PlayerManager.selectNextFailoverCandidate(all, mkv1.directUrl, preferCompatibleContainer = true)
+        assertEquals(mp4.directUrl, nextCodec?.directUrl)
+    }
+
+    @Test
+    fun downloadModePrioritizesDirectMp4HostersAheadOfHlsStreamEmbeds() {
+        val resolver = MkvCascadeResolver(clients = IsolatedHttpClients(null), providers = emptyList())
+        val hlsEmbed = RawMkvCandidate(
+            SourcePriority.OTAKUDESU, MkvQuality.P720, "odstream",
+            "https://desustream.info/dstream/odstream/v2/index.php?id=abc",
+            "https://otakudesu.blog/", null, false, MediaContainer.HLS, isStreamEmbed = true
+        )
+        val mp4Direct = RawMkvCandidate(
+            SourcePriority.OTAKUDESU, MkvQuality.P720, "Pixeldrain",
+            "https://pixeldrain.com/u/fastmp4",
+            "https://otakudesu.blog/", null, false, MediaContainer.MP4, isStreamEmbed = false
+        )
+        val ranked = resolver.rankCandidates(
+            listOf(hlsEmbed, mp4Direct),
+            MkvQuality.ALL_DESC,
+            allowBatchFallback = false,
+            preferCompatibleContainer = true,
+            preferStreamingEmbeds = false
+        )
+        assertEquals(mp4Direct.rawUrl, ranked.first().rawUrl)
+    }
+
+    @Test
+    fun sourceAvailabilityIndexFindsTitleDespiteSingleTokenSpellingMismatch() {
+        val index = id.my.milkglass.source.SourceAvailabilityIndex(null)
+        val entries = listOf(
+            id.my.milkglass.source.IndexedAnimeEntry(
+                SourcePriority.OTAKUDESU,
+                "Judgement Day",
+                "judgement day",
+                TitleMatcher.tokenize("Judgement Day"),
+                "https://otakudesu.blog/anime/judgement-day/"
+            ),
+            id.my.milkglass.source.IndexedAnimeEntry(
+                SourcePriority.OTAKUDESU,
+                "Date A Live Movie: Mayuri Judgment",
+                "date a live movie mayuri judgment",
+                TitleMatcher.tokenize("Date A Live Movie: Mayuri Judgment"),
+                "https://otakudesu.blog/anime/dal-mayuri-judgment/"
+            )
+        )
+        index.loadEntriesForTest(entries)
+        // Gunakan isAvailable / lookupBestUrl tanpa terblokir oleh bucket terkecil "judgement"
+        assertTrue(index.isAvailable(listOf("Date A Live Movie: Mayuri Judgement")))
+    }
+
+    @Test
+    fun remoteRulesStorePreservesDigitPrefixedAjaxActionTokens() {
+        val manifest = """
+            {
+              "schema_version": 1,
+              "sources": {
+                "otakudesu": {
+                  "base_url": "https://otakudesu.blog",
+                  "search_path": "/?s={q}&post_type=anime",
+                  "selectors": {
+                    "search_item": "ul.chivsrc > li",
+                    "ajax_nonce_action": "aa1208d27f29ca340c92c66d1926f13f",
+                    "ajax_mirror_action": "2a3505c93b0035d3f455df82bf976b84"
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+        val parsed = id.my.milkglass.source.RemoteRulesStore.parseManifest(manifest)
+        val otaku = parsed[SourcePriority.OTAKUDESU]
+        assertNotNull(otaku)
+        assertEquals("2a3505c93b0035d3f455df82bf976b84", otaku!!.selectors["ajax_mirror_action"])
+        assertEquals("aa1208d27f29ca340c92c66d1926f13f", otaku.selectors["ajax_nonce_action"])
+    }
+
+    @Test
+    fun playerManagerPlacesChosenBackupFirstInRemainingFailoverList() {
+        id.my.milkglass.source.DeadCandidateCache.clear()
+        val mkv1 = id.my.milkglass.source.ResolvedMkvMedia(
+            SourcePriority.OTAKUDESU, MkvQuality.P1080, "Pixeldrain",
+            "https://pixeldrain.com/api/file/broken1", null, true, container = MediaContainer.MKV
+        )
+        val mkv2 = id.my.milkglass.source.ResolvedMkvMedia(
+            SourcePriority.OTAKUDESU, MkvQuality.P1080, "ODFiles",
+            "https://cdn.r2.example/ep1.mkv", null, true, container = MediaContainer.MKV
+        )
+        val mp4 = id.my.milkglass.source.ResolvedMkvMedia(
+            SourcePriority.YLNIME, MkvQuality.P720, "Animeverse",
+            "https://s3.animeverse.id/ro/ep1.mp4", null, true, container = MediaContainer.MP4
+        )
+        val reordered = id.my.milkglass.player.PlayerManager.reorderFailoverCandidates(
+            listOf(mkv1, mkv2, mp4),
+            mkv1.directUrl,
+            mp4
+        )
+        assertEquals(listOf(mp4.directUrl, mkv2.directUrl), reordered.map { it.directUrl })
+    }
 }
