@@ -851,7 +851,7 @@ class MkvCascadeResolver(
         preferStreamingEmbeds: Boolean,
         abandoned: AtomicBoolean? = null
     ): ProviderResolvedOutcome {
-        val fetched = fetchFromProvider(provider, animeTitle, episodeNumber, abandoned)
+        val fetched = fetchFromProvider(provider, animeTitle, episodeNumber, abandoned, qualityOrder.toCollection(LinkedHashSet()))
         if (fetched.error != null) {
             return ProviderResolvedOutcome(provider.priority, cfHost = fetched.cfHost, error = fetched.error)
         }
@@ -1020,11 +1020,12 @@ class MkvCascadeResolver(
         provider: MkvSourceProvider,
         animeTitle: String,
         episodeNumber: Int,
-        abandoned: AtomicBoolean? = null
+        abandoned: AtomicBoolean? = null,
+        targetQualities: Set<MkvQuality> = MkvQuality.ALL_DESC.toSet()
     ): ProviderFetchOutcome {
         val t0 = System.currentTimeMillis()
         return try {
-            val list = provider.findEpisodeMkvCandidates(animeTitle, episodeNumber, MkvQuality.ALL_DESC.toSet())
+            val list = provider.findEpisodeMkvCandidates(animeTitle, episodeNumber, targetQualities)
             if (list.isNotEmpty()) {
                 EndpointHealthScorer.recordSourceSuccess(provider.priority.id, System.currentTimeMillis() - t0)
             }

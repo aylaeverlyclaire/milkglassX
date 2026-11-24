@@ -10,6 +10,12 @@ import org.jsoup.nodes.Document
 import java.net.URLEncoder
 import java.util.Base64
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 abstract class BaseHtmlMkvProvider(
     protected val clients: IsolatedHttpClients,
@@ -280,7 +286,9 @@ class OtakudesuSourceProvider(
         if (!StreamingFirstGuards.shouldFetchOtakudesuMirrors(out, mirrorLinks, targetQualities, deadOrAdMirrorTokens)) {
             return out
         }
-        val nonce = runCatching {
+        val nowMs = System.currentTimeMillis()
+        val cachedNonce = nonceCache[root]?.takeIf { it.first > nowMs }?.second
+        val nonce = cachedNonce ?: runCatching {
             val nonceAction = RemoteRulesStore.globalSelectorFor(SourcePriority.OTAKUDESU, "ajax_nonce_action", "aa1208d27f29ca340c92c66d1926f13f")
             val form = okhttp3.FormBody.Builder().add("action", nonceAction).build()
             val req = Request.Builder()
@@ -293,7 +301,10 @@ class OtakudesuSourceProvider(
                 if (!resp.isSuccessful) return@use null
                 JSONObject(resp.body?.string().orEmpty()).optString("data").takeIf { it.isNotBlank() }
             }
-        }.getOrNull() ?: return out
+        }.getOrNull()?.also { fresh ->
+            if (nonceCache.size > 16) nonceCache.clear()
+            nonceCache[root] = (System.currentTimeMillis() + NONCE_TTL_MS) to fresh
+        } ?: return out
 
         // Prioritaskan resolusi tertinggi yang diminta (1080p/720p dulu), lalu mirror sehat & cepat
         // (odstream -> odcdn -> filedon -> otakuwatch), dan fail-fast skip mirror rusak/iklan.
@@ -321,8 +332,11 @@ class OtakudesuSourceProvider(
                 }
             }
         )
+        val slotsNeeded = (3 - out.size).coerceAtLeast(1)
+        data class MirrorTask(val label: String, val quality: MkvQuality, val id: String, val i: String, val q: String)
+        val tasks = mutableListOf<MirrorTask>()
         for (a in rankedMirrors) {
-            if (out.size >= 3) break
+            if (tasks.size >= slotsNeeded) break
             val label = a.text().trim()
             val lowLabel = label.lowercase(Locale.ROOT)
             if (HosterFilter.isBlacklisted(label, label) || deadOrAdMirrorTokens.any { lowLabel.contains(it) }) continue
@@ -330,52 +344,90 @@ class OtakudesuSourceProvider(
             val quality = MkvQuality.fromText(ulClass) ?: MkvQuality.P720
             if (quality !in targetQualities) continue
             val payload = runCatching {
-                val decoded = String(android.util.Base64.decode(a.attr("data-content"), android.util.Base64.DEFAULT))
+                val decoded = String(Base64.getDecoder().decode(a.attr("data-content").trim()))
                 JSONObject(decoded)
             }.getOrNull() ?: continue
             val id = payload.optString("id")
             val i = payload.optString("i")
             val q = payload.optString("q")
             if (id.isBlank() || q.isBlank()) continue
-            val embedSrc = runCatching {
-                val form = okhttp3.FormBody.Builder()
-                    .add("id", id)
-                    .add("i", i)
-                    .add("q", q)
-                    .add("nonce", nonce)
-                    .add("action", RemoteRulesStore.globalSelectorFor(SourcePriority.OTAKUDESU, "ajax_mirror_action", "2a3505c93b0035d3f455df82bf976b84"))
-                    .build()
-                val req = Request.Builder()
-                    .url("$root/wp-admin/admin-ajax.php")
-                    .post(form)
-                    .header("Referer", epUrl)
-                    .header("X-Requested-With", "XMLHttpRequest")
-                    .build()
-                clients.sourceClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use null
-                    val dataB64 = JSONObject(resp.body?.string().orEmpty()).optString("data")
-                    if (dataB64.isBlank()) return@use null
-                    val iframeHtml = String(android.util.Base64.decode(dataB64, android.util.Base64.DEFAULT))
-                    Jsoup.parse(iframeHtml, root).selectFirst("iframe[src]")?.absUrl("src")?.trim()
-                }
-            }.getOrNull()
-            if (!embedSrc.isNullOrBlank() && embedSrc.startsWith("http") &&
-                !HosterFilter.isBlacklisted(label, embedSrc) && seenUrls.add(embedSrc)
-            ) {
-                out.add(
-                    RawMkvCandidate(
-                        source = priority,
-                        quality = quality,
-                        hosterLabel = label.ifBlank { "StreamMirror" },
-                        rawUrl = embedSrc,
-                        pageReferer = epUrl,
-                        container = MediaContainer.MP4,
-                        isStreamEmbed = true
-                    )
+            tasks.add(MirrorTask(label, quality, id, i, q))
+        }
+        if (tasks.isEmpty()) return out
+
+        val mirrorAction = RemoteRulesStore.globalSelectorFor(SourcePriority.OTAKUDESU, "ajax_mirror_action", "2a3505c93b0035d3f455df82bf976b84")
+        val cs = ExecutorCompletionService<RawMkvCandidate?>(mirrorAjaxPool)
+        val futures = ArrayList<Future<RawMkvCandidate?>>(tasks.size)
+        try {
+            for (task in tasks) {
+                futures.add(
+                    cs.submit {
+                        val embedSrc = runCatching {
+                            val form = okhttp3.FormBody.Builder()
+                                .add("id", task.id)
+                                .add("i", task.i)
+                                .add("q", task.q)
+                                .add("nonce", nonce)
+                                .add("action", mirrorAction)
+                                .build()
+                            val req = Request.Builder()
+                                .url("$root/wp-admin/admin-ajax.php")
+                                .post(form)
+                                .header("Referer", epUrl)
+                                .header("X-Requested-With", "XMLHttpRequest")
+                                .build()
+                            clients.sourceClient.newCall(req).execute().use { resp ->
+                                if (!resp.isSuccessful) return@use null
+                                val dataB64 = JSONObject(resp.body?.string().orEmpty()).optString("data")
+                                if (dataB64.isBlank()) return@use null
+                                val iframeHtml = String(Base64.getDecoder().decode(dataB64.trim()))
+                                Jsoup.parse(iframeHtml, root).selectFirst("iframe[src]")?.absUrl("src")?.trim()
+                            }
+                        }.getOrNull()
+                        if (!embedSrc.isNullOrBlank() && embedSrc.startsWith("http") &&
+                            !HosterFilter.isBlacklisted(task.label, embedSrc)
+                        ) {
+                            RawMkvCandidate(
+                                source = priority,
+                                quality = task.quality,
+                                hosterLabel = task.label.ifBlank { "StreamMirror" },
+                                rawUrl = embedSrc,
+                                pageReferer = epUrl,
+                                container = MediaContainer.MP4,
+                                isStreamEmbed = true
+                            )
+                        } else null
+                    }
                 )
             }
+            val deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2_200L)
+            repeat(futures.size) {
+                if (out.size >= 3 || Thread.currentThread().isInterrupted) return@repeat
+                val remNs = deadlineNs - System.nanoTime()
+                if (remNs <= 0L) return@repeat
+                val fut = runCatching { cs.poll(remNs, TimeUnit.NANOSECONDS) }.getOrNull() ?: return@repeat
+                val cand = runCatching { fut.get() }.getOrNull()
+                if (cand != null && seenUrls.add(cand.rawUrl)) {
+                    out.add(cand)
+                }
+            }
+        } finally {
+            futures.forEach { if (!it.isDone) it.cancel(true) }
         }
         return out
+    }
+
+    companion object {
+        private const val NONCE_TTL_MS = 15L * 60L * 1000L
+        private val nonceCache = ConcurrentHashMap<String, Pair<Long, String>>()
+        private val mirrorSeq = AtomicInteger(1)
+        private val mirrorAjaxPool = Executors.newFixedThreadPool(4) { r ->
+            Thread(r, "milkglass-mirror-${mirrorSeq.getAndIncrement()}").apply { isDaemon = true }
+        }
+
+        internal fun clearNonceCacheForTest() {
+            nonceCache.clear()
+        }
     }
 }
 
@@ -478,12 +530,7 @@ class YlnimeSourceProvider(
             }?.absUrl("href") ?: return emptyList()
         }
 
-        val targetReso = when {
-            MkvQuality.P1080 in targetQualities -> "1080p"
-            MkvQuality.P720 in targetQualities -> "720p"
-            MkvQuality.P480 in targetQualities -> "480p"
-            else -> "360p"
-        }
+        val targetReso = targetQualities.firstOrNull()?.label ?: "720p"
         val epUrlWithReso = if (epUrl.contains("reso=")) epUrl else {
             val sep = if (epUrl.contains("?")) "&" else "?"
             "$epUrl${sep}reso=$targetReso"
