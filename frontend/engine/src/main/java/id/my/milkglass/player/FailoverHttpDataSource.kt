@@ -9,12 +9,14 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import id.my.milkglass.download.EndpointHealthScorer
+import id.my.milkglass.source.DeadCandidateCache
 import id.my.milkglass.source.ResolvedMkvMedia
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 @UnstableApi
@@ -24,6 +26,7 @@ class FailoverHttpDataSource(
     private val candidates: List<ResolvedMkvMedia>,
     private val defaultUserAgent: String,
     private val stickyIndex: AtomicInteger,
+    private val hasLockedStreamBytes: AtomicBoolean,
     private val onCandidateFailure: ((ResolvedMkvMedia, Int) -> Unit)? = null
 ) : BaseDataSource(true) {
 
@@ -34,6 +37,7 @@ class FailoverHttpDataSource(
         private val onCandidateFailure: ((ResolvedMkvMedia, Int) -> Unit)? = null
     ) : DataSource.Factory {
         private val sharedStickyIndex = AtomicInteger(0)
+        private val sharedLockedBytes = AtomicBoolean(false)
 
         /**
          * Menolak HTTP 200 OK pada permintaan Range: bytes=N- (N > 0) sebelum OkHttpDataSource
@@ -73,6 +77,7 @@ class FailoverHttpDataSource(
                 candidates = candidates,
                 defaultUserAgent = defaultUserAgent,
                 stickyIndex = sharedStickyIndex,
+                hasLockedStreamBytes = sharedLockedBytes,
                 onCandidateFailure = onCandidateFailure
             )
         }
@@ -86,8 +91,9 @@ class FailoverHttpDataSource(
             throw IOException("Tidak ada kandidat stream untuk FailoverHttpDataSource")
         }
         val startIdx = stickyIndex.get().coerceIn(0, candidates.lastIndex)
-        // Kunci ke 1 kandidat saat offset > 0 agar byte file dari hoster berbeda tidak mencemari SimpleCache.
-        val orderedIndices = if (dataSpec.position > 0L) {
+        // Kunci ke 1 kandidat hanya jika stream sudah benar-benar berjalan di offset > 0 dan sudah membaca frame/payload;
+        // jika gagal pada probe awal (position == 0 atau moov/Cues tail probe sebelum stream terkunci), izinkan failover penuh.
+        val orderedIndices = if (dataSpec.position > 0L && hasLockedStreamBytes.get()) {
             listOf(startIdx)
         } else {
             (0 until candidates.size).map { (startIdx + it) % candidates.size }
@@ -139,6 +145,8 @@ class FailoverHttpDataSource(
                 return length
             } catch (e: HttpDataSource.InvalidResponseCodeException) {
                 runCatching { delegate.close() }
+                DeadCandidateCache.markDead(cand.directUrl)
+                DeadCandidateCache.markDead(cand.rawUrl)
                 EndpointHealthScorer.recordFailure(cand.hoster)
                 onCandidateFailure?.invoke(cand, e.responseCode)
                 lastError = e
@@ -147,6 +155,8 @@ class FailoverHttpDataSource(
                 if (Thread.currentThread().isInterrupted || e.message.equals("Canceled", ignoreCase = true)) {
                     throw e
                 }
+                DeadCandidateCache.markDead(cand.directUrl)
+                DeadCandidateCache.markDead(cand.rawUrl)
                 EndpointHealthScorer.recordFailure(cand.hoster)
                 onCandidateFailure?.invoke(cand, 0)
                 lastError = e
@@ -158,7 +168,10 @@ class FailoverHttpDataSource(
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         val src = activeSource ?: return C.RESULT_END_OF_INPUT
         val read = src.read(buffer, offset, length)
-        if (read > 0) bytesTransferred(read)
+        if (read > 0) {
+            hasLockedStreamBytes.set(true)
+            bytesTransferred(read)
+        }
         return read
     }
 

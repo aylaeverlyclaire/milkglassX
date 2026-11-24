@@ -489,8 +489,13 @@ class EngineRuntime private constructor(private val appContext: Context) {
                 if (body.length < 128 || StreamingFirstGuards.isWafBlockedHtml(body)) null else body
             }
         }.getOrNull()
-        if (direct != null) return direct
-        return runCatching { fetchRemoteHtml(seriesUrl) }.getOrNull()
+        if (direct != null) {
+            id.my.milkglass.source.BaseHtmlMkvProvider.seedSeriesHtmlCache(seriesUrl, direct)
+            return direct
+        }
+        return runCatching { fetchRemoteHtml(seriesUrl) }.getOrNull()?.also {
+            id.my.milkglass.source.BaseHtmlMkvProvider.seedSeriesHtmlCache(seriesUrl, it)
+        }
     }
 
     fun prefetchEpisode(
@@ -528,6 +533,9 @@ class EngineRuntime private constructor(private val appContext: Context) {
                     if (cachedSession != null) {
                         PlayerManager.prebufferEpisode(appContext, cachedSession, slug, headBytes = prebufferHeadBytes)
                     }
+                }
+                if (ok && latestPrefetchKey == key) {
+                    runCatching { cascadeResolver.warmEpisodeCandidates(searchTitle, episode + 1) }
                 }
             } catch (ce: CancellationException) {
                 throw ce

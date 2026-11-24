@@ -5,7 +5,7 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Fase 2 (Non-blocking): Konsolidasi resolusi dan kandidat MP4 lintas source di latar belakang.
+ * Fase 2 (Non-blocking): Konsolidasi resolusi 480p-1080p dan kandidat MP4 lintas source di latar belakang.
  * Dipanggil setelah pemutaran pertama (first-playable-wins) sudah berjalan agar tidak menghambat TTFF.
  */
 class ResolutionConsolidator(
@@ -20,7 +20,6 @@ class ResolutionConsolidator(
 
     private val cache = ConcurrentHashMap<String, ConsolidatedEntry>()
 
-    // Hanya Otakudesu dan YLnime.
     private val providers: List<MkvSourceProvider> by lazy {
         listOf(
             OtakudesuSourceProvider(
@@ -62,23 +61,27 @@ class ResolutionConsolidator(
                 (!it.isStreamEmbed || it.rawUrl.contains(".mp4", ignoreCase = true)) &&
                 (it.container == MediaContainer.MP4 || it.rawUrl.contains(".mp4", ignoreCase = true))
         }
-        if (coveredQualities.containsAll(MkvQuality.ALL_DESC) && hasMp4) return
+        val coreQualities = setOf(MkvQuality.P1080, MkvQuality.P720, MkvQuality.P480)
+        if (coveredQualities.containsAll(coreQualities) && hasMp4) return
 
+        // Jangan mengecualikan provider aktif jika 480p/720p/1080p belum lengkap dan provider aktif baru di-query untuk 1 resolusi
         val alreadyChecked = existing.map { it.source.id }.toMutableSet().apply {
-            if (!excludeSourceId.isNullOrBlank()) add(excludeSourceId)
+            if (!excludeSourceId.isNullOrBlank() && coveredQualities.containsAll(coreQualities)) {
+                add(excludeSourceId)
+            }
         }
         val candidatesToCheck = providers.filter { provider ->
             provider.priority.id !in alreadyChecked && !SourceCircuitBreaker.isOpen(provider.priority)
-        }.take(3)
+        }.sortedBy { p -> if (p.priority.id == excludeSourceId) 1 else 0 }.take(2)
 
         val mergedMap = LinkedHashMap<String, RawMkvCandidate>()
-        for (c in existing) mergedMap.putIfAbsent(c.rawUrl, c)
+        for (c in existing) mergedMap.putIfAbsent("${c.quality.label}|${c.rawUrl}", c)
 
         for (provider in candidatesToCheck) {
             if (Thread.currentThread().isInterrupted) return
-            if (coveredQualities.containsAll(MkvQuality.ALL_DESC) && hasMp4) break
+            if (coveredQualities.containsAll(coreQualities) && hasMp4) break
             val found = runCatching {
-                provider.findEpisodeMkvCandidates(animeTitle, episodeNumber)
+                provider.findEpisodeMkvCandidates(animeTitle, episodeNumber, MkvQuality.ALL_DESC.toSet())
             }.getOrNull().orEmpty().filterNot { it.isBatchArchive }
             if (found.isEmpty()) continue
             SourceCircuitBreaker.recordSuccess(provider.priority)
@@ -88,8 +91,9 @@ class ResolutionConsolidator(
                 (!it.isStreamEmbed || it.rawUrl.contains(".mp4", ignoreCase = true)) &&
                     (it.container == MediaContainer.MP4 || it.rawUrl.contains(".mp4", ignoreCase = true))
             }
-            if (newQualities.isNotEmpty() || addsMp4) {
-                for (c in found) mergedMap.putIfAbsent(c.rawUrl, c)
+            val addsBackupSource = found.any { "${it.quality.label}|${it.rawUrl}" !in mergedMap }
+            if (newQualities.isNotEmpty() || addsMp4 || addsBackupSource) {
+                for (c in found) mergedMap.putIfAbsent("${c.quality.label}|${c.rawUrl}", c)
                 val mergedList = mergedMap.values.toList()
                 if (cache.size > 64) cache.clear()
                 cache[cacheKey] = ConsolidatedEntry(System.currentTimeMillis(), mergedList)

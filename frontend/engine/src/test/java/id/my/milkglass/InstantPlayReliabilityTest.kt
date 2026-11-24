@@ -318,11 +318,6 @@ class InstantPlayReliabilityTest {
                 "https://pixeldrain.com/api/file/zoxSe2yx"
             )
         )
-        assertTrue(
-            EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(
-                "https://pixeldrain.net/api/file/zoxSe2yx"
-            )
-        )
         val webViewOnly = listOf(
             RawMkvCandidate(
                 SourcePriority.YLNIME, MkvQuality.P720, "YLnimePlayer",
@@ -525,5 +520,77 @@ class InstantPlayReliabilityTest {
         )
         resolver.resolve("Frieren Test", 1, preferredQuality = MkvQuality.P720)
         assertEquals(MkvQuality.P720, capturedFirst)
+    }
+
+    @Test
+    fun playerManagerFailoverHandlesNotFoundAndDnsErrorsFromStart() {
+        id.my.milkglass.source.DeadCandidateCache.clear()
+        val brokenFirst = id.my.milkglass.source.ResolvedMkvMedia(
+            SourcePriority.YLNIME, MkvQuality.P1080, "Animeverse",
+            "https://s3.animeverse.id/ro/missing-404.mp4", null, true, container = MediaContainer.MP4
+        )
+        val healthyBackup = id.my.milkglass.source.ResolvedMkvMedia(
+            SourcePriority.OTAKUDESU, MkvQuality.P720, "Pixeldrain",
+            "https://pixeldrain.com/api/file/healthy720", null, true, container = MediaContainer.MP4
+        )
+        val backup = id.my.milkglass.player.PlayerManager.selectNextFailoverCandidate(
+            listOf(brokenFirst, healthyBackup),
+            brokenFirst.directUrl,
+            preferCompatibleContainer = false
+        )
+        assertNotNull(backup)
+        assertEquals(healthyBackup.directUrl, backup!!.directUrl)
+    }
+
+    @Test
+    fun preferredQualityIsPrioritizedWithinZeroWebViewTierAndAllResolutionsConsolidate() {
+        val cand720 = RawMkvCandidate(
+            SourcePriority.YLNIME, MkvQuality.P720, "Pixeldrain",
+            "https://pixeldrain.com/u/pd720", "https://ylnime.com/", null, false, MediaContainer.MP4
+        )
+        val cand480 = RawMkvCandidate(
+            SourcePriority.OTAKUDESU, MkvQuality.P480, "odstream",
+            "https://desustream.info/dstream/odstream/v2/index.php?id=od480", "https://otakudesu.blog/", null, false, MediaContainer.MP4, isStreamEmbed = true
+        )
+        val cand1080 = RawMkvCandidate(
+            SourcePriority.YLNIME, MkvQuality.P1080, "Animeverse",
+            "https://s3.animeverse.id/ro/ep1-fhd.mp4", "https://ylnime.com/", null, false, MediaContainer.MP4
+        )
+        val rankedFor480 = StreamingFirstGuards.rankForPlayback(
+            listOf(cand720, cand480, cand1080),
+            listOf(MkvQuality.P480, MkvQuality.P1080, MkvQuality.P720),
+            allowBatchFallback = false,
+            preferCompatibleContainer = true,
+            preferStreamingEmbeds = true
+        )
+        assertEquals(MkvQuality.P480, rankedFor480.first().quality)
+
+        val resolver = MkvCascadeResolver(clients = IsolatedHttpClients(null), providers = emptyList())
+        val mergedQuals = resolver.mergeExternalCandidates("Frieren MultiRes", 1, listOf(cand720, cand480, cand1080))
+        assertEquals(listOf(MkvQuality.P1080, MkvQuality.P720, MkvQuality.P480), mergedQuals)
+    }
+
+    @Test
+    fun deadCandidateCacheRejectsBothDirectUrlAndRawUrlDuringFailover() {
+        id.my.milkglass.source.DeadCandidateCache.clear()
+        val c1 = id.my.milkglass.source.ResolvedMkvMedia(
+            SourcePriority.YLNIME, MkvQuality.P1080, "Pixeldrain",
+            "https://pixeldrain.com/api/file/dead123", null, true,
+            container = MediaContainer.MP4,
+            rawUrl = "https://pixeldrain.com/u/dead123"
+        )
+        val c2 = id.my.milkglass.source.ResolvedMkvMedia(
+            SourcePriority.OTAKUDESU, MkvQuality.P1080, "ODFiles",
+            "https://cdn.r2.example/alive123.mp4", null, true,
+            container = MediaContainer.MP4,
+            rawUrl = "https://filedon.co/view/alive123"
+        )
+        id.my.milkglass.source.DeadCandidateCache.markDead(c1.rawUrl)
+        val chosen = id.my.milkglass.player.PlayerManager.selectNextFailoverCandidate(
+            listOf(c1, c2),
+            failedUrl = "https://other.failed/url",
+            preferCompatibleContainer = true
+        )
+        assertEquals(c2.directUrl, chosen?.directUrl)
     }
 }

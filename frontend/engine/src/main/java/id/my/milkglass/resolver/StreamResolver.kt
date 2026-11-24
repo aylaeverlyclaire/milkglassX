@@ -23,7 +23,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -232,8 +231,6 @@ class StreamResolver(
         }
     }
 
-    private val telemetryReportedAt = ConcurrentHashMap<String, Long>()
-
     fun reportPlaybackTelemetry(report: PlaybackTelemetryReport) {
         hintExecutor.execute {
             runCatching {
@@ -344,8 +341,10 @@ class StreamResolver(
         knownQualities: List<MkvQuality> = emptyList()
     ): CachedResolvedCandidates {
         val chosen = list.first()
-        val avail = (knownQualities.map { it.label } + list.map { it.quality.label })
+        val avail = (knownQualities + list.map { it.quality })
             .distinct()
+            .sortedByDescending { it.height }
+            .map { it.label }
             .ifEmpty { listOf(chosen.quality.label) }
         return CachedResolvedCandidates(
             cachedAtMs = System.currentTimeMillis(),
@@ -557,6 +556,7 @@ class StreamResolver(
             for (i in 0 until directs.length()) {
                 val obj = directs.optJSONObject(i) ?: continue
                 val directUrl = obj.optString("direct_url").trim()
+                if (id.my.milkglass.source.DeadCandidateCache.isDead(directUrl)) continue
                 val host = directUrl.toHttpUrlOrNull()?.host ?: continue
                 val qual = MkvQuality.fromText(obj.optString("quality")) ?: continue
                 serverQualities.add(qual)
@@ -572,13 +572,17 @@ class StreamResolver(
                     referer = obj.optString("referer").takeIf { it.isNotBlank() },
                     supportsRange = obj.optBoolean("supports_range", true),
                     container = cont,
-                    isHls = obj.optBoolean("is_hls", false)
+                    isHls = obj.optBoolean("is_hls", false),
+                    rawUrl = directUrl
                 )
                 if (qual == preferredQuality) resolved.add(item) else fallbackDirect.add(item)
             }
         }
         if (resolved.isEmpty() && fallbackDirect.isNotEmpty()) {
             resolved.addAll(fallbackDirect.sortedByDescending { it.quality.height })
+        } else if (resolved.isNotEmpty() && fallbackDirect.isNotEmpty()) {
+            // Sertakan direct candidate resolusi lain sebagai cadangan failover instan di posisi akhir
+            resolved.addAll(fallbackDirect.sortedByDescending { it.quality.height }.take(2))
         }
 
         if (resolved.isNotEmpty()) {
@@ -596,43 +600,56 @@ class StreamResolver(
         }
 
         val clientArrAll = data.optJSONArray("client_extract_candidates")
+        val allServerRaws = ArrayList<RawMkvCandidate>()
         if (clientArrAll != null) {
-            for (i in 0 until minOf(clientArrAll.length(), 8)) {
+            for (i in 0 until minOf(clientArrAll.length(), 16)) {
                 val obj = clientArrAll.optJSONObject(i) ?: continue
-                MkvQuality.fromText(obj.optString("quality"))?.let { serverQualities.add(it) }
-                hadAnyServerEntry = true
-            }
-        }
-
-        val needClientExtract = resolved.isEmpty() || (preferCompatibleContainer && resolved.none { it.container == MediaContainer.MP4 || it.container == MediaContainer.HLS })
-        val clientArr = if (needClientExtract) clientArrAll else null
-        if (clientArr != null) {
-            val exactRaws = ArrayList<RawMkvCandidate>()
-            val fallbackRaws = ArrayList<RawMkvCandidate>()
-            for (i in 0 until minOf(clientArr.length(), 8)) {
-                val obj = clientArr.optJSONObject(i) ?: continue
                 val rawUrl = obj.optString("raw_url").trim()
                 if (!rawUrl.startsWith("https://")) continue
                 val qual = MkvQuality.fromText(obj.optString("quality")) ?: continue
+                serverQualities.add(qual)
+                hadAnyServerEntry = true
+                if (id.my.milkglass.source.DeadCandidateCache.isDead(rawUrl)) continue
                 val hoster = obj.optString("hoster").ifBlank { "Hoster" }
                 val isEmbed = obj.optBoolean("is_stream_embed", isEmbedCandidateUrl(rawUrl, hoster))
-                val cand = RawMkvCandidate(
-                    source = SourcePriority.entries.firstOrNull { it.id == obj.optString("source") } ?: SourcePriority.OTAKUDESU,
-                    quality = qual,
-                    hosterLabel = hoster,
-                    rawUrl = rawUrl,
-                    pageReferer = obj.optString("referer").trim(),
-                    container = MediaContainer.detect("", hoster, rawUrl),
-                    isStreamEmbed = isEmbed
+                allServerRaws.add(
+                    RawMkvCandidate(
+                        source = SourcePriority.entries.firstOrNull { it.id == obj.optString("source") } ?: SourcePriority.OTAKUDESU,
+                        quality = qual,
+                        hosterLabel = hoster,
+                        rawUrl = rawUrl,
+                        pageReferer = obj.optString("referer").trim(),
+                        container = MediaContainer.detect("", hoster, rawUrl),
+                        isStreamEmbed = isEmbed
+                    )
                 )
-                if (qual == preferredQuality) exactRaws.add(cand) else fallbackRaws.add(cand)
             }
+        }
+        if (allServerRaws.isNotEmpty()) {
+            cascadeResolver.mergeExternalCandidates(searchTitle, episodeNum, allServerRaws)
+        }
+
+        val hasExactPreferredDirect = resolved.any { it.quality == preferredQuality }
+        val serverHasPreferredRaw = allServerRaws.any { it.quality == preferredQuality }
+        val needClientExtract =
+            resolved.isEmpty() ||
+                (!hasExactPreferredDirect && serverHasPreferredRaw) ||
+                (preferCompatibleContainer && resolved.none { it.container == MediaContainer.MP4 || it.container == MediaContainer.HLS })
+        if (needClientExtract && allServerRaws.isNotEmpty()) {
+            val exactRaws = allServerRaws.filter { it.quality == preferredQuality }
+            val fallbackRaws = allServerRaws.filter { it.quality != preferredQuality }
             val raws = exactRaws + fallbackRaws
+            val extractedFromServerRaws = mutableListOf<ResolvedMkvMedia>()
             for (media in cascadeResolver.resolveFromRaw(raws, preferredQuality, preferCompatibleContainer)) {
                 val host = media.directUrl.toHttpUrlOrNull()?.host ?: continue
                 if (runCatching { PublicIpGuard.verifyPublicHost(clients.dns, host); true }.getOrDefault(false).not()) continue
-                resolved.add(media)
-                if (resolved.size >= 3) break
+                extractedFromServerRaws.add(media)
+                if (extractedFromServerRaws.size >= 3) break
+            }
+            if (extractedFromServerRaws.isNotEmpty()) {
+                val combined = (extractedFromServerRaws + resolved).distinctBy { it.directUrl }
+                resolved.clear()
+                resolved.addAll(combined.sortedBy { if (it.quality == preferredQuality) 0 else 1 })
             }
         }
 
@@ -642,16 +659,19 @@ class StreamResolver(
             .ifEmpty { MkvQuality.ALL_DESC }
         if (resolved.isEmpty()) return Triple(emptyList(), knownQualities, hadAnyServerEntry)
         val ordered = if (preferCompatibleContainer) {
-            resolved.sortedBy {
-                when (it.container) {
-                    MediaContainer.MP4 -> 0
-                    MediaContainer.HLS -> 1
-                    MediaContainer.UNKNOWN -> 2
-                    MediaContainer.MKV -> 3
-                }
-            }
+            resolved.sortedWith(
+                compareBy<ResolvedMkvMedia> { if (it.quality == preferredQuality) 0 else 1 }
+                    .thenBy {
+                        when (it.container) {
+                            MediaContainer.MP4 -> 0
+                            MediaContainer.HLS -> 1
+                            MediaContainer.UNKNOWN -> 2
+                            MediaContainer.MKV -> 3
+                        }
+                    }
+            )
         } else {
-            resolved
+            resolved.sortedBy { if (it.quality == preferredQuality) 0 else 1 }
         }
         return Triple(ordered, knownQualities, hadAnyServerEntry)
     }
@@ -796,11 +816,16 @@ class StreamResolver(
         val sessionCacheKey = "${slug.lowercase()}#${preferredQuality.label}#${if (preferCompatibleContainer) "compat" else "std"}"
         val nowMs = System.currentTimeMillis()
         resolvedCache[sessionCacheKey]?.takeIf { nowMs - it.cachedAtMs <= RESOLVED_CACHE_TTL_MS }?.let { cached ->
-            return startFromEntry(cached, scope, cacheHit = true)
+            val aliveCandidates = cached.candidates.filterNot {
+                id.my.milkglass.source.DeadCandidateCache.isDead(it.directUrl) ||
+                    id.my.milkglass.source.DeadCandidateCache.isDead(it.rawUrl)
+            }
+            if (aliveCandidates.isNotEmpty()) {
+                return startFromEntry(cached.copy(candidates = aliveCandidates), scope, cacheHit = true)
+            }
+            resolvedCache.remove(sessionCacheKey)
         }
 
-        // Strict Single-Flight (Law of Identity): jika DetailScreen prefetch untuk (slug, quality) yang identik
-        // sedang berjalan, join langsung agar tidak meluncurkan cascade + WebView sniffer ganda yang saling berebut lock.
         val inflight = inFlightResolutions[sessionCacheKey]
         if (inflight != null) {
             val joinedEntry = inflight.awaitOrNull(JOIN_INFLIGHT_MAX_MS)
@@ -815,7 +840,9 @@ class StreamResolver(
                 preferCompatibleContainer = preferCompatibleContainer
             )
             if (fromConsolidated.isNotEmpty()) {
-                val mergedQuals = (consolidatedRaw.map { it.quality } + fromConsolidated.map { it.quality }).distinct().sortedByDescending { it.height }
+                val mergedQuals = (consolidatedRaw.map { it.quality } + fromConsolidated.map { it.quality } + cascadeResolver.cachedQualitiesFor(searchTitle, episodeNum))
+                    .distinct()
+                    .sortedByDescending { it.height }
                 val entry = cacheEntryFor(fromConsolidated, mergedQuals)
                 if (resolvedCache.size > 32) resolvedCache.clear()
                 resolvedCache[sessionCacheKey] = entry
@@ -907,12 +934,13 @@ class StreamResolver(
             slug.replace(Regex("-ep-\\d+$", RegexOption.IGNORE_CASE), "").replace('-', ' ')
         }
         if (searchTitle.isBlank() || episodeNum < 0) return@launch
-        val existingQualities = currentResolutions.mapNotNull { MkvQuality.fromText(it) }.toSet()
+        val existingQualities = (currentResolutions.mapNotNull { MkvQuality.fromText(it) } +
+            cascadeResolver.cachedQualitiesFor(searchTitle, episodeNum)).toSet()
 
         var waitedMs = 0L
-        while (id.my.milkglass.player.PlayerManager.isVideoBuffering.value && waitedMs < 4_000L) {
-            delay(250L)
-            waitedMs += 250L
+        while (id.my.milkglass.player.PlayerManager.isVideoBuffering.value && waitedMs < 1_500L) {
+            delay(150L)
+            waitedMs += 150L
         }
 
         val existingSourceId = resolvedCache.entries
@@ -924,9 +952,15 @@ class StreamResolver(
                 episodeNumber = episodeNum,
                 existingQualities = existingQualities,
                 excludeSourceId = existingSourceId,
-                onMergedHints = { key, hints -> reportHint(key, hints) },
+                onMergedHints = { key, hints ->
+                    cascadeResolver.mergeExternalCandidates(searchTitle, episodeNum, hints)
+                    reportHint(key, hints)
+                },
                 onQualitiesUpdated = { mergedQualities ->
-                    val labels = mergedQualities.map { it.label }
+                    val allQuals = (mergedQualities + cascadeResolver.cachedQualitiesFor(searchTitle, episodeNum))
+                        .distinct()
+                        .sortedByDescending { it.height }
+                    val labels = allQuals.map { it.label }
                     if (labels.isNotEmpty()) {
                         val slugPrefix = "${slug.lowercase()}#"
                         for ((k, entry) in resolvedCache.entries) {

@@ -7,9 +7,11 @@ import okhttp3.Request
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.util.Base64
 import java.util.Locale
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.Executors
@@ -37,6 +39,46 @@ abstract class BaseHtmlMkvProvider(
             return indexed
         }
         return null
+    }
+
+    /**
+     * Single-flight + cache singkat (60 dtk) untuk halaman series agar probeLiveEpisodes,
+     * prefetchEpisode, MkvCascadeResolver, dan ResolutionConsolidator tidak mengunduh
+     * halaman series yang sama berulang kali secara paralel.
+     */
+    protected fun fetchSeriesDocShared(url: String, referer: String? = null): Document {
+        val normKey = url.trim().trimEnd('/')
+        val now = System.currentTimeMillis()
+        seriesDocCache[normKey]?.let { (ts, html) ->
+            if (now - ts <= SERIES_DOC_TTL_MS && html.isNotBlank()) {
+                return Jsoup.parse(html, url)
+            }
+        }
+        val mine = CompletableFuture<String>()
+        val existing = inFlightSeriesDocs.putIfAbsent(normKey, mine)
+        if (existing != null) {
+            val joinedHtml = runCatching { existing.get(6_000L, TimeUnit.MILLISECONDS) }.getOrNull()
+            if (!joinedHtml.isNullOrBlank()) {
+                return Jsoup.parse(joinedHtml, url)
+            }
+        }
+        return try {
+            val doc = fetchDoc(url, referer)
+            val html = doc.outerHtml()
+            if (html.length >= 128) {
+                if (seriesDocCache.size > 64) seriesDocCache.clear()
+                seriesDocCache[normKey] = System.currentTimeMillis() to html
+                mine.complete(html)
+            } else {
+                mine.complete("")
+            }
+            doc
+        } catch (t: Throwable) {
+            mine.completeExceptionally(t)
+            throw t
+        } finally {
+            inFlightSeriesDocs.remove(normKey, mine)
+        }
     }
 
     protected fun fetchDoc(url: String, referer: String? = null): Document {
@@ -84,24 +126,58 @@ abstract class BaseHtmlMkvProvider(
 
     protected fun encodeQuery(q: String): String = URLEncoder.encode(q, "UTF-8")
 
+    protected fun inferElementQuality(el: Element, label: String, href: String, defaultQuality: MkvQuality = MkvQuality.P720): MkvQuality {
+        MkvQuality.fromText(
+            listOf(
+                el.attr("data-reso"),
+                el.attr("data-quality"),
+                el.attr("data-res"),
+                el.attr("size"),
+                el.attr("label"),
+                el.attr("title"),
+                label,
+                href
+            ).joinToString(" ")
+        )?.let { return it }
+
+        val parent = el.parent()
+        if (parent != null) {
+            val directBadges = parent.select("strong, b, .badge, .reso, .quality").joinToString(" ") { it.text() }
+            MkvQuality.fromText("$directBadges ${parent.ownText()} ${parent.previousElementSibling()?.text().orEmpty()}")?.let { return it }
+            MkvQuality.fromText(parent.text())?.let { return it }
+            val grand = parent.parent()
+            if (grand != null) {
+                val grandHeader = grand.selectFirst("strong, b, .badge, .card-header, h4, h5, h6, th, td")?.text().orEmpty()
+                val grandPrev = grand.previousElementSibling()?.text().orEmpty()
+                MkvQuality.fromText("$grandHeader $grandPrev ${grand.ownText()}")?.let { return it }
+            }
+        }
+        return defaultQuality
+    }
+
     protected fun harvestFallbackCandidates(
         epDoc: Document,
         epUrl: String,
-        existing: List<RawMkvCandidate>
+        existing: List<RawMkvCandidate>,
+        defaultQuality: MkvQuality = MkvQuality.P720
     ): List<RawMkvCandidate> {
-        val seenUrls = existing.mapTo(HashSet()) { it.rawUrl }
+        val seenKeys = existing.mapTo(HashSet()) { "${it.quality.label}|${it.rawUrl}" }
+        val seenRawUrls = existing.mapTo(HashSet()) { it.rawUrl }
         val extra = mutableListOf<RawMkvCandidate>()
 
         epDoc.select("a[href]").forEach { a ->
             val href = a.absUrl("href").trim()
             val label = a.text().trim()
-            if (!href.startsWith("http") || href in seenUrls) return@forEach
+            if (!href.startsWith("http")) return@forEach
             if (HosterFilter.isBlacklisted(label, href)) return@forEach
             if (!HosterFilter.isKnownPlayableHost(href)) return@forEach
-            val rowCtx = a.parent()?.text().orEmpty()
-            val quality = MkvQuality.fromText("$rowCtx $label $href") ?: MkvQuality.P720
+            val quality = inferElementQuality(a, label, href, defaultQuality)
+            val key = "${quality.label}|$href"
+            if (key in seenKeys || href in seenRawUrls) return@forEach
+            val rowCtx = "${a.parent()?.text().orEmpty()} ${a.parent()?.parent()?.ownText().orEmpty()}"
             val container = MediaContainer.detect(rowCtx, label, href)
-            seenUrls.add(href)
+            seenKeys.add(key)
+            seenRawUrls.add(href)
             extra.add(
                 RawMkvCandidate(
                     source = priority,
@@ -116,17 +192,19 @@ abstract class BaseHtmlMkvProvider(
 
         epDoc.select("iframe[src]").forEach { iframe ->
             val src = iframe.absUrl("src").trim()
-            if (!src.startsWith("http") || src in seenUrls) return@forEach
+            if (!src.startsWith("http") || src in seenRawUrls) return@forEach
             val low = src.lowercase(Locale.ROOT)
             if (low.contains("disqus") || low.contains("facebook") || low.contains("ads") ||
                 low.contains("youtube.com") || low.contains("twitter.com") || low.contains("recaptcha")
             ) return@forEach
             if (HosterFilter.isBlacklisted("", src)) return@forEach
-            seenUrls.add(src)
+            val q = MkvQuality.fromText(src) ?: defaultQuality
+            seenRawUrls.add(src)
+            seenKeys.add("${q.label}|$src")
             extra.add(
                 RawMkvCandidate(
                     source = priority,
-                    quality = MkvQuality.fromText(src) ?: MkvQuality.P720,
+                    quality = q,
                     hosterLabel = "EmbedPlayer",
                     rawUrl = src,
                     pageReferer = epUrl,
@@ -137,6 +215,23 @@ abstract class BaseHtmlMkvProvider(
         }
 
         return extra
+    }
+
+    companion object {
+        private const val SERIES_DOC_TTL_MS = 60_000L
+        private val seriesDocCache = ConcurrentHashMap<String, Pair<Long, String>>()
+        private val inFlightSeriesDocs = ConcurrentHashMap<String, CompletableFuture<String>>()
+
+        fun seedSeriesHtmlCache(url: String, html: String) {
+            if (url.isBlank() || html.length < 128) return
+            if (seriesDocCache.size > 64) seriesDocCache.clear()
+            seriesDocCache[url.trim().trimEnd('/')] = System.currentTimeMillis() to html
+        }
+
+        internal fun clearSeriesDocCacheForTest() {
+            seriesDocCache.clear()
+            inFlightSeriesDocs.clear()
+        }
     }
 }
 
@@ -181,7 +276,7 @@ class OtakudesuSourceProvider(
 
         var epUrl = SeriesEpisodeMapCache.get(priority, bestAnimeUrl, episodeNumber)
         if (epUrl == null) {
-            val animeDoc = runCatching { fetchDoc(bestAnimeUrl, searchUrl) }.getOrElse {
+            val animeDoc = runCatching { fetchSeriesDocShared(bestAnimeUrl, searchUrl) }.getOrElse {
                 if (!Thread.currentThread().isInterrupted) slugCache?.invalidate(priority, animeTitle)
                 throw it
             }
@@ -232,13 +327,13 @@ class OtakudesuSourceProvider(
         }
         val results = mutableListOf<RawMkvCandidate>()
 
-        val downloadUls = epDoc.select("div.download ul")
+        val downloadUls = epDoc.select("div.download ul, .ondownload ul, .dlbox ul")
         downloadUls.forEachIndexed { ulIdx, ul ->
             val blockHeader = ul.previousElementSibling()?.text().orEmpty()
             val isImplicitMkvUl = downloadUls.size >= 2 && ulIdx == downloadUls.lastIndex
             ul.select("li").forEach { li ->
-                val strongText = li.selectFirst("strong")?.text().orEmpty()
-                val quality = MkvQuality.fromText(strongText) ?: return@forEach
+                val strongText = li.selectFirst("strong, b")?.text().orEmpty()
+                val quality = MkvQuality.fromText(strongText) ?: MkvQuality.fromText(li.ownText()) ?: return@forEach
                 if (quality !in targetQualities) return@forEach
                 val detected = MediaContainer.detect(blockHeader, strongText)
                 val container = if (detected == MediaContainer.UNKNOWN && isImplicitMkvUl && !strongText.contains("mp4", ignoreCase = true)) {
@@ -265,6 +360,30 @@ class OtakudesuSourceProvider(
                 }
             }
         }
+        // Dukung juga blok .soraurlx bila dipakai oleh template episode tertentu
+        epDoc.select(".soraurlx").forEach { row ->
+            val strongText = row.selectFirst("strong, b")?.text().orEmpty()
+            val quality = MkvQuality.fromText(strongText) ?: return@forEach
+            if (quality !in targetQualities) return@forEach
+            val container = MediaContainer.detect("", strongText)
+            row.select("a[href]").forEach { a ->
+                val href = a.absUrl("href").trim()
+                val label = a.text().trim()
+                if (href.startsWith("http") && !HosterFilter.isBlacklisted(label, href)) {
+                    results.add(
+                        RawMkvCandidate(
+                            source = priority,
+                            quality = quality,
+                            hosterLabel = label.ifBlank { "Hoster" },
+                            rawUrl = href,
+                            pageReferer = epUrl,
+                            container = container
+                        )
+                    )
+                }
+            }
+        }
+
         results.addAll(harvestOtakudesuMirrorStreams(epDoc, epUrl, root, targetQualities, results))
         results.addAll(harvestFallbackCandidates(epDoc, epUrl, results))
         return results
@@ -281,7 +400,9 @@ class OtakudesuSourceProvider(
         val out = mutableListOf<RawMkvCandidate>()
         // 1) Panen iframe default yang sudah ada di HTML awal halaman episode (0 request AJAX)
         out.addAll(StreamingFirstGuards.harvestOtakudesuDefaultEmbeds(epDoc, epUrl, targetQualities, seenUrls))
-        val mirrorLinks = epDoc.select("ul.m360p li a[data-content], ul.m480p li a[data-content], ul.m720p li a[data-content]")
+        val mirrorLinks = epDoc.select(
+            "ul.m360p li a[data-content], ul.m480p li a[data-content], ul.m720p li a[data-content], ul.m1080p li a[data-content], .mirrorstream ul li a[data-content]"
+        )
         val deadOrAdMirrorTokens = listOf("vidhide", "ondesuhd", "moedesu", "nekocloud", "mega", "yourupload")
         if (!StreamingFirstGuards.shouldFetchOtakudesuMirrors(out, mirrorLinks, targetQualities, deadOrAdMirrorTokens)) {
             return out
@@ -306,18 +427,13 @@ class OtakudesuSourceProvider(
             nonceCache[root] = (System.currentTimeMillis() + NONCE_TTL_MS) to fresh
         } ?: return out
 
-        // Prioritaskan resolusi tertinggi yang diminta (1080p/720p dulu), lalu mirror sehat & cepat
-        // (odstream -> odcdn -> filedon -> otakuwatch), dan fail-fast skip mirror rusak/iklan.
+        val targetOrder = targetQualities.toList()
         val rankedMirrors = mirrorLinks.sortedWith(
             compareBy<org.jsoup.nodes.Element> { a ->
                 val ulClass = a.parents().firstOrNull { it.tagName() == "ul" }?.className().orEmpty()
-                when (MkvQuality.fromText(ulClass)) {
-                    MkvQuality.P1080 -> 0
-                    MkvQuality.P720 -> 1
-                    MkvQuality.P480 -> 2
-                    MkvQuality.P360 -> 3
-                    null -> 4
-                }
+                val q = MkvQuality.fromText(ulClass) ?: MkvQuality.fromText(a.text())
+                val idx = if (q != null) targetOrder.indexOf(q) else -1
+                if (idx >= 0) idx else 10
             }.thenBy { a ->
                 val low = a.text().trim().lowercase(Locale.ROOT)
                 when {
@@ -332,17 +448,14 @@ class OtakudesuSourceProvider(
                 }
             }
         )
-        val slotsNeeded = (3 - out.size).coerceAtLeast(1)
+
         data class MirrorTask(val label: String, val quality: MkvQuality, val id: String, val i: String, val q: String)
-        val tasks = mutableListOf<MirrorTask>()
+        val allValidTasks = mutableListOf<MirrorTask>()
         for (a in rankedMirrors) {
-            if (tasks.size >= slotsNeeded) break
             val label = a.text().trim()
             val lowLabel = label.lowercase(Locale.ROOT)
             if (HosterFilter.isBlacklisted(label, label) || deadOrAdMirrorTokens.any { lowLabel.contains(it) }) continue
             val ulClass = a.parents().firstOrNull { it.tagName() == "ul" }?.className().orEmpty()
-            val quality = MkvQuality.fromText(ulClass) ?: MkvQuality.P720
-            if (quality !in targetQualities) continue
             val payload = runCatching {
                 val decoded = String(Base64.getDecoder().decode(a.attr("data-content").trim()))
                 JSONObject(decoded)
@@ -351,9 +464,26 @@ class OtakudesuSourceProvider(
             val i = payload.optString("i")
             val q = payload.optString("q")
             if (id.isBlank() || q.isBlank()) continue
-            tasks.add(MirrorTask(label, quality, id, i, q))
+            val quality = MkvQuality.fromText(ulClass) ?: MkvQuality.fromText(q) ?: MkvQuality.P720
+            if (quality !in targetQualities) continue
+            allValidTasks.add(MirrorTask(label, quality, id, i, q))
         }
-        if (tasks.isEmpty()) return out
+        if (allValidTasks.isEmpty()) return out
+
+        // Ambil 1 mirror terbaik per resolusi berbeda terlebih dahulu (agar 1080p, 720p, 480p semuanya terwakili),
+        // lalu isi sisa slot hingga 4 tugas paralel.
+        val tasks = mutableListOf<MirrorTask>()
+        val coveredTaskQualities = HashSet<MkvQuality>()
+        for (t in allValidTasks) {
+            if (tasks.size >= 4) break
+            if (coveredTaskQualities.add(t.quality)) {
+                tasks.add(t)
+            }
+        }
+        for (t in allValidTasks) {
+            if (tasks.size >= 4) break
+            if (t !in tasks) tasks.add(t)
+        }
 
         val mirrorAction = RemoteRulesStore.globalSelectorFor(SourcePriority.OTAKUDESU, "ajax_mirror_action", "2a3505c93b0035d3f455df82bf976b84")
         val cs = ExecutorCompletionService<RawMkvCandidate?>(mirrorAjaxPool)
@@ -402,7 +532,7 @@ class OtakudesuSourceProvider(
             }
             val deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2_200L)
             repeat(futures.size) {
-                if (out.size >= 3 || Thread.currentThread().isInterrupted) return@repeat
+                if (out.size >= 5 || Thread.currentThread().isInterrupted) return@repeat
                 val remNs = deadlineNs - System.nanoTime()
                 if (remNs <= 0L) return@repeat
                 val fut = runCatching { cs.poll(remNs, TimeUnit.NANOSECONDS) }.getOrNull() ?: return@repeat
@@ -421,7 +551,7 @@ class OtakudesuSourceProvider(
         private const val NONCE_TTL_MS = 15L * 60L * 1000L
         private val nonceCache = ConcurrentHashMap<String, Pair<Long, String>>()
         private val mirrorSeq = AtomicInteger(1)
-        private val mirrorAjaxPool = Executors.newFixedThreadPool(4) { r ->
+        internal val mirrorAjaxPool = Executors.newFixedThreadPool(4) { r ->
             Thread(r, "milkglass-mirror-${mirrorSeq.getAndIncrement()}").apply { isDaemon = true }
         }
 
@@ -485,7 +615,7 @@ class YlnimeSourceProvider(
 
         var epUrl = SeriesEpisodeMapCache.get(priority, bestAnimeUrl, episodeNumber)
         if (epUrl == null) {
-            var animeDoc = runCatching { fetchDoc(bestAnimeUrl, searchUrl) }.getOrElse {
+            var animeDoc = runCatching { fetchSeriesDocShared(bestAnimeUrl, searchUrl) }.getOrElse {
                 if (!Thread.currentThread().isInterrupted) slugCache?.invalidate(priority, animeTitle)
                 throw it
             }
@@ -497,7 +627,7 @@ class YlnimeSourceProvider(
                     "$bestAnimeUrl%2F"
                 }
                 if (altUrl != bestAnimeUrl) {
-                    val altDoc = runCatching { fetchDoc(altUrl, searchUrl) }.getOrNull()
+                    val altDoc = runCatching { fetchSeriesDocShared(altUrl, searchUrl) }.getOrNull()
                     val altLinks = altDoc?.select("a[href*='episode=']")
                     if (altDoc != null && altLinks != null && altLinks.size > epLinks.size) {
                         animeDoc = altDoc
@@ -541,115 +671,48 @@ class YlnimeSourceProvider(
         }
 
         val results = mutableListOf<RawMkvCandidate>()
-        val seenUrls = hashSetOf<String>()
+        val seenKeys = hashSetOf<String>()
         val qDefault = MkvQuality.fromText(targetReso) ?: MkvQuality.P720
 
-        // 1. Pemutar HTML5 <video><source src="..."> (server Animeverse YLnime)
-        val fallbackVideoCandidates = mutableListOf<RawMkvCandidate>()
-        epDoc.select("video source[src], video[src]").forEach { el ->
-            val src = el.absUrl("src").trim()
-            if (src.startsWith("http") && !HosterFilter.isBlacklisted("Animeverse", src) && seenUrls.add(src)) {
-                val q = MkvQuality.fromText(src) ?: qDefault
-                val cand = RawMkvCandidate(
-                    source = priority,
-                    quality = q,
-                    hosterLabel = "Animeverse",
-                    rawUrl = src,
-                    pageReferer = epUrlWithReso,
-                    container = if (src.contains(".m3u8", ignoreCase = true)) MediaContainer.HLS else MediaContainer.MP4,
-                    isStreamEmbed = true
-                )
-                if (q in targetQualities) {
-                    results.add(cand)
-                } else {
-                    fallbackVideoCandidates.add(cand)
-                }
-            }
-        }
-        if (results.isEmpty() && fallbackVideoCandidates.isNotEmpty()) {
-            results.addAll(fallbackVideoCandidates)
-        }
+        harvestYlnimePageCandidates(epDoc, epUrlWithReso, qDefault, targetQualities, seenKeys, results)
 
-        // 1b. Ekstrak URL video/Pixeldrain dari atribut data-src/data-video/data-url dan inline <script> YLnime
-        epDoc.select("[data-src], [data-video], [data-url]").forEach { el ->
-            val raw = el.attr("data-src").ifBlank { el.attr("data-video") }.ifBlank { el.attr("data-url") }.trim()
-            if (raw.startsWith("http") && !HosterFilter.isBlacklisted("Animeverse", raw) && seenUrls.add(raw)) {
-                val low = raw.lowercase(Locale.ROOT)
-                if (low.contains(".mp4") || low.contains(".m3u8") || low.contains("pixeldrain.")) {
-                    val q = MkvQuality.fromText("${el.text()} $raw") ?: qDefault
-                    results.add(
-                        RawMkvCandidate(
-                            source = priority,
-                            quality = q,
-                            hosterLabel = if (low.contains("pixeldrain.")) "Pixeldrain" else "Animeverse",
-                            rawUrl = raw,
-                            pageReferer = epUrlWithReso,
-                            container = if (low.contains(".m3u8")) MediaContainer.HLS else MediaContainer.MP4,
-                            isStreamEmbed = !low.contains("pixeldrain.")
-                        )
-                    )
-                }
+        // Jika halaman YLnime memiliki tab resolusi (?reso=480p, ?reso=720p, ?reso=1080p) yang belum terwakili di results,
+        // panen tab resolusi pendamping secara paralel cepat (batas 1.5 dtk) agar 480p-1080p lengkap.
+        val coveredQualities = results.mapTo(HashSet()) { it.quality }
+        val resoTabMap = linkedMapOf<MkvQuality, String>()
+        epDoc.select("a[href*='reso=']").forEach { a ->
+            val href = a.absUrl("href").trim()
+            if (!href.startsWith("http")) return@forEach
+            val q = MkvQuality.fromText("${a.text()} $href") ?: return@forEach
+            if (q in targetQualities && q !in coveredQualities && q != MkvQuality.P360) {
+                resoTabMap.putIfAbsent(q, href)
             }
         }
-        val streamsJsonRe = Regex("""(?:const|let|var)\s+streams\s*=\s*(\[[\s\S]*?\])\s*;""")
-        val scriptMediaRe = Regex(
-            """["'](https?://(?:[^"'\s<>]+\.(?:mp4|m3u8)(?:\?[^"'\s<>]*)?|(?:www\.)?pixeldrain\.(?:com|lu)/(?:u|api/file)/[A-Za-z0-9_-]+(?:\?[^"'\s<>]*)?))["']""",
-            RegexOption.IGNORE_CASE
-        )
-        epDoc.select("script").forEach { sc ->
-            val rawBody = sc.data()
-            if (rawBody.isBlank()) return@forEach
-            streamsJsonRe.find(rawBody)?.groupValues?.getOrNull(1)?.let { arrJson ->
-                runCatching {
-                    val arr = org.json.JSONArray(arrJson)
-                    for (idx in 0 until arr.length()) {
-                        val obj = arr.optJSONObject(idx) ?: continue
-                        val link = obj.optString("link").replace("\\/", "/").replace(" ", "%20").trim()
-                        if (!link.startsWith("http")) continue
-                        val low = link.lowercase(Locale.ROOT)
-                        val hostLabel = when { low.contains("pixeldrain.") -> "Pixeldrain"; low.contains("animekita.") -> "AnimeKita"; else -> "Animeverse" }
-                        if (HosterFilter.isBlacklisted(hostLabel, link) || !seenUrls.add(link)) continue
-                        val q = MkvQuality.fromText(obj.optString("reso")) ?: MkvQuality.fromText(link) ?: qDefault
-                        results.add(
-                            RawMkvCandidate(
-                                source = priority,
-                                quality = q,
-                                hosterLabel = hostLabel,
-                                rawUrl = link,
-                                pageReferer = epUrlWithReso,
-                                container = if (low.contains(".m3u8")) MediaContainer.HLS else MediaContainer.MP4,
-                                isStreamEmbed = false
-                            )
-                        )
-                    }
+        if (resoTabMap.isNotEmpty() && !Thread.currentThread().isInterrupted) {
+            val cs = ExecutorCompletionService<Pair<MkvQuality, Pair<String, Document>>?>(OtakudesuSourceProvider.mirrorAjaxPool)
+            val futures = resoTabMap.entries.take(2).map { (q, tabUrl) ->
+                cs.submit {
+                    runCatching {
+                        q to (tabUrl to fetchDoc(tabUrl, epUrlWithReso))
+                    }.getOrNull()
                 }
             }
-            val body = rawBody.replace("\\/", "/")
-            scriptMediaRe.findAll(body).forEach { m ->
-                val raw = m.groupValues[1].trim()
-                if (raw.startsWith("http") && !HosterFilter.isBlacklisted("Animeverse", raw) && seenUrls.add(raw)) {
-                    val low = raw.lowercase(Locale.ROOT)
-                    val q = MkvQuality.fromText(raw) ?: qDefault
-                    results.add(
-                        RawMkvCandidate(
-                            source = priority,
-                            quality = q,
-                            hosterLabel = if (low.contains("pixeldrain.")) "Pixeldrain" else "Animeverse",
-                            rawUrl = raw,
-                            pageReferer = epUrlWithReso,
-                            container = if (low.contains(".m3u8")) MediaContainer.HLS else MediaContainer.MP4,
-                            isStreamEmbed = false
-                        )
-                    )
+            try {
+                val deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1_500L)
+                repeat(futures.size) {
+                    val remNs = deadlineNs - System.nanoTime()
+                    if (remNs <= 0L || Thread.currentThread().isInterrupted) return@repeat
+                    val fut = runCatching { cs.poll(remNs, TimeUnit.NANOSECONDS) }.getOrNull() ?: return@repeat
+                    val pair = runCatching { fut.get() }.getOrNull() ?: return@repeat
+                    val (tabQ, urlAndDoc) = pair
+                    harvestYlnimePageCandidates(urlAndDoc.second, urlAndDoc.first, tabQ, targetQualities, seenKeys, results)
                 }
+            } finally {
+                futures.forEach { if (!it.isDone) it.cancel(true) }
             }
         }
 
-        // 2. Tautan Pixeldrain & hoster cepat langsung di halaman YLnime
-        results.addAll(harvestFallbackCandidates(epDoc, epUrlWithReso, results))
-
-        // 3. Fallback WebView EmbedMediaSniffer untuk player HTML5 YLnime yang memuat stream via JavaScript
-        //    (mis. Movie tanpa link download terpisah atau saat 1080p auto-fallback ke 720p di sisi klien).
+        // Fallback WebView EmbedMediaSniffer untuk player HTML5 YLnime yang memuat stream via JavaScript
         if (results.isEmpty() && epUrlWithReso.startsWith("http")) {
             val no1080 = epDoc.text().contains("1080p tidak tersedia", ignoreCase = true)
             val sniffUrl = if (no1080 && epUrlWithReso.contains("reso=1080p", ignoreCase = true)) {
@@ -671,5 +734,144 @@ class YlnimeSourceProvider(
             )
         }
         return results
+    }
+
+    private fun harvestYlnimePageCandidates(
+        epDoc: Document,
+        pageUrl: String,
+        qDefault: MkvQuality,
+        targetQualities: Set<MkvQuality>,
+        seenKeys: MutableSet<String>,
+        results: MutableList<RawMkvCandidate>
+    ) {
+        // 1. Pemutar HTML5 <video><source src="..." size="720" label="720p"> (server Animeverse YLnime)
+        val fallbackVideoCandidates = mutableListOf<RawMkvCandidate>()
+        epDoc.select("video source[src], video[src]").forEach { el ->
+            val src = el.absUrl("src").trim()
+            if (!src.startsWith("http") || HosterFilter.isBlacklisted("Animeverse", src)) return@forEach
+            val q = inferElementQuality(el, el.attr("label"), src, qDefault)
+            val key = "${q.label}|$src"
+            if (!seenKeys.add(key)) return@forEach
+            val isDirectCdn = src.contains(".animeverse.id/", ignoreCase = true) ||
+                src.contains(".animekita.org/", ignoreCase = true) ||
+                src.contains("pixeldrain.", ignoreCase = true)
+            val cand = RawMkvCandidate(
+                source = priority,
+                quality = q,
+                hosterLabel = "Animeverse",
+                rawUrl = src,
+                pageReferer = pageUrl,
+                container = if (src.contains(".m3u8", ignoreCase = true)) MediaContainer.HLS else MediaContainer.MP4,
+                isStreamEmbed = !isDirectCdn
+            )
+            if (q in targetQualities) {
+                results.add(cand)
+            } else {
+                fallbackVideoCandidates.add(cand)
+            }
+        }
+        if (results.isEmpty() && fallbackVideoCandidates.isNotEmpty()) {
+            results.addAll(fallbackVideoCandidates)
+        }
+
+        // 1b. Ekstrak URL video/Pixeldrain dari atribut data-src/data-video/data-url dan inline <script> YLnime
+        epDoc.select("[data-src], [data-video], [data-url]").forEach { el ->
+            val raw = el.attr("data-src").ifBlank { el.attr("data-video") }.ifBlank { el.attr("data-url") }.trim()
+            if (raw.startsWith("http") && !HosterFilter.isBlacklisted("Animeverse", raw)) {
+                val low = raw.lowercase(Locale.ROOT)
+                if (low.contains(".mp4") || low.contains(".m3u8") || low.contains("pixeldrain.")) {
+                    val q = inferElementQuality(el, el.text(), raw, qDefault)
+                    val key = "${q.label}|$raw"
+                    if (seenKeys.add(key)) {
+                        val isDirect = low.contains("pixeldrain.") || low.contains(".animeverse.id/") || low.contains(".animekita.org/")
+                        results.add(
+                            RawMkvCandidate(
+                                source = priority,
+                                quality = q,
+                                hosterLabel = if (low.contains("pixeldrain.")) "Pixeldrain" else "Animeverse",
+                                rawUrl = raw,
+                                pageReferer = pageUrl,
+                                container = if (low.contains(".m3u8")) MediaContainer.HLS else MediaContainer.MP4,
+                                isStreamEmbed = !isDirect
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        val streamsJsonRe = Regex("""(?:const|let|var)\s+streams\s*=\s*(\[[\s\S]*?\])\s*;""")
+        val scriptMediaRe = Regex(
+            """["'](https?://(?:[^"'\s<>]+\.(?:mp4|m3u8)(?:\?[^"'\s<>]*)?|(?:www\.)?pixeldrain\.(?:com|net|lu)/(?:u|api/file)/[A-Za-z0-9_-]+(?:\?[^"'\s<>]*)?))["']""",
+            RegexOption.IGNORE_CASE
+        )
+        epDoc.select("script").forEach { sc ->
+            val rawBody = sc.data()
+            if (rawBody.isBlank()) return@forEach
+            streamsJsonRe.find(rawBody)?.groupValues?.getOrNull(1)?.let { arrJson ->
+                runCatching {
+                    val arr = org.json.JSONArray(arrJson)
+                    for (idx in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(idx) ?: continue
+                        val link = obj.optString("link").replace("\\/", "/").replace(" ", "%20").trim()
+                        if (!link.startsWith("http")) continue
+                        val low = link.lowercase(Locale.ROOT)
+                        val hostLabel = when {
+                            low.contains("pixeldrain.") -> "Pixeldrain"
+                            low.contains("animekita.") -> "AnimeKita"
+                            else -> "Animeverse"
+                        }
+                        if (HosterFilter.isBlacklisted(hostLabel, link)) continue
+                        val q = MkvQuality.fromText(obj.optString("reso"))
+                            ?: MkvQuality.fromText(obj.optString("quality"))
+                            ?: MkvQuality.fromText(obj.optString("label"))
+                            ?: MkvQuality.fromText(link)
+                            ?: qDefault
+                        val key = "${q.label}|$link"
+                        if (!seenKeys.add(key)) continue
+                        results.add(
+                            RawMkvCandidate(
+                                source = priority,
+                                quality = q,
+                                hosterLabel = hostLabel,
+                                rawUrl = link,
+                                pageReferer = pageUrl,
+                                container = if (low.contains(".m3u8")) MediaContainer.HLS else MediaContainer.MP4,
+                                isStreamEmbed = false
+                            )
+                        )
+                    }
+                }
+            }
+            val body = rawBody.replace("\\/", "/")
+            scriptMediaRe.findAll(body).forEach { m ->
+                val raw = m.groupValues[1].trim()
+                if (raw.startsWith("http") && !HosterFilter.isBlacklisted("Animeverse", raw)) {
+                    val low = raw.lowercase(Locale.ROOT)
+                    val q = MkvQuality.fromText(raw) ?: qDefault
+                    val key = "${q.label}|$raw"
+                    if (seenKeys.add(key)) {
+                        results.add(
+                            RawMkvCandidate(
+                                source = priority,
+                                quality = q,
+                                hosterLabel = if (low.contains("pixeldrain.")) "Pixeldrain" else "Animeverse",
+                                rawUrl = raw,
+                                pageReferer = pageUrl,
+                                container = if (low.contains(".m3u8")) MediaContainer.HLS else MediaContainer.MP4,
+                                isStreamEmbed = false
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // 2. Tautan Pixeldrain & hoster cepat langsung di halaman YLnime dengan deteksi resolusi konteks elemen
+        val fallbackAdded = harvestFallbackCandidates(epDoc, pageUrl, results, qDefault)
+        for (c in fallbackAdded) {
+            if (seenKeys.add("${c.quality.label}|${c.rawUrl}")) {
+                results.add(c)
+            }
+        }
     }
 }

@@ -272,20 +272,26 @@ class PlayerManager(
             val friendly = ErrorMapper.mapExoPlayerError(error, appContext)
             val req = lastRequest
             val wasPlaying = exoPlayer?.playWhenReady ?: true
-            val isMidStreamNotFound = friendly.reason == FailureReason.NOT_FOUND && (_snapshot.value.positionMs > 0L)
+            // Source error (HTTP 404/NOT_FOUND, 403, 410/EXPIRED, DNS, TIMEOUT, NETWORK) pada kandidat pertama
+            // baik saat positionMs == 0L maupun mid-stream wajib memicu failover ke kandidat/provider berikutnya!
             val isTransportError = friendly.reason == FailureReason.NETWORK ||
                 friendly.reason == FailureReason.TIMEOUT ||
                 friendly.reason == FailureReason.HTTP_403 ||
                 friendly.reason == FailureReason.EXPIRED ||
-                isMidStreamNotFound
-            val badDirectUrl = activeStreamSession?.candidates?.firstOrNull()?.directUrl
-                ?: activeStreamSession?.localHttpUrl
+                friendly.reason == FailureReason.NOT_FOUND ||
+                friendly.reason == FailureReason.DNS
+            val badCandidate = activeStreamSession?.candidates?.firstOrNull()
+            val badDirectUrl = badCandidate?.directUrl ?: activeStreamSession?.localHttpUrl
             if (!badDirectUrl.isNullOrBlank()) {
                 id.my.milkglass.source.DeadCandidateCache.markDead(badDirectUrl)
-                if (req != null && (friendly.reason == FailureReason.HTTP_403 || friendly.reason == FailureReason.NOT_FOUND || friendly.reason == FailureReason.TIMEOUT)) {
+                badCandidate?.rawUrl?.takeIf { it.isNotBlank() }?.let {
+                    id.my.milkglass.source.DeadCandidateCache.markDead(it)
+                }
+                if (req != null && (friendly.reason == FailureReason.HTTP_403 || friendly.reason == FailureReason.NOT_FOUND || friendly.reason == FailureReason.EXPIRED || friendly.reason == FailureReason.TIMEOUT)) {
                     val reportCode = when (friendly.reason) {
                         FailureReason.HTTP_403 -> 403
                         FailureReason.NOT_FOUND -> 404
+                        FailureReason.EXPIRED -> 410
                         else -> 504
                     }
                     val searchTitle = req.romajiTitle.ifBlank { req.title }.trim()
@@ -839,10 +845,6 @@ class PlayerManager(
 
     fun getDuration(): Long = exoPlayer?.duration?.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
 
-    /**
-     * Opportunistic background full-episode caching untuk optimalisasi seekbar (maju-mundur tanpa reload).
-     * Disesuaikan dengan ruang kosong perangkat (>= 512 MiB) dan selalu mengalah saat player sedang buffering.
-     */
     private fun startBackgroundFullCache(session: LocalStreamSession, cacheKey: String, sessionId: Long) {
         fullCacheJob?.cancel()
         fullCacheJob = playerScope.launch(Dispatchers.IO) {
@@ -852,7 +854,6 @@ class PlayerManager(
             if (availableDiskBytes < MIN_FREE_DISK_FOR_FULL_CACHE_BYTES) return@launch
 
             val maxBudgetBytes = computeAdaptiveCacheBytes(availableDiskBytes)
-            // Tunggu pemutaran awal stabil terlebih dahulu
             delay(2_500L)
 
             val sharedOkHttp = EngineRuntime.get(appContext).clients.streamingClient
@@ -1014,7 +1015,8 @@ class PlayerManager(
         ): id.my.milkglass.source.ResolvedMkvMedia? {
             val alive = candidates.filter { cand ->
                 cand.directUrl != failedUrl &&
-                    !id.my.milkglass.source.DeadCandidateCache.isDead(cand.directUrl)
+                    !id.my.milkglass.source.DeadCandidateCache.isDead(cand.directUrl) &&
+                    !id.my.milkglass.source.DeadCandidateCache.isDead(cand.rawUrl)
             }
             if (alive.isEmpty()) return null
             return if (preferCompatibleContainer) {
@@ -1061,7 +1063,7 @@ class PlayerManager(
 
         internal fun setVideoBuffering(buffering: Boolean) {
             _isVideoBuffering.value = buffering
-        PlaybackBandwidthGate.onBufferingChanged(buffering)
+            PlaybackBandwidthGate.onBufferingChanged(buffering)
         }
 
         internal fun getSharedStreamCache(context: Context): androidx.media3.datasource.cache.Cache? = getStreamCache(context.applicationContext)
@@ -1081,11 +1083,6 @@ class PlayerManager(
             }
         }
 
-        /**
-         * Pre-buffer 2 tahap ke SimpleCache memakai CacheWriter:
-         * Tahap 1: 2 MiB awal (header + frame awal) untuk warm start <300ms.
-         * Tahap 2: 256 KiB ekor (MKV Cues) atau 512 KiB ekor (MP4 non-faststart moov) bila Content-Length diketahui.
-         */
         suspend fun prebufferEpisode(
             context: Context,
             session: LocalStreamSession,

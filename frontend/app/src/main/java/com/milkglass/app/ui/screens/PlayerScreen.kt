@@ -227,8 +227,8 @@ fun PlayerScreen(ctl: AppController, entry: ViewEntry.Player) {
                 EngineRuntime.get(context.applicationContext).prefetchEpisode(
                     e.anime.title, e.anime.romaji, nextEp, ctl.preferredQuality,
                     maxAgeMs = if (nearEnd) 5L * 60L * 1000L else Long.MAX_VALUE,
-                    prebuffer = nearEnd,
-                    prebufferHeadBytes = if (metered) {
+                    prebuffer = true,
+                    prebufferHeadBytes = if (metered || !nearEnd) {
                         PlayerManager.PREBUFFER_METERED_HEAD_BYTES
                     } else {
                         PlayerManager.PREBUFFER_HEAD_BYTES

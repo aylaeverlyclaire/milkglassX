@@ -15,8 +15,24 @@ object RemoteMapper {
     private const val STATUS_RELEASING = 1
     private const val WIB_OFFSET_MS = 7 * 3_600_000L
     private const val DAY_MS = 86_400_000L
+    const val MAX_ALLOWED_EPISODES = 500
     private val digits = Regex("""\d+""")
     private val year = Regex("""\d{4}""")
+    private val bannedFranchiseRegex = Regex(
+        """\b(?:detective[\s\-_]*conan|meitantei[\s\-_]*conan|case[\s\-_]*closed|naruto|boruto|one[\s\-_]*piece|1piece)\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun isExcludedAnime(r: RemoteAnime): Boolean {
+        if (r.episodesTotal > MAX_ALLOWED_EPISODES) return true
+        if (bannedFranchiseRegex.containsMatchIn(r.title)) return true
+        if (!r.titleAlt.isNullOrBlank() && bannedFranchiseRegex.containsMatchIn(r.titleAlt)) return true
+        if (r.sourceUrls.values.any { bannedFranchiseRegex.containsMatchIn(it) }) return true
+        return false
+    }
+
+    fun toEntries(list: List<RemoteAnime>): List<CatalogEntry> =
+        list.filterNot(::isExcludedAnime).map(::toEntry)
 
     fun toEntry(r: RemoteAnime): CatalogEntry =
         CatalogEntry(toAnime(r), r.posterUrl?.takeIf { it.startsWith("https://") }, r.malId)

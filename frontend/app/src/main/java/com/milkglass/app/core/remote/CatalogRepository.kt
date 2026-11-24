@@ -179,7 +179,7 @@ class CatalogRepository(
         val store = snapshots ?: return null
         val st = state(store) ?: return null
         val resp = store.readBody()?.let { decodeSnapshot(it) } ?: return null
-        return CachedSnapshot(resp.data.map(RemoteMapper::toEntry), st.complete)
+        return CachedSnapshot(RemoteMapper.toEntries(resp.data), st.complete)
     }
 
     suspend fun refreshSnapshot(force: Boolean = false): RefreshOutcome {
@@ -225,7 +225,7 @@ class CatalogRepository(
                 complete = complete,
             ),
         )
-        return RefreshOutcome.Updated(resp.data.map(RemoteMapper::toEntry), complete)
+        return RefreshOutcome.Updated(RemoteMapper.toEntries(resp.data), complete)
     }
 
     private suspend fun failed(store: SnapshotStore, st: SnapshotState?, now: Long): RefreshOutcome {
@@ -282,7 +282,7 @@ class CatalogRepository(
         return try {
             val resp = RemoteJson.decodeFromString(BrowseResponse.serializer(), body)
             if (resp.status != "ok") Result.failure(CatalogUnavailable(resp.message ?: "Respons katalog tidak valid."))
-            else Result.success(resp.data.map(RemoteMapper::toEntry))
+            else Result.success(RemoteMapper.toEntries(resp.data))
         } catch (e: Exception) {
             Result.failure(CatalogUnavailable("Respons katalog tidak valid."))
         }
@@ -298,11 +298,11 @@ class CatalogRepository(
             (root["data"] as? JsonArray)?.forEach { el ->
                 runCatching {
                     val r = RemoteJson.decodeFromJsonElement(RemoteAnime.serializer(), el)
-                    out += RemoteMapper.toEntry(r)
+                    if (!RemoteMapper.isExcludedAnime(r)) {
+                        out += RemoteMapper.toEntry(r)
+                    }
                 }
             }
-            // Katalog & hasil pencarian hanya berasal dari Otakudesu & YLnime (`data`),
-            // tidak pernah mengambil item katalog fallback dari AniList (`metadata`).
             out
         } catch (e: Exception) {
             emptyList()
@@ -315,8 +315,11 @@ class CatalogRepository(
         return try {
             val resp = RemoteJson.decodeFromString(DetailResponse.serializer(), body)
             val data = resp.data
-            if (resp.status != "ok" || data == null) Result.failure(CatalogUnavailable(resp.message ?: "Judul tidak ditemukan."))
-            else Result.success(RemoteMapper.toEntry(data))
+            if (resp.status != "ok" || data == null || RemoteMapper.isExcludedAnime(data)) {
+                Result.failure(CatalogUnavailable(resp.message ?: "Judul tidak ditemukan."))
+            } else {
+                Result.success(RemoteMapper.toEntry(data))
+            }
         } catch (e: Exception) {
             Result.failure(CatalogUnavailable("Respons katalog tidak valid."))
         }
@@ -342,10 +345,10 @@ class CatalogRepository(
         val syncedAt = resp.meta.syncedAt
         val ageSec = syncedAt?.let { nowMs() / 1000 - it }
         return CatalogHome(
-            ongoing = data.ongoing.map(RemoteMapper::toEntry),
-            popular = data.popular.map(RemoteMapper::toEntry),
-            completed = data.tamat.map(RemoteMapper::toEntry),
-            extras = data.extras.map(RemoteMapper::toEntry),
+            ongoing = RemoteMapper.toEntries(data.ongoing),
+            popular = RemoteMapper.toEntries(data.popular),
+            completed = RemoteMapper.toEntries(data.tamat),
+            extras = RemoteMapper.toEntries(data.extras),
             syncedAtSec = syncedAt,
             source = source,
             stale = ageSec == null || ageSec > CATALOG_STALE_AFTER_SEC,

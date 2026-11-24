@@ -229,4 +229,18 @@ class RemoteCatalogTest {
         assertEquals("Sinopsis", r.detail(301).getOrThrow().anime.synopsis)
         assertTrue(r.detail(9).exceptionOrNull() is CatalogUnavailable)
     }
+
+    @Test fun excludedFranchisesAndOver500EpisodesAreFilteredOut() {
+        val conan = remote(ongoingJson).copy(id = 1533192982, title = "Detective Conan", episodesTotal = 1200)
+        val meitantei = remote(ongoingJson).copy(id = 1047429090, title = "Meitantei Conan: Hannin no Hanzawa-san", episodesTotal = 12)
+        val naruto = remote(ongoingJson).copy(id = 1213776837, title = "Naruto Bocil", episodesTotal = 220)
+        val shippuuden = remote(ongoingJson).copy(id = 1496322565, title = "Naruto: Shippuuden", episodesTotal = 500)
+        val boruto = remote(ongoingJson).copy(id = 1571382747, title = "Boruto: Naruto Next Generations", episodesTotal = 293)
+        val onePiece = remote(ongoingJson).copy(id = 1555631549, title = "One Piece", episodesTotal = 1174)
+        val martialMaster = remote(ongoingJson).copy(id = 1389695603, title = "Martial Master", episodesTotal = 720)
+        val frieren = remote(ongoingJson).copy(id = 154587, title = "Sousou no Frieren", episodesTotal = 28)
+
+        val entries = RemoteMapper.toEntries(listOf(conan, meitantei, naruto, shippuuden, boruto, onePiece, martialMaster, frieren))
+        assertEquals(listOf(154587), entries.map { it.anime.id })
+    }
 }

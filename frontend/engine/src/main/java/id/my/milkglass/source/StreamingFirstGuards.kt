@@ -80,15 +80,9 @@ internal object StreamingFirstGuards {
         targetQualities: Set<MkvQuality>,
         deadOrAdMirrorTokens: List<String>
     ): Boolean {
-        val hasHealthyDefault = defaultEmbeds.any { !it.rawUrl.contains("nekocloud", ignoreCase = true) }
-        if (!hasHealthyDefault) return mirrorLinks.isNotEmpty()
-        val wantsHd = MkvQuality.P720 in targetQualities || MkvQuality.P1080 in targetQualities
-        if (!wantsHd) return false
-        val alreadyHasHd = defaultEmbeds.any {
-            (it.quality == MkvQuality.P720 || it.quality == MkvQuality.P1080) &&
-                !it.rawUrl.contains("nekocloud", ignoreCase = true)
-        }
-        if (alreadyHasHd) return false
+        val healthyDefaults = defaultEmbeds.filter { !it.rawUrl.contains("nekocloud", ignoreCase = true) }
+        if (healthyDefaults.isEmpty()) return mirrorLinks.isNotEmpty()
+        val coveredQualities = healthyDefaults.map { it.quality }.toSet()
         return mirrorLinks.any { a ->
             val label = a.text().trim()
             val lowLabel = label.lowercase(Locale.ROOT)
@@ -96,8 +90,8 @@ internal object StreamingFirstGuards {
                 return@any false
             }
             val ulClass = a.parents().firstOrNull { it.tagName() == "ul" }?.className().orEmpty()
-            val q = MkvQuality.fromText(ulClass) ?: MkvQuality.P720
-            q in targetQualities && (q == MkvQuality.P720 || q == MkvQuality.P1080)
+            val q = MkvQuality.fromText(ulClass) ?: MkvQuality.fromText(a.text()) ?: MkvQuality.P720
+            q in targetQualities && q !in coveredQualities
         }
     }
 
@@ -143,8 +137,8 @@ internal object StreamingFirstGuards {
 
     /**
      * Skema Zero-WebView First (target play 1-2 detik):
-     * - Tier 0: Direct-API Hoster / Direct Media (Pixeldrain, Filedon, Buzzheavier, GoFile, .mp4/.m3u8) -> 0 WebView (0.6-1.5s)
-     * - Tier 1: HTTP-only Stream Embed (odstream, odcdn, blogger, desustream) -> 0 WebView (1.0-1.8s)
+     * - Tier 0: Direct-API Hoster / Direct Media (Pixeldrain, Filedon, Buzzheavier, GoFile, .mp4/.m3u8) -> 0 WebView (0.4-1.2s)
+     * - Tier 1: HTTP-only Stream Embed (odstream, odcdn, blogger, desustream) -> 0 WebView (0.8-1.6s)
      * - Tier 2: Hoster non-embed generik lainnya
      * - Tier 3: Embed berbasis WebView sniffer (YLnimePlayer / player JS berat) -> cadangan terakhir (2.8-6.8s)
      */
@@ -180,10 +174,16 @@ internal object StreamingFirstGuards {
                 c.rank
             }
         }
+        val preferredQuality = qualityOrder.firstOrNull()
         val primaryComparator = if (preferStreamingEmbeds) {
-            compareBy<RawMkvCandidate> { zeroWebViewTier(it) }
+            // Utamakan jalur Zero-WebView (Tier 0 & Tier 1) terlebih dahulu, lalu dahulukan resolusi
+            // yang diminta pengguna (preferredQuality) sebelum jatuh ke resolusi cadangan.
+            compareBy<RawMkvCandidate> { if (zeroWebViewTier(it) <= 1) 0 else 1 }
+                .thenBy { if (preferredQuality != null && it.quality == preferredQuality) 0 else 1 }
+                .thenBy { zeroWebViewTier(it) }
         } else {
             compareBy<RawMkvCandidate> { if (it.isStreamEmbed) 1 else 0 }
+                .thenBy { if (preferredQuality != null && it.quality == preferredQuality) 0 else 1 }
                 .thenBy { zeroWebViewTier(it) }
         }
         return candidates

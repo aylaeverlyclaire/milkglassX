@@ -17,10 +17,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * Prioritas Sumber (berlaku per resolusi):
- * Hanya Otakudesu dan YLnime (watermarkTier 0) (watermarkTier 2).
- */
 enum class SourcePriority(
     val rank: Int,
     val id: String,
@@ -62,9 +58,9 @@ enum class MkvQuality(val label: String, val height: Int) {
         fun fromText(text: String): MkvQuality? {
             val low = text.lowercase(Locale.ROOT).trim()
             return when {
-                low.contains("1080") || low.contains("fullhd") || low == "fhd" -> P1080
-                low.contains("720") || low.contains("mp4hd") || low == "hd" -> P720
-                low.contains("480") || low == "mini" || low == "sd" -> P480
+                low.contains("1080") || low.contains("fullhd") || low == "fhd" || Regex("""\bfhd\b""").containsMatchIn(low) -> P1080
+                low.contains("720") || low.contains("mp4hd") || low == "hd" || Regex("""\bhd\b""").containsMatchIn(low) -> P720
+                low.contains("480") || low == "mini" || low == "sd" || Regex("""\bsd\b""").containsMatchIn(low) -> P480
                 low.contains("360") -> P360
                 else -> null
             }
@@ -95,7 +91,8 @@ data class ResolvedMkvMedia(
     val isBatchArchive: Boolean = false,
     val container: MediaContainer = MediaContainer.MKV,
     val isHls: Boolean = false,
-    val extraHeaders: Map<String, String> = emptyMap()
+    val extraHeaders: Map<String, String> = emptyMap(),
+    val rawUrl: String = directUrl
 )
 
 data class CascadeDiagnostics(
@@ -293,9 +290,6 @@ internal object TitleMatcher {
     private val romajiUuRegex = Regex("""uu""")
     private val romajiOoRegex = Regex("""oo""")
 
-    /**
-     * Lapis 1: Normalisasi kanonis + fonetik/Romaji (tahan simbol, tag noise, ejaan UK/US, & Romaji).
-     */
     internal fun normalizePhoneticTokens(raw: String): List<String> {
         val cleaned = parenBracketStripRegex.replace(foldDiacritics(raw), " ")
             .lowercase(Locale.ROOT)
@@ -330,9 +324,6 @@ internal object TitleMatcher {
         return if (subCompact.length >= 4) subCompact else ""
     }
 
-    /**
-     * Lapis 2a: Kemiripan Bigram Karakter (Dice) — simetris, tahan typo 2 arah & urutan kata tertukar.
-     */
     internal fun bigramDice(a: String, b: String): Double {
         if (a.length < 2 || b.length < 2) return if (a == b && a.isNotEmpty()) 1.0 else 0.0
         val counts = HashMap<String, Int>(a.length)
@@ -352,9 +343,6 @@ internal object TitleMatcher {
         return (2.0 * inter) / ((a.length - 1) + (b.length - 1)).toDouble()
     }
 
-    /**
-     * Lapis 2b: Rasio subsequence berurutan (mengabaikan spasi, simbol, dan teks tambahan).
-     */
     internal fun orderedSubsequenceRatio(needle: String, haystack: String): Double {
         if (needle.isEmpty() || haystack.isEmpty()) return 0.0
         var matched = 0
@@ -409,7 +397,6 @@ internal object TitleMatcher {
             if (forward >= 0.88 && lenRatio >= 0.58) forward else 0.0
         } else 0.0
 
-        // Lapis 3: Kunci Identitas Subjudul/Arc (mencegah Dead or Bullet tertukar Nightmare or Queen)
         val qSub = extractDistinctiveSubtitle(query)
         val cSub = extractDistinctiveSubtitle(candidate)
         val subtitleConflict = if (qSub.length >= 4 && cSub.length >= 4 && coreTokenJaccard < 0.80) {
@@ -438,7 +425,6 @@ internal object TitleMatcher {
         if (subtitleConflict) {
             sc -= 0.90
         }
-        // Lapis 4: Format Override jika inti judul/subjudul cocok kuat dan tidak ada konflik subjudul
         val strongCoreMatch = !subtitleConflict && qCoreOrdered.length >= 10 && cCoreOrdered.length >= 10 &&
             (qCoreOrdered == cCoreOrdered || coreTokenJaccard >= 0.85 || dice >= 0.84 || subseqRatio >= 0.90)
         if (pq.formatKind != pc.formatKind && !strongCoreMatch) {
@@ -528,6 +514,7 @@ object DeadCandidateCache {
 
     fun isDead(rawUrl: String): Boolean {
         val key = rawUrl.trim()
+        if (key.isEmpty()) return false
         val exp = deadUntil[key] ?: return false
         if (System.currentTimeMillis() > exp) {
             deadUntil.remove(key, exp)
@@ -740,6 +727,30 @@ class MkvCascadeResolver(
         return list.filterNot { it.isBatchArchive }.map { it.quality }.distinct().sortedByDescending { it.height }
     }
 
+    /**
+     * Menggabungkan kandidat baru (mis. hasil ResolutionConsolidator atau Server Split-Plane)
+     * ke dalam rawCache & rawStore agar semua resolusi 480p-1080p siap dipakai saat switchResolution.
+     */
+    fun mergeExternalCandidates(
+        animeTitle: String,
+        episodeNumber: Int,
+        extra: List<RawMkvCandidate>
+    ): List<MkvQuality> {
+        if (extra.isEmpty()) return cachedQualitiesFor(animeTitle, episodeNumber)
+        val cacheKey = "${animeTitle.lowercase(Locale.ROOT).trim()}#$episodeNumber"
+        val nowMs = System.currentTimeMillis()
+        val existing = rawCache[cacheKey]?.takeIf { nowMs - it.cachedAtMs <= RAW_CACHE_TTL_MS }?.candidates
+            ?: rawStore?.get(cacheKey, DISK_RAW_TTL_MS)
+            ?: emptyList()
+        val mergedMap = LinkedHashMap<String, RawMkvCandidate>()
+        for (c in existing + extra) {
+            mergedMap.putIfAbsent("${c.quality.label}|${c.rawUrl}", c)
+        }
+        val merged = mergedMap.values.toList()
+        putRawCache(cacheKey, merged, nowMs)
+        return merged.filterNot { it.isBatchArchive }.map { it.quality }.distinct().sortedByDescending { it.height }
+    }
+
     fun warmEpisodeCandidates(animeTitle: String, episodeNumber: Int): Boolean {
         val cacheKey = "${animeTitle.lowercase(Locale.ROOT).trim()}#$episodeNumber"
         val nowMs = System.currentTimeMillis()
@@ -780,7 +791,8 @@ class MkvCascadeResolver(
 
     fun verifyDirect(list: List<ResolvedMkvMedia>): List<ResolvedMkvMedia> {
         if (list.isEmpty()) return emptyList()
-        val batch = list.take(4)
+        val batch = list.filterNot { DeadCandidateCache.isDead(it.directUrl) || DeadCandidateCache.isDead(it.rawUrl) }.take(4)
+        if (batch.isEmpty()) return emptyList()
         val cs = ExecutorCompletionService<ResolvedMkvMedia?>(sharedExtractionPool)
         val futures = batch.map { m ->
             cs.submit {
@@ -797,12 +809,15 @@ class MkvCascadeResolver(
                         )
                     )
                 }.getOrDefault(false)
-                if (ok) m else null
+                if (ok) m else {
+                    DeadCandidateCache.markDead(m.directUrl)
+                    DeadCandidateCache.markDead(m.rawUrl)
+                    null
+                }
             }
         }
         val verified = mutableListOf<ResolvedMkvMedia>()
-        var deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1_800L)
-        val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(120L)
+        val deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1_800L)
         try {
             repeat(futures.size) {
                 if (Thread.currentThread().isInterrupted) return@repeat
@@ -817,7 +832,6 @@ class MkvCascadeResolver(
                 val hit = runCatching { fut.get() }.getOrNull()
                 if (hit != null) {
                     verified.add(hit)
-                    // Prinsip Zero-Hostage: begitu 1 stream lolos verifikasi, langsung kembalikan tanpa menyandera pemutar
                     return@repeat
                 }
             }
@@ -930,17 +944,22 @@ class MkvCascadeResolver(
             ?: rawStore?.get(cacheKey, DISK_RAW_TTL_MS)?.also { rawCache[cacheKey] = CachedEpisodeCandidates(nowMs, it) }
 
         if (!cachedRaw.isNullOrEmpty()) {
-            val usableCached = rankCandidates(cachedRaw, qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds)
-            val cachedQualities = usableCached.map { it.quality }.distinct().sortedByDescending { it.height }
-            val fastResolved = raceExtractByQualityOrder(usableCached, qualityOrder, maxResults = 3, preferStreamingEmbeds = preferStreamingEmbeds)
-            if (fastResolved.isNotEmpty()) {
-                return CascadeResult.Success(
-                    selected = fastResolved.first(),
-                    alternatives = fastResolved.drop(1),
-                    diagnostics = CascadeDiagnostics(attempted, errors, cfHosts),
-                    availableQualities = cachedQualities
-                )
+            val aliveRaw = cachedRaw.filterNot { DeadCandidateCache.isDead(it.rawUrl) }
+            if (aliveRaw.isNotEmpty()) {
+                val usableCached = rankCandidates(aliveRaw, qualityOrder, allowBatchFallback, preferCompatibleContainer, preferStreamingEmbeds)
+                val cachedQualities = usableCached.map { it.quality }.distinct().sortedByDescending { it.height }
+                val fastResolved = raceExtractByQualityOrder(usableCached, qualityOrder, maxResults = 3, preferStreamingEmbeds = preferStreamingEmbeds)
+                if (fastResolved.isNotEmpty()) {
+                    return CascadeResult.Success(
+                        selected = fastResolved.first(),
+                        alternatives = fastResolved.drop(1),
+                        diagnostics = CascadeDiagnostics(attempted, errors, cfHosts),
+                        availableQualities = cachedQualities
+                    )
+                }
             }
+            // Jika seluruh kandidat di rawCache sudah mati, bersihkan cache dan jatuh ke scrape live lintas provider.
+            rawCache.remove(cacheKey)
         }
 
         val activeProviders = orderedProviders.filter { provider ->
@@ -955,8 +974,6 @@ class MkvCascadeResolver(
         var idx = 0
         if (Thread.currentThread().isInterrupted) return cancelledFailure(attempted, errors, cfHosts)
         if (activeProviders.size >= 2) {
-            // Optimasi #1: Balapkan Otakudesu & YLnime secara paralel penuh sejak t=0ms (tanpa jeda hedge),
-            // first-playable-wins langsung membatalkan provider lainnya.
             val fanOutCount = minOf(activeProviders.size, 2)
             val raceQueue = LinkedBlockingQueue<ProviderResolvedOutcome>(fanOutCount)
             val abandoned = AtomicBoolean(false)
@@ -1046,8 +1063,16 @@ class MkvCascadeResolver(
 
     private fun putRawCache(cacheKey: String, candidates: List<RawMkvCandidate>, nowMs: Long) {
         if (rawCache.size > 64) rawCache.clear()
-        rawCache[cacheKey] = CachedEpisodeCandidates(nowMs, candidates)
-        rawStore?.put(cacheKey, candidates)
+        val existing = rawCache[cacheKey]?.candidates.orEmpty()
+        val merged = if (existing.isEmpty()) {
+            candidates
+        } else {
+            val map = LinkedHashMap<String, RawMkvCandidate>()
+            for (c in candidates + existing) map.putIfAbsent("${c.quality.label}|${c.rawUrl}", c)
+            map.values.toList()
+        }
+        rawCache[cacheKey] = CachedEpisodeCandidates(nowMs, merged)
+        rawStore?.put(cacheKey, merged)
     }
 
     internal fun rankCandidates(
@@ -1064,14 +1089,6 @@ class MkvCascadeResolver(
         preferStreamingEmbeds = preferStreamingEmbeds
     )
 
-    /**
-     * Arsitektur 2-Tahap Ketat:
-     * - Tahap 1 (Embed-First Eksklusif): HANYA kandidat stream embed langsung yang aktif dan diuji lebih dulu.
-     *   Hoster download tidak disentuh sama sekali selama Tahap 1.
-     * - Tahap 2 (Fallback 4 Hoster Cepat & Sumber 1080p): Hanya aktif otomatis jika Tahap 1 gagal
-     *   atau jika 1080p diminta namun tidak tersedia di embed. Hanya memakai 4 hoster cepat
-     *   (Pixeldrain, GoFile, Buzzheavier, Filedon/Odfiles).
-     */
     private fun raceExtractByQualityOrder(
         candidates: List<RawMkvCandidate>,
         qualityOrder: List<MkvQuality>,
@@ -1080,18 +1097,30 @@ class MkvCascadeResolver(
     ): List<ResolvedMkvMedia> {
         val totalDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(11L)
         val embeds = candidates.filter { it.isStreamEmbed }.distinctBy { it.rawUrl }
-        val wants1080p = qualityOrder.firstOrNull() == MkvQuality.P1080
+        val preferredQuality = qualityOrder.firstOrNull()
+        val wants1080p = preferredQuality == MkvQuality.P1080
         val embedHas1080p = embeds.any { it.quality == MkvQuality.P1080 }
 
-        // Tahap 1 (Sub-Second Zero-WebView Race): Balapkan Tier 0 Direct-API/CDN (s3.animeverse.id, animekita, Pixeldrain, Filedon, GoFile)
-        // BERSAMA Tier 1 HTTP-only Embeds sejak t=0ms agar pemenang tercepat (0.4-0.9s) langsung diputar tanpa menunggu 6.8s.
+        // Tahap 1 (Sub-Second Zero-WebView Race): Utamakan kandidat Zero-WebView yang cocok dengan preferredQuality
+        // terlebih dahulu, ditambah cadangan lintas kualitas untuk instant failover.
         if (preferStreamingEmbeds) {
-            val zeroWebViewPool = candidates
+            val allZeroWebView = candidates
                 .filter { StreamingFirstGuards.zeroWebViewTier(it) <= 1 }
-                .distinctBy { it.rawUrl }
-                .take(6)
+                .distinctBy { "${it.quality.label}|${it.rawUrl}" }
+            val preferredZeroWebView = if (preferredQuality != null) {
+                allZeroWebView.filter { it.quality == preferredQuality }
+            } else emptyList()
+            val backupZeroWebView = if (preferredQuality != null) {
+                allZeroWebView.filter { it.quality != preferredQuality }
+            } else emptyList()
+            val zeroWebViewPool = (preferredZeroWebView.take(4) + backupZeroWebView.take(3)).take(6)
             if (zeroWebViewPool.isNotEmpty()) {
-                val fastWin = raceExtractCandidates(zeroWebViewPool, maxResults = maxResults, timeoutMs = 3_200L)
+                val fastWin = raceExtractCandidates(
+                    candidates = zeroWebViewPool,
+                    maxResults = maxResults,
+                    timeoutMs = 3_200L,
+                    preferredQuality = preferredQuality
+                )
                 if (fastWin.isNotEmpty()) return fastWin
             }
             // Fallback ke embed berbasis WebView (Tier 3) jika seluruh jalur Zero-WebView gagal
@@ -1101,7 +1130,12 @@ class MkvCascadeResolver(
             if (webViewEmbeds.isNotEmpty()) {
                 val remMs = TimeUnit.NANOSECONDS.toMillis(totalDeadlineNs - System.nanoTime())
                 if (remMs > 500L) {
-                    val embedWin = raceExtractCandidates(webViewEmbeds, maxResults = maxResults, timeoutMs = remMs.coerceAtMost(5_500L))
+                    val embedWin = raceExtractCandidates(
+                        candidates = webViewEmbeds,
+                        maxResults = maxResults,
+                        timeoutMs = remMs.coerceAtMost(5_500L),
+                        preferredQuality = preferredQuality
+                    )
                     if (embedWin.isNotEmpty()) return embedWin
                 }
             }
@@ -1110,7 +1144,7 @@ class MkvCascadeResolver(
         // Tahap 2: Fallback otomatis ke 4 hoster cepat (Pixeldrain, GoFile, Buzzheavier, Filedon/Odfiles)
         val fastHosters = candidates
             .filter { !it.isStreamEmbed && id.my.milkglass.extractor.HosterFilter.isFastFallbackHoster(it.hosterLabel, it.rawUrl) }
-            .distinctBy { it.rawUrl }
+            .distinctBy { "${it.quality.label}|${it.rawUrl}" }
 
         for (quality in qualityOrder) {
             if (Thread.currentThread().isInterrupted) break
@@ -1122,15 +1156,14 @@ class MkvCascadeResolver(
                 .take(4)
             if (tier.isEmpty()) continue
             val tierBudgetMs = remainingMs.coerceAtMost(2_200L)
-            val extracted = raceExtractCandidates(tier, maxResults = maxResults, timeoutMs = tierBudgetMs)
+            val extracted = raceExtractCandidates(tier, maxResults = maxResults, timeoutMs = tierBudgetMs, preferredQuality = quality)
             if (extracted.isNotEmpty()) return extracted
         }
 
-        // Jika 1080p tidak ketemu di 4 hoster cepat dan embed belum dicoba, coba embed sebagai jaring pengaman terakhir
         if (preferStreamingEmbeds && embeds.isNotEmpty() && wants1080p && !embedHas1080p) {
             val remainingMs = TimeUnit.NANOSECONDS.toMillis(totalDeadlineNs - System.nanoTime())
             if (remainingMs > 500L) {
-                val embedFallback = raceExtractCandidates(embeds.take(4), maxResults = maxResults, timeoutMs = remainingMs.coerceAtMost(6_800L))
+                val embedFallback = raceExtractCandidates(embeds.take(4), maxResults = maxResults, timeoutMs = remainingMs.coerceAtMost(6_800L), preferredQuality = preferredQuality)
                 if (embedFallback.isNotEmpty()) return embedFallback
             }
         }
@@ -1155,18 +1188,22 @@ class MkvCascadeResolver(
             isBatchArchive = candidate.isBatchArchive || media.isArchive,
             container = detectedContainer,
             isHls = media.isHls,
-            extraHeaders = media.extraHeaders
+            extraHeaders = media.extraHeaders,
+            rawUrl = candidate.rawUrl
         )
     }
 
     private fun raceExtractCandidates(
         candidates: List<RawMkvCandidate>,
         maxResults: Int = 3,
-        timeoutMs: Long = 6_500L
+        timeoutMs: Long = 6_500L,
+        preferredQuality: MkvQuality? = null
     ): List<ResolvedMkvMedia> {
         val fresh = candidates.filterNot { DeadCandidateCache.isDead(it.rawUrl) }
-        val pool = if (fresh.isNotEmpty()) fresh else candidates
-        val batch = StreamingFirstGuards.selectExtractionBatch(pool)
+        if (fresh.isEmpty() && candidates.all { DeadCandidateCache.isDead(it.rawUrl) }) {
+            return emptyList()
+        }
+        val batch = StreamingFirstGuards.selectExtractionBatch(fresh)
         if (batch.isEmpty()) return emptyList()
         val cs = ExecutorCompletionService<ResolvedMkvMedia?>(sharedExtractionPool)
         val futures = ArrayList<Future<ResolvedMkvMedia?>>(batch.size + 1)
@@ -1188,8 +1225,10 @@ class MkvCascadeResolver(
                             }
                             if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
                             val sniffed = sniffer.invoke(topEmbed.rawUrl, topEmbed.pageReferer) ?: return@runCatching null
-                            // Wajib verifikasi untuk URL non-CDN agar halaman HTML/error tidak pernah lolos ke ExoPlayer,
-                            // tetapi lewati TCP probe kedua untuk endpoint stream biner CDN terpercaya (googlevideo/blogger/odcloud/pixeldrain API)
+                            if (DeadCandidateCache.isDead(sniffed.directUrl)) {
+                                DeadCandidateCache.markDead(topEmbed.rawUrl)
+                                return@runCatching null
+                            }
                             if (!sniffed.isArchive &&
                                 !id.my.milkglass.extractor.EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(sniffed.directUrl) &&
                                 !extractorRegistry.verifyPlayableMedia(sniffed)
@@ -1211,6 +1250,10 @@ class MkvCascadeResolver(
                             } else {
                                 unshortener.unshorten(candidate.rawUrl, candidate.pageReferer, maxHops = 5)
                             }
+                            if (DeadCandidateCache.isDead(finalUrl)) {
+                                DeadCandidateCache.markDead(candidate.rawUrl)
+                                return@runCatching null
+                            }
                             var media = extractorRegistry.extract(finalUrl, candidate.pageReferer)
                             if (media == null && candidate.isStreamEmbed && !abandoned.get() && !Thread.currentThread().isInterrupted) {
                                 val nested = StreamingFirstGuards.unwrapNestedEmbedUrl(clients, finalUrl, candidate.pageReferer)
@@ -1226,12 +1269,17 @@ class MkvCascadeResolver(
                                 }
                                 return@runCatching null
                             }
+                            if (DeadCandidateCache.isDead(media.directUrl)) {
+                                DeadCandidateCache.markDead(candidate.rawUrl)
+                                return@runCatching null
+                            }
                             if (!media.isArchive &&
                                 !id.my.milkglass.extractor.EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(media.directUrl) &&
                                 !extractorRegistry.verifyPlayableMedia(media)
                             ) {
                                 if (abandoned.get() || Thread.currentThread().isInterrupted) return@runCatching null
                                 DeadCandidateCache.markDead(candidate.rawUrl)
+                                DeadCandidateCache.markDead(media.directUrl)
                                 EndpointHealthScorer.recordFailure(media.hoster)
                                 return@runCatching null
                             }
@@ -1242,7 +1290,9 @@ class MkvCascadeResolver(
                 )
             }
             var deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
-            val firstWinGraceNs = 0L
+            // Beri jendela singkat 160ms setelah pemenang pertama agar 1-2 kandidat cadangan yang sudah hampir selesai
+            // ikut masuk ke alternatives (untuk FailoverHttpDataSource & PlayerManager) tanpa menyandera TTFF <2 detik.
+            val firstWinGraceNs = TimeUnit.MILLISECONDS.toNanos(160L)
             repeat(futures.size) {
                 if (Thread.currentThread().isInterrupted) return@repeat
                 val remainingNs = deadlineNs - System.nanoTime()
@@ -1254,7 +1304,7 @@ class MkvCascadeResolver(
                     null
                 } ?: return@repeat
                 val item = runCatching { fut.get() }.getOrNull()
-                if (item != null) {
+                if (item != null && results.none { it.directUrl == item.directUrl }) {
                     results.add(item)
                     if (results.size == 1) {
                         val graceDeadline = System.nanoTime() + firstWinGraceNs
@@ -1266,6 +1316,9 @@ class MkvCascadeResolver(
         } finally {
             abandoned.set(true)
             futures.forEach { if (!it.isDone) it.cancel(true) }
+        }
+        if (preferredQuality != null && results.size > 1) {
+            return results.sortedBy { if (it.quality == preferredQuality) 0 else 1 }
         }
         return results
     }
