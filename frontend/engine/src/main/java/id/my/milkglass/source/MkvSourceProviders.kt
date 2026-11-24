@@ -313,8 +313,10 @@ class OtakudesuSourceProvider(
                     low.contains("odstream") -> 0
                     low.contains("odcdn") -> 1
                     low.contains("filedon") -> 2
-                    low.contains("otakuwatch") -> 3
-                    low.contains("mp4load") || low.contains("mp4upload") -> 4
+                    low.contains("blogs") || low.contains("blogger") -> 3
+                    low.contains("ondesu2") || (low.contains("ondesu") && !low.contains("ondesuhd")) -> 4
+                    low.contains("otakuwatch") -> 5
+                    low.contains("mp4load") || low.contains("mp4upload") -> 6
                     else -> 10
                 }
             }
@@ -555,14 +557,10 @@ class YlnimeSourceProvider(
                     val arr = org.json.JSONArray(arrJson)
                     for (idx in 0 until arr.length()) {
                         val obj = arr.optJSONObject(idx) ?: continue
-                        val link = obj.optString("link").replace("\\/", "/").trim().replace(" ", "%20")
+                        val link = obj.optString("link").replace("\\/", "/").replace(" ", "%20").trim()
                         if (!link.startsWith("http")) continue
                         val low = link.lowercase(Locale.ROOT)
-                        val hostLabel = when {
-                            low.contains("pixeldrain.") -> "Pixeldrain"
-                            low.contains("animekita.") -> "AnimeKita"
-                            else -> "Animeverse"
-                        }
+                        val hostLabel = when { low.contains("pixeldrain.") -> "Pixeldrain"; low.contains("animekita.") -> "AnimeKita"; else -> "Animeverse" }
                         if (HosterFilter.isBlacklisted(hostLabel, link) || !seenUrls.add(link)) continue
                         val q = MkvQuality.fromText(obj.optString("reso")) ?: MkvQuality.fromText(link) ?: qDefault
                         results.add(

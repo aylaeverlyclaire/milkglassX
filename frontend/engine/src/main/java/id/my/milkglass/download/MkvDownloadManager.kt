@@ -504,7 +504,7 @@ class MkvDownloadWorker(
             val candidates = if (cachedMp4.isNotEmpty()) {
                 cachedMp4.sortedByDescending { EndpointHealthScorer.score(it.hoster) }
             } else {
-                when (val res = cascade.resolve(title, episode, quality, allowBatchFallback = false, preferCompatibleContainer = true)) {
+                when (val res = cascade.resolve(title, episode, quality, allowBatchFallback = false, preferCompatibleContainer = true, preferStreamingEmbeds = false)) {
                     is CascadeResult.Success -> (listOf(res.selected) + res.alternatives)
                         .filter(::isMp4Candidate)
                         .sortedByDescending { EndpointHealthScorer.score(it.hoster) }
