@@ -127,7 +127,8 @@ internal object StreamingFirstGuards {
                             (sLow.contains("blogger.com") || sLow.contains("ondesu") ||
                                 sLow.contains("googlevideo.com") || sLow.contains("desustream") ||
                                 sLow.contains("filedon") || sLow.contains("odcdn") || sLow.contains("otakuwatch") ||
-                                sLow.contains("filemoon"))
+                                sLow.contains("filemoon") || sLow.contains("odvidhide") || sLow.contains("vidhide") ||
+                                sLow.contains("streamruby") || sLow.contains("rubyvidhub"))
                     }
                 }
             }
@@ -137,7 +138,7 @@ internal object StreamingFirstGuards {
     private val httpOnlyEmbedTokens = listOf(
         "odstream", "odcdn", "desustream", "ondesu", "blogger.com",
         "otakuwatch", "icefile.web.id", "filedon.co", "odfiles.com",
-        "streamruby", "rubyvidhub", "filemoon"
+        "streamruby", "rubyvidhub", "filemoon", "odvidhide", "vidhide"
     )
 
     /**

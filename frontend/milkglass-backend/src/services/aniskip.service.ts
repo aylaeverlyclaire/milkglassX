@@ -13,6 +13,16 @@ interface AniSkipResultItem {
   };
 }
 
+function toValidInterval(interval: AniSkipResultItem['interval'] | undefined): { start: number; end: number } | null {
+  if (!interval) return null;
+  const start = Math.floor(interval.startTime);
+  const end = Math.floor(interval.endTime);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) {
+    return null;
+  }
+  return { start, end };
+}
+
 export async function fetchAniSkipTimes(
   malId: number | null | undefined,
   episodeNumber: number,
@@ -27,6 +37,8 @@ export async function fetchAniSkipTimes(
     const url = new URL(`https://api.aniskip.com/v2/skip-times/${malId}/${episodeNumber}`);
     url.searchParams.append('types', 'op');
     url.searchParams.append('types', 'ed');
+    url.searchParams.append('types', 'mixed-op');
+    url.searchParams.append('types', 'mixed-ed');
     url.searchParams.append('episodeLength', episodeLengthSec.toString());
 
     const response = await fetch(url.toString(), {
@@ -51,14 +63,32 @@ export async function fetchAniSkipTimes(
     }
 
     const out: SkipTimes = { ...empty };
+    let mixedOp: { start: number; end: number } | null = null;
+    let mixedEd: { start: number; end: number } | null = null;
+
     for (const item of data.results) {
+      const iv = toValidInterval(item.interval);
+      if (!iv) continue;
       if (item.skipType === 'op' && out.opStart === null) {
-        out.opStart = Math.floor(item.interval.startTime);
-        out.opEnd = Math.floor(item.interval.endTime);
+        out.opStart = iv.start;
+        out.opEnd = iv.end;
       } else if (item.skipType === 'ed' && out.edStart === null) {
-        out.edStart = Math.floor(item.interval.startTime);
-        out.edEnd = Math.floor(item.interval.endTime);
+        out.edStart = iv.start;
+        out.edEnd = iv.end;
+      } else if (item.skipType === 'mixed-op' && mixedOp === null) {
+        mixedOp = iv;
+      } else if (item.skipType === 'mixed-ed' && mixedEd === null) {
+        mixedEd = iv;
       }
+    }
+
+    if (out.opStart === null && mixedOp !== null) {
+      out.opStart = mixedOp.start;
+      out.opEnd = mixedOp.end;
+    }
+    if (out.edStart === null && mixedEd !== null) {
+      out.edStart = mixedEd.start;
+      out.edEnd = mixedEd.end;
     }
     return out;
   } catch (err: unknown) {

@@ -65,7 +65,7 @@ class DiskCachedJsonStore(
                 if (!onBody(raw)) return@use false
 
                 val newEtag = resp.header("ETag")?.trim()?.takeIf { it.isNotBlank() }
-                if (newEtag != null) lastEtag = newEtag
+                lastEtag = newEtag
                 lastSyncedAtMs = now
                 saveToDisk(raw, newEtag, now)
                 true
@@ -79,7 +79,9 @@ class DiskCachedJsonStore(
             p.edit()
                 .putLong(KEY_TS, ts)
                 .putString(KEY_JSON, rawJson)
-                .apply { if (etag != null) putString(KEY_ETAG, etag) }
+                .apply {
+                    if (etag != null) putString(KEY_ETAG, etag) else remove(KEY_ETAG)
+                }
                 .apply()
         }
     }

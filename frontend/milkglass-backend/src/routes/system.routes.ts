@@ -152,6 +152,7 @@ async function dispatchGitHubCrashIssue(
 
 systemRoutes.post(
   '/crash-report',
+  rateLimit(5, 60),
   zValidatorJson(crashReportSchema),
   async (c) => {
     const report = c.req.valid('json');
@@ -283,6 +284,7 @@ async function dispatchGitHubPerfIssue(
 
 systemRoutes.post(
   '/perf-report',
+  rateLimit(5, 60),
   zValidatorJson(perfReportSchema),
   async (c) => {
     const report = c.req.valid('json');

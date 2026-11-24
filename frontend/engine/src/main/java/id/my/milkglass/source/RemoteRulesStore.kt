@@ -99,6 +99,14 @@ class RemoteRulesStore(
             return p.contains("{q}")
         }
 
+        private val SAFE_ACTION_TOKEN = Regex("^[a-zA-Z0-9_-]{1,64}$")
+
+        fun isSafeRuleValue(key: String, value: String): Boolean {
+            val v = value.trim()
+            if (key.endsWith("_action")) return SAFE_ACTION_TOKEN.matches(v)
+            return isSafeCssSelector(v)
+        }
+
         fun isSafeCssSelector(sel: String): Boolean {
             val s = sel.trim()
             if (s.length !in 1..240) return false
@@ -128,7 +136,7 @@ class RemoteRulesStore(
                     while (keys.hasNext()) {
                         val k = keys.next().trim()
                         val v = selObj.optString(k).trim()
-                        if (k.length in 1..40 && isSafeCssSelector(v)) {
+                        if (k.length in 1..40 && isSafeRuleValue(k, v)) {
                             selMap[k] = v
                         }
                     }

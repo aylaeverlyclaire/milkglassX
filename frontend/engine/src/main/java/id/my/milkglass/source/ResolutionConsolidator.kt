@@ -58,7 +58,9 @@ class ResolutionConsolidator(
         val existing = getConsolidatedCandidates(animeTitle, episodeNumber)
         val coveredQualities = (existingQualities + existing.filterNot { it.isBatchArchive }.map { it.quality }).toMutableSet()
         var hasMp4 = existing.any {
-            !it.isBatchArchive && (it.container == MediaContainer.MP4 || it.rawUrl.contains(".mp4", ignoreCase = true))
+            !it.isBatchArchive &&
+                (!it.isStreamEmbed || it.rawUrl.contains(".mp4", ignoreCase = true)) &&
+                (it.container == MediaContainer.MP4 || it.rawUrl.contains(".mp4", ignoreCase = true))
         }
         if (coveredQualities.containsAll(MkvQuality.ALL_DESC) && hasMp4) return
 
@@ -83,7 +85,8 @@ class ResolutionConsolidator(
 
             val newQualities = found.map { it.quality }.toSet() - coveredQualities
             val addsMp4 = !hasMp4 && found.any {
-                it.container == MediaContainer.MP4 || it.rawUrl.contains(".mp4", ignoreCase = true)
+                (!it.isStreamEmbed || it.rawUrl.contains(".mp4", ignoreCase = true)) &&
+                    (it.container == MediaContainer.MP4 || it.rawUrl.contains(".mp4", ignoreCase = true))
             }
             if (newQualities.isNotEmpty() || addsMp4) {
                 for (c in found) mergedMap.putIfAbsent(c.rawUrl, c)

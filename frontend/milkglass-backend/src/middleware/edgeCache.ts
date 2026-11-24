@@ -56,7 +56,14 @@ function stripVaryOrigin(headers: Headers): void {
 }
 
 export function normalizeCacheTitle(raw: string): string {
-  return raw.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ').slice(0, 120);
+  return raw
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, 120);
 }
 
 async function weakEtag(body: string): Promise<string> {
