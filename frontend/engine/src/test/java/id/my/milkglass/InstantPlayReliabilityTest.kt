@@ -318,6 +318,11 @@ class InstantPlayReliabilityTest {
                 "https://pixeldrain.com/api/file/zoxSe2yx"
             )
         )
+        assertTrue(
+            EmbedMediaSniffer.isTrustedBinaryStreamEndpoint(
+                "https://pixeldrain.net/api/file/zoxSe2yx"
+            )
+        )
         val webViewOnly = listOf(
             RawMkvCandidate(
                 SourcePriority.YLNIME, MkvQuality.P720, "YLnimePlayer",
@@ -497,5 +502,28 @@ class InstantPlayReliabilityTest {
             mp4
         )
         assertEquals(listOf(mp4.directUrl, mkv2.directUrl), reordered.map { it.directUrl })
+    }
+
+    @Test
+    fun cascadePassesPreferredQualityFirstInTargetQualities() {
+        SourceCircuitBreaker.resetAll()
+        var capturedFirst: MkvQuality? = null
+        val probeProvider = object : MkvSourceProvider {
+            override val priority: SourcePriority = SourcePriority.YLNIME
+            override fun findEpisodeMkvCandidates(
+                animeTitle: String,
+                episodeNumber: Int,
+                targetQualities: Set<MkvQuality>
+            ): List<RawMkvCandidate> {
+                capturedFirst = targetQualities.firstOrNull()
+                return emptyList()
+            }
+        }
+        val resolver = MkvCascadeResolver(
+            clients = IsolatedHttpClients(null),
+            providers = listOf(probeProvider)
+        )
+        resolver.resolve("Frieren Test", 1, preferredQuality = MkvQuality.P720)
+        assertEquals(MkvQuality.P720, capturedFirst)
     }
 }

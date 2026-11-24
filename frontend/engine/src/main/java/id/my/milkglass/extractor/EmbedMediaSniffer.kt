@@ -90,7 +90,9 @@ object EmbedMediaSniffer {
             low.contains("drive.usercontent.google.com") ||
             low.contains("odcloud.net/") ||
             low.contains("pixeldrain.com/api/file/") ||
+            low.contains("pixeldrain.net/api/file/") ||
             low.contains("pixeldrain.lu/api/file/") ||
+            low.contains("pdrain.com/api/file/") ||
             low.contains("r2.cloudflarestorage.com/") ||
             low.contains(".r2.dev/") ||
             low.contains(".animeverse.id/") ||
@@ -113,7 +115,9 @@ object EmbedMediaSniffer {
             low.contains("video-downloads.googleusercontent.com") ||
             low.contains("cdn.odcloud.net/") ||
             low.contains("pixeldrain.com/api/file/") ||
+            low.contains("pixeldrain.net/api/file/") ||
             low.contains("pixeldrain.lu/api/file/") ||
+            low.contains("pdrain.com/api/file/") ||
             low.contains("r2.cloudflarestorage.com/") ||
             low.contains(".r2.dev/") ||
             low.contains(".animeverse.id/") ||
