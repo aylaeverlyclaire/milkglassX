@@ -67,7 +67,7 @@ function shapeAnimeRow(
       }
     } catch {}
   }
-  const cleanedRest = {
+  const cleanedRest: Record<string, unknown> = {
     ...rest,
     title: decodeHtmlEntities(rest.title),
     ...(rest.title_alt !== undefined ? { title_alt: decodeHtmlEntities(rest.title_alt) } : {}),
