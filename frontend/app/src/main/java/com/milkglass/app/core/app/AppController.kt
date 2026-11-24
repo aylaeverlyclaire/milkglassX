@@ -253,7 +253,10 @@ class AppController(
         try {
             val m = src.load(a.id)
             if (m == null) metaRequested.remove(a.id)
-            else if (m.isNotEmpty()) episodeMeta = episodeMeta + (a.id to m)
+            else if (m.isNotEmpty()) {
+                episodeMeta = episodeMeta + (a.id to m)
+                reportLiveEpisodes(a.id, m.keys.maxOrNull() ?: 0, 0 in m)
+            }
         } catch (ce: kotlinx.coroutines.CancellationException) {
             metaRequested.remove(a.id)
             throw ce

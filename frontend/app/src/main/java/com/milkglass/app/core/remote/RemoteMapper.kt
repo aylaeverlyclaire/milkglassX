@@ -26,7 +26,7 @@ object RemoteMapper {
         val hasLive = r.sourceUrls.isNotEmpty()
         val released = when {
             ongoing && r.nextAiringEp > 0 -> (r.nextAiringEp - 1).coerceAtLeast(if (hasLive) 1 else 0)
-            !ongoing && r.episodesTotal > 0 -> r.episodesTotal
+            r.episodesTotal > 0 -> r.episodesTotal
             else -> if (hasLive) 1 else 0
         }
 

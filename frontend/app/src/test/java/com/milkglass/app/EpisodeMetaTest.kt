@@ -9,6 +9,7 @@ import com.milkglass.app.core.remote.parseAniSkip
 import com.milkglass.app.core.remote.parseAniZipEpisodes
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import com.milkglass.app.core.app.AppController
 import com.milkglass.app.core.model.Anime
 import com.milkglass.app.core.poster.PosterStore
@@ -31,7 +32,7 @@ class EpisodeMetaTest {
             mapOf(
                 0 to EpisodeMeta(null, "https://x/0.jpg"),
                 1 to EpisodeMeta("Cruelty", "https://x/1.jpg"),
-                2 to EpisodeMeta("Nihongo", "https://x/2.jpg"),
+                2 to EpisodeMeta("Nihongo", null),
                 5 to EpisodeMeta("Romaji", null),
             ),
             parseAniZipEpisodes(json),
@@ -98,7 +99,10 @@ class EpisodeMetaTest {
             metaSource = object : EpisodeMetaSource {
                 override suspend fun load(anilistId: Int): Map<Int, EpisodeMeta>? {
                     metaCalls.add(anilistId)
-                    return emptyMap()
+                    return mapOf(
+                        0 to EpisodeMeta("Prologue", null),
+                        12 to EpisodeMeta("Finale", null),
+                    )
                 }
             },
             extrasSource = object : AniListExtrasSource {
@@ -110,7 +114,7 @@ class EpisodeMetaTest {
         )
         val base = Anime(
             id = 900_000_001, title = "Synthetic", altTitle = "", genres = emptyList(),
-            colorFrom = "#000000", colorTo = "#111111", totalEpisodes = 12, releasedEpisodes = 1,
+            colorFrom = "#000000", colorTo = "#111111", totalEpisodes = 2, releasedEpisodes = 1,
             rating = 0.0, voteCount = 0, studio = "", year = 2026, ageRating = "",
             episodeMinutes = 24, openingRange = emptyList(), synopsis = "", similarIds = emptyList(),
         )
@@ -124,5 +128,8 @@ class EpisodeMetaTest {
         ctl.loadExtras(real)
         assertEquals(listOf(987_654), metaCalls)
         assertEquals(listOf(987_654), extrasCalls)
+        assertEquals(12, ctl.effectiveReleasedCount(real))
+        assertEquals(12, ctl.effectiveTotalCount(real))
+        assertTrue(ctl.hasEpisodeZero(real))
     }
 }

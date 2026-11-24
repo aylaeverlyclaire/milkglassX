@@ -55,6 +55,18 @@ class RemoteCatalogTest {
         assertTrue(a.similarIds.isEmpty())
     }
 
+    @Test fun ongoingWithoutNextAiringEpUsesCuratedEpisodesTotalInsteadOfCollapsingToOne() {
+        val r = remote(ongoingJson).copy(
+            episodesTotal = 191,
+            nextAiringAt = 0,
+            nextAiringEp = 0,
+            sourceUrls = mapOf("ylnime" to "https://ylnime.com/index.php?series=lingwu-continent")
+        )
+        val a = RemoteMapper.toAnime(r)
+        assertEquals(191, a.releasedEpisodes)
+        assertEquals(191, a.totalEpisodes)
+    }
+
     @Test fun finishedWithKnownTotal() {
         val a = RemoteMapper.toAnime(remote(finishedJson))
         assertEquals(25, a.totalEpisodes)
