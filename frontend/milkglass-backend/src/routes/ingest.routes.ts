@@ -438,8 +438,8 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
     }
   }
 
-  for (let i = 0; i < stmts.length; i += 80) {
-    await c.env.DB.batch(stmts.slice(i, i + 80));
+  for (let i = 0; i < stmts.length; i += 40) {
+    await c.env.DB.batch(stmts.slice(i, i + 40));
   }
 
   if (touchedAnimeIds.size > 0) {
@@ -582,7 +582,13 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
            episodes_total = CASE WHEN excluded.episodes_total > animes.episodes_total THEN excluded.episodes_total ELSE animes.episodes_total END,
            source_urls_json = excluded.source_urls_json,
            has_live_source = 1,
-           updated_at = excluded.updated_at`
+           updated_at = excluded.updated_at
+         WHERE animes.episodes_total < excluded.episodes_total
+            OR animes.status != excluded.status
+            OR animes.source_urls_json != excluded.source_urls_json
+            OR animes.has_live_source != 1
+            OR (excluded.score > 0 AND animes.score = 0)
+            OR (excluded.poster_url != '' AND (animes.poster_url IS NULL OR animes.poster_url = ''))`
       ).bind(
         targetId,
         item.mal_id ?? null,
@@ -605,8 +611,8 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
     else inserted++;
   }
 
-  for (let i = 0; i < stmts.length; i += 80) {
-    await c.env.DB.batch(stmts.slice(i, i + 80));
+  for (let i = 0; i < stmts.length; i += 40) {
+    await c.env.DB.batch(stmts.slice(i, i + 40));
   }
 
   if (prune) {

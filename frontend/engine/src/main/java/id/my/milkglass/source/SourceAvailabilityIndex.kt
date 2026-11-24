@@ -133,8 +133,12 @@ class SourceAvailabilityIndex(
 
         val bucket = parsed.tokens.asSequence()
             .mapNotNull { perSource[it] }
-            .minByOrNull { it.size }
-            ?: return null
+            .sortedBy { it.size }
+            .take(3)
+            .flatten()
+            .distinct()
+            .toList()
+        if (bucket.isEmpty()) return null
 
         var bestEntry: IndexedAnimeEntry? = null
         var bestScore = 0.0
@@ -165,8 +169,12 @@ class SourceAvailabilityIndex(
 
             val bucket = parsed.tokens.asSequence()
                 .mapNotNull { tokenLookup[it] }
-                .minByOrNull { it.size }
-                ?: continue
+                .sortedBy { it.size }
+                .take(3)
+                .flatten()
+                .distinct()
+                .toList()
+            if (bucket.isEmpty()) continue
 
             val bestBySource = HashMap<SourcePriority, Pair<IndexedAnimeEntry, Double>>()
             for (entry in bucket) {

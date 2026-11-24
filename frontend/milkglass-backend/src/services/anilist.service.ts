@@ -327,6 +327,7 @@ function extractSeasonTag(rawTitle: string, norm: string): number {
     norm.match(/\bs(\d+)\b/) ||
     norm.match(/\b(\d+)(?:st|nd|rd|th)\s+season\b/);
   if (m) return Number.parseInt(m[1], 10);
+  if (/[∬²]/.test(rawTitle)) return 2;
   const roman = rawTitle.match(/\b(II|III|IV|V)\b/);
   if (roman) return ROMAN_SEASON_MAP[roman[1].toLowerCase()] ?? 1;
   return 1;
@@ -342,6 +343,7 @@ function extractFormatKind(norm: string): string {
   if (/\b(?:ova|oad)\b/.test(norm)) return 'OVA';
   if (/\b(?:side\s*story|gaiden|spin\s*off|nikki|diaries|coleus|bullet)\b/.test(norm)) return 'SIDE_STORY';
   if (/\b(?:special|recap)\b/.test(norm)) return 'SPECIAL';
+  if (/\bona\b/.test(norm)) return 'ONA';
   return 'TV';
 }
 
