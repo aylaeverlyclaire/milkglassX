@@ -4,11 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       max_animes:
-        description: "Jumlah maksimum anime katalog yang diindeks"
-        default: "300"
+        description: "Jumlah maksimum total anime katalog yang diindeks lintas shard"
+        default: "4800"
       max_eps:
-        description: "Jumlah maksimum episode per anime (selalu termasuk Ep 1 + terbaru)"
-        default: "4"
+        description: "Jumlah maksimum episode per anime (selalu termasuk Ep 1..N awal + terbaru)"
+        default: "8"
+  push:
+    branches: [main]
+    paths:
+      - "frontend/scripts/index-hosters.mjs"
+      - ".github/workflows/index-hosters.yml"
   schedule:
     - cron: "23 */12 * * *"
 
@@ -24,6 +29,10 @@ jobs:
   index:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
     services:
       cf-handler:
         image: ghcr.io/aylaeverlyclaire/milkglassx-cf-handler:latest
@@ -53,18 +62,20 @@ jobs:
             sleep 2
           done
           echo "CF Handler belum merespons /health, lanjutkan dengan fallback langsung"
-      - name: Indeks & verifikasi multi-hoster ke Cloudflare D1
+      - name: Indeks & verifikasi multi-hoster ke Cloudflare D1 (Shard ${{ matrix.shard }}/6)
         env:
           WORKER_URL: https://milkglass-backend.milkyliquid.workers.dev
           ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
           CF_HANDLER_URL: http://127.0.0.1:8000
-          MAX_ANIMES: ${{ github.event.inputs.max_animes || '300' }}
-          MAX_EPS_PER_ANIME: ${{ github.event.inputs.max_eps || '4' }}
-          CONCURRENCY: "6"
+          MAX_ANIMES: ${{ github.event.inputs.max_animes || '4800' }}
+          MAX_EPS_PER_ANIME: ${{ github.event.inputs.max_eps || '8' }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: "6"
+          CONCURRENCY: "8"
         run: |
           set +e
           node frontend/scripts/index-hosters.mjs > out.txt 2>&1; RC=$?
           tail -n 60 out.txt
           MSG=$(tail -n 25 out.txt | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' | head -c 3500)
-          echo "::notice title=index-hosters::$MSG"
+          echo "::notice title=index-hosters-shard-${{ matrix.shard }}::$MSG"
           exit $RC
