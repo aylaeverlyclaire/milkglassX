@@ -34,13 +34,15 @@ const HINT_REFRESH_AFTER_SEC = 20 * 60;
 const HINT_MAX_CANDIDATES = 12;
 const IP_AGNOSTIC_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
-  'filedon.co', 'odfiles.com', 'r2.dev', 'blogger.googleusercontent.com', 'video-downloads.googleusercontent.com', 'odcloud.net', 'buzzheavier.com', 'qiwi.gg', 'spyderrock.com',
+  'filedon.co', 'odfiles.com', 'r2.dev', 'r2.cloudflarestorage.com', 'animeverse.id', 'animekita.org',
+  'blogger.googleusercontent.com', 'video-downloads.googleusercontent.com', 'odcloud.net', 'buzzheavier.com', 'qiwi.gg', 'spyderrock.com',
   'mediafire.com', 'krakenfiles.com', 'kfiles.io', 'wibufile.com', 'uqni.net',
   'drive.google.com', 'drive.usercontent.google.com',
 ];
 const IP_LOCKED_HOSTER_DOMAINS = [
-  'gofile.io', 'desustream.info', 'desustream.com', 'ondesu.com', 'mp4upload.com',
-  'blogger.com', 'yourupload.com', 'vidhidepre.com', 'vidhide.com', 'berkasdrive.com', 'mitedrive.com', 'short.ink',
+  'gofile.io', 'desustream.info', 'desustream.com', 'desustream.net', 'ondesu.com', 'ondesu.cc', 'ondesuh.cc', 'odstream.xyz', 'mp4upload.com',
+  'blogger.com', 'googlevideo.com', 'yourupload.com', 'vidhidepre.com', 'vidhide.com', 'odvidhide.com',
+  'streamruby.com', 'rubyvidhub.com', 'filemoon.sx', 'berkasdrive.com', 'mitedrive.com', 'short.ink',
   'icefile.web.id',
 ];
 const ALL_HOSTER_DOMAINS = [...IP_AGNOSTIC_HOSTER_DOMAINS, ...IP_LOCKED_HOSTER_DOMAINS];
@@ -63,7 +65,14 @@ export function isKnownHosterUrl(raw: string): boolean {
 
 
 export function normalizeTitleKey(title: string): string {
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ').slice(0, 120);
+  return title
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, 120);
 }
 
 export function hintKey(title: string, ep: number): string {
