@@ -14,6 +14,8 @@ import {
   parseYlnimeEpisodes,
   parseEpisodeHostersFromHtml,
   selectEpisodesToIndex,
+  hasCompleteResolutionSet,
+  mergeEpisodeHostersBalanced,
 } from './index-hosters.mjs';
 
 test('scoreTitleMatch matches exact and sub-indo variants while rejecting wrong format/season/part', () => {
@@ -318,4 +320,29 @@ test('parseEpisodeHostersFromHtml extracts 480p, 720p, and 1080p from <source si
   assert.equal(quals.has('1080p'), true);
   assert.equal(quals.has('720p'), true);
   assert.equal(quals.has('480p'), true);
+});
+
+test('hasCompleteResolutionSet enforces all 3 resolutions (480p, 720p, 1080p) and mergeEpisodeHostersBalanced preserves cross-provider resolutions', () => {
+  assert.equal(hasCompleteResolutionSet([{ quality: '1080p' }]), false);
+  assert.equal(hasCompleteResolutionSet([{ quality: '1080p' }, { quality: '720p' }]), false);
+  assert.equal(hasCompleteResolutionSet([{ quality: '480p' }, { quality: '720p' }]), false);
+  assert.equal(hasCompleteResolutionSet([{ quality: '480p' }, { quality: '720p' }, { quality: '1080p' }]), true);
+
+  const fromYlnime = [
+    { quality: '1080p', url: 'https://s3.animeverse.id/ep1-1080.mp4', hoster: 'Animeverse', provider: 'ylnime' },
+    { quality: '720p', url: 'https://s3.animeverse.id/ep1-720.mp4', hoster: 'Animeverse', provider: 'ylnime' },
+  ];
+  const fromOtaku = [
+    { quality: '480p', url: 'https://pixeldrain.com/u/ep1480', hoster: 'Pixeldrain', provider: 'otakudesu' },
+    { quality: '720p', url: 'https://pixeldrain.com/u/ep1720', hoster: 'Pixeldrain', provider: 'otakudesu' },
+    { quality: '1080p', url: 'https://filedon.co/view/ep11080', hoster: 'Filedon', provider: 'otakudesu' },
+  ];
+  const merged = mergeEpisodeHostersBalanced(fromYlnime, fromOtaku);
+  assert.equal(hasCompleteResolutionSet(merged), true);
+  assert.equal(merged.filter((x) => x.quality === '480p').length, 1);
+  assert.equal(merged.filter((x) => x.quality === '720p').length, 2);
+  assert.equal(merged.filter((x) => x.quality === '1080p').length, 2);
+
+  const fullSeason = Array.from({ length: 24 }, (_, i) => ({ ep: i + 1, url: `https://x/ep-${i + 1}` }));
+  assert.equal(selectEpisodesToIndex(fullSeason, 500).length, 24);
 });

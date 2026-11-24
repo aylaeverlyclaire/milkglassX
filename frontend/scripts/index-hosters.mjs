@@ -563,6 +563,39 @@ export function parseEpisodeHostersFromHtml(html, pageUrl, provider = 'otakudesu
   return balanced;
 }
 
+export const REQUIRED_RESOLUTIONS = ['1080p', '720p', '480p'];
+
+export function hasCompleteResolutionSet(hosters) {
+  if (!Array.isArray(hosters) || hosters.length === 0) return false;
+  const covered = new Set(hosters.map((h) => h?.quality).filter(Boolean));
+  return REQUIRED_RESOLUTIONS.every((q) => covered.has(q));
+}
+
+export function mergeEpisodeHostersBalanced(existing, incoming, maxPerQuality = 6, maxTotal = 24) {
+  const combined = [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])];
+  const seenUrl = new Set();
+  const byQuality = new Map();
+  for (const h of combined) {
+    if (!h || !h.url) continue;
+    const key = `${h.quality || '720p'}|${h.url}`;
+    if (seenUrl.has(key)) continue;
+    seenUrl.add(key);
+    const q = h.quality || '720p';
+    const arr = byQuality.get(q) || [];
+    if (arr.length < maxPerQuality) {
+      arr.push(h);
+      byQuality.set(q, arr);
+    }
+  }
+  const out = [];
+  for (const q of ['1080p', '720p', '480p', '360p']) {
+    for (const h of byQuality.get(q) || []) {
+      if (out.length < maxTotal) out.push(h);
+    }
+  }
+  return out;
+}
+
 const ALLOWED_CATALOG_PROVIDERS = new Set(['otakudesu', 'ylnime']);
 
 export function buildSourceFirstCatalog(catalog, providerIndices) {
@@ -725,11 +758,12 @@ async function main() {
     throw new Error('ADMIN_SECRET wajib diisi (atau set EXPORT_CURATED_HOSTERS_FILE untuk ekspor lokal).');
   }
 
-  const defaultMaxAnimes = popularOnly ? '100' : '1500';
-  const defaultMaxEps = popularOnly ? '26' : '4';
+  const defaultMaxAnimes = popularOnly ? '100' : '4800';
+  const defaultMaxEps = '500';
   const maxAnimes = Math.max(1, Number.parseInt(process.env.MAX_ANIMES || defaultMaxAnimes, 10) || 100);
-  const maxEps = Math.max(1, Number.parseInt(process.env.MAX_EPS_PER_ANIME || defaultMaxEps, 10) || 4);
+  const maxEps = Math.max(1, Number.parseInt(process.env.MAX_EPS_PER_ANIME || defaultMaxEps, 10) || 500);
   const concurrency = Math.max(1, Math.min(12, Number.parseInt(process.env.CONCURRENCY || '6', 10) || 6));
+  const epConcurrency = Math.max(1, Math.min(8, Number.parseInt(process.env.EP_CONCURRENCY || '5', 10) || 5));
 
   console.log(`Fetching catalog list from ${workerUrl} (maxAnimes=${maxAnimes}, maxEps=${maxEps}, popularOnly=${popularOnly})...`);
   const [catJson, srcJson] = await Promise.all([
@@ -779,8 +813,8 @@ async function main() {
   ]);
 
   const orderedProviderResults = [
-    ['otakudesu', otakuBase, otakuRes],
     ['ylnime', ylBase, ylRes],
+    ['otakudesu', otakuBase, otakuRes],
   ];
   for (const [provider, base, res] of orderedProviderResults) {
     if (res.status === 'fulfilled' && res.value.length > 0) {
@@ -925,18 +959,20 @@ async function main() {
         const eps = selectEpisodesToIndex(rawEps, maxEps);
         if (eps.length === 0) continue;
 
-        for (const epItem of eps) {
+        await runPool(eps, epConcurrency, async (epItem) => {
+          const currentForEp = epHostersMap.get(epItem.ep) || [];
+          if (hasCompleteResolutionSet(currentForEp) && currentForEp.length >= 4) return;
           try {
             const epHtml = await fetchText(epItem.url, usedUrl, 15000);
             let hosters = parseEpisodeHostersFromHtml(epHtml, epItem.url, source.provider);
             if (source.provider === 'ylnime' && epItem.url.startsWith('http')) {
-              const coveredQ = new Set(hosters.map((h) => h.quality));
-              const missingResos = ['1080p', '720p', '480p'].filter((r) => !coveredQ.has(r));
-              if (missingResos.length > 0 && coveredQ.size < 3) {
+              const coveredQ = new Set([...currentForEp, ...hosters].map((h) => h.quality));
+              const missingResos = REQUIRED_RESOLUTIONS.filter((r) => !coveredQ.has(r));
+              if (missingResos.length > 0) {
                 const baseEpUrl = epItem.url.replace(/([?&])reso=[^&#]+&?/gi, '$1').replace(/[?&]$/, '');
                 const sep = baseEpUrl.includes('?') ? '&' : '?';
                 const extraResults = await Promise.allSettled(
-                  missingResos.slice(0, 2).map(async (reso) => {
+                  missingResos.map(async (reso) => {
                     const rUrl = `${baseEpUrl}${sep}reso=${reso}`;
                     const rHtml = await fetchText(rUrl, usedUrl, 10000);
                     return parseEpisodeHostersFromHtml(rHtml, rUrl, source.provider).map((h) => ({
@@ -945,16 +981,9 @@ async function main() {
                     }));
                   })
                 );
-                const seenH = new Set(hosters.map((h) => `${h.quality}|${h.url}`));
                 for (const er of extraResults) {
                   if (er.status !== 'fulfilled') continue;
-                  for (const h of er.value) {
-                    const k = `${h.quality}|${h.url}`;
-                    if (!seenH.has(k)) {
-                      seenH.add(k);
-                      hosters.push(h);
-                    }
-                  }
+                  hosters = mergeEpisodeHostersBalanced(hosters, er.value);
                 }
               }
             }
@@ -974,15 +1003,7 @@ async function main() {
               });
             }
             if (hosters.length > 0) {
-              const existing = epHostersMap.get(epItem.ep) || [];
-              const existingUrls = new Set(existing.map((x) => x.url));
-              for (const h of hosters) {
-                if (!existingUrls.has(h.url) && existing.length < 20) {
-                  existing.push(h);
-                  existingUrls.add(h.url);
-                }
-              }
-              epHostersMap.set(epItem.ep, existing);
+              epHostersMap.set(epItem.ep, mergeEpisodeHostersBalanced(epHostersMap.get(epItem.ep) || [], hosters));
             }
           } catch (err) {
             if (diagLogs < 6) {
@@ -990,8 +1011,13 @@ async function main() {
               console.log(`[diag:${source.provider}-ep-err] ${epItem.url}: ${err.message}`);
             }
           }
+        });
+        if (
+          epHostersMap.size >= eps.length &&
+          Array.from(epHostersMap.values()).every((list) => hasCompleteResolutionSet(list) && list.length >= 4)
+        ) {
+          break;
         }
-        if (epHostersMap.size >= eps.length && Array.from(epHostersMap.values()).every((list) => list.length >= 3)) break;
       } catch (err) {
         if (diagLogs < 6) {
           diagLogs++;
@@ -1019,7 +1045,7 @@ async function main() {
       };
       if (exportFile) exportedEntries.push(payloadItem);
       batchBuffer.push(payloadItem);
-      if (batchBuffer.length >= 12) {
+      if (batchBuffer.length >= 6) {
         await flushBatch(false);
       }
     }
