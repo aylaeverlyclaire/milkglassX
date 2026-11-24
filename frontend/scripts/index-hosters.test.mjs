@@ -288,3 +288,13 @@ test('parseEpisodeHostersFromHtml meng-encode spasi di URL s3.animeverse.id dan 
   assert.equal(hosters.some((h) => h.url === 'https://s3.animeverse.id/mp4/Violet%20Evergarden%20Movie.mp4'), true);
   assert.equal(hosters.some((h) => h.hoster === 'AnimeKita' && h.container === 'hls' && h.url.includes('sjkt.animekita.org')), true);
 });
+
+test('parseEpisodeHostersFromHtml menerima domain desustream.net untuk mirror odcdn/odstream', () => {
+  const html = `
+    <div id="embed_holder">
+      <iframe src="https://desustream.net/dstream/odcdn/?id=TXdXSlhBdGVKMGNnWkQy"></iframe>
+    </div>
+  `;
+  const rows = parseEpisodeHostersFromHtml(html, 'https://otakudesu.blog/episode/mgexpl-episode-9-sub-indo/');
+  assert.ok(rows.some((r) => r.url.startsWith('https://desustream.net/dstream/odcdn/')));
+});

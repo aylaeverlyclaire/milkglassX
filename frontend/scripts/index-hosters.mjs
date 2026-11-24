@@ -23,7 +23,7 @@ const BLACKLISTED_HOSTER_PATTERNS = [
 const KNOWN_HOSTER_DOMAINS = [
   'pixeldrain.com', 'pixeldrain.net', 'pixeldrain.lu', 'pdrain.com',
   'gofile.io', 'buzzheavier.com', 'filedon.co', 'odfiles.com',
-  'icefile.web.id', 'desudrive.com', 'desustream.info', 'desustream.com',
+  'icefile.web.id', 'desudrive.com', 'desustream.info', 'desustream.com', 'desustream.net',
   'odstream', 'odcdn', 'otakuwatch', 'ondesu.com', 'blogger.com',
   'streamruby', 'rubyvidhub.com', 'filemoon', 'streamwish', 'mp4upload',
 ];
@@ -196,7 +196,7 @@ export function isBlacklistedUrl(label, url) {
   // Otakudesu membungkus tautan Filedon/Pdrain/GoFile lewat desustream.com/safelink/link/?id=...
   // yang sudah di-unwrap otomatis oleh MkvHosterExtractors.kt di Engine.
   const isOtakudesuDesuSafelink =
-    (urlLow.includes('desustream.com/safelink') || urlLow.includes('desudrive.com/safelink')) &&
+    (urlLow.includes('link.desustream.') || urlLow.includes('desustream.com/safelink') || urlLow.includes('desudrive.com/safelink')) &&
     !/mega|acefile|kraken|viking|mirrored|racaty|zippy|otakufiles/i.test(String(label || ''));
   return BLACKLISTED_HOSTER_PATTERNS.some((p) => {
     if (p === 'safelink' && isOtakudesuDesuSafelink) return false;
