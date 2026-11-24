@@ -401,11 +401,6 @@ function pixeldrainToDirectApi(url: string): string | null {
   return m ? `https://pixeldrain.com/api/file/${m[1]}` : null;
 }
 
-/**
- * Promosi otomatis kandidat episode_hosters / play_hints yang sudah berupa stream CDN langsung
- * (s3.animeverse.id, animekita.org, r2.dev, blogger.googleusercontent.com, atau Pixeldrain API)
- * menjadi direct_candidates agar klien Android langsung mengambil jalur 0-hop instant direct (<2 detik).
- */
 function promoteDirectFromHints(hints: StoredHint[], existingDirect: StoredDirect[] | null): StoredDirect[] {
   const out: StoredDirect[] = [...(existingDirect ?? [])];
   const seen = new Set<string>(out.map((d) => `${d.quality}|${d.direct_url}`));
@@ -450,10 +445,6 @@ function promoteDirectFromHints(hints: StoredHint[], existingDirect: StoredDirec
   return out;
 }
 
-/**
- * Menginterpolasi URL objek S3 `s3.animeverse.id/mp4/series_{sid}/{qual}/ep_{id}/{file}.mp4`
- * dari episode sibling untuk episode target & multi-resolusi (1080p, 720p, 480p).
- */
 function interpolateS3AnimeverseCandidates(
   siblingUrl: string,
   siblingEp: number,
@@ -526,12 +517,6 @@ async function probeS3VideoStreamOnEdge(url: string, referer: string, timeoutMs 
   }
 }
 
-/**
- * Resolusi Sibling Episode S3/CDN di Cloudflare Edge (<650ms):
- * Ketika episode `ep` belum ada di D1 `episode_hosters`, ambil episode sibling terdekat dari anime yang sama
- * di `episode_hosters`, interpolasi URL `s3.animeverse.id` lintas 1080p/720p/480p, verifikasi byte-range
- * secara paralel dalam <650ms, dan simpan otomatis ke D1 di latar belakang.
- */
 async function resolveSiblingEpisodeOnEdge(
   rdb: D1ReadClient,
   writeDb: D1Database,
@@ -741,7 +726,6 @@ playRoutes.get(
   async (c) => {
     const { anime_id, title, ep, q } = c.req.valid('query');
 
-    // 1) Jalur cepat dari D1 (tanpa scrape, tanpa Cloudflare-challenge): URL direct terverifikasi + multi-hoster katalog + hint.
     const rdb = readDb(c.env);
     const [direct, indexedHosters, hinted, globalStats] = await Promise.all([
       lookupDirect(rdb, title, ep),
@@ -786,7 +770,6 @@ playRoutes.get(
       });
     }
 
-    // 2) Jalur cepat Sibling Episode S3/CDN Interpolation (<650ms) untuk episode yang belum diindeks cron
     const edgeLive = await resolveSiblingEpisodeOnEdge(rdb, c.env.DB, title, ep, anime_id, c.executionCtx);
     if (edgeLive.direct.length > 0 || edgeLive.hints.length > 0) {
       const hosterScores: Record<string, number> = {};
@@ -926,7 +909,6 @@ playRoutes.post(
   }
 );
 
-// Wave 2: Per-ASN Hoster Telemetry (hemat D1 Free Plan)
 const TELEMETRY_WRITE_COOLDOWN_SEC = 45;
 const TELEMETRY_MIN_TTFF_MS = 50;
 const TELEMETRY_MAX_TTFF_MS = 15_000;
@@ -1016,7 +998,6 @@ playRoutes.post(
   '/telemetry',
   zValidator('json', telemetryBodySchema),
   async (c) => {
-
     const { hoster, ok, ttff_ms } = c.req.valid('json');
     const asn = getClientAsn(c);
     const normHoster = normalizeHosterKey(hoster);
@@ -1281,5 +1262,144 @@ playRoutes.get('/playback-report', rateLimit(30, 60), async (c) => {
     return c.json({ status: 'ok', data: results ?? [] });
   } catch {
     return c.json({ status: 'error', message: 'Gagal membaca laporan telemetri.' }, 500);
+  }
+});
+
+const resolveBatchSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        anime_id: z.coerce.number().int().positive().optional(),
+        title: z.string().trim().min(1).max(160),
+        ep: z.coerce.number().int().min(0).max(2000),
+        q: QUALITY_SCHEMA.default('1080p'),
+      })
+    )
+    .min(1)
+    .max(12),
+});
+
+playRoutes.post(
+  '/resolve-batch',
+  rateLimit(40, 60),
+  zValidator('json', resolveBatchSchema),
+  async (c) => {
+    const { items } = c.req.valid('json');
+    const rdb = readDb(c.env);
+    const globalStats = await loadAsnStats(rdb, 0);
+    const results: Record<
+      string,
+      {
+        direct_candidates: StoredDirect[];
+        client_extract_candidates: StoredHint[];
+        source: string;
+      }
+    > = {};
+
+    await Promise.all(
+      items.map(async (item) => {
+        const key = hintKey(item.title, item.ep);
+        const [direct, indexedHosters, hinted] = await Promise.all([
+          lookupDirect(rdb, item.title, item.ep),
+          lookupEpisodeHosters(rdb, item.title, item.ep, item.anime_id),
+          lookupHint(rdb, item.title, item.ep),
+        ]);
+        const curatedHosters = lookupCuratedEpisodeHosters(item.title, item.ep, item.anime_id);
+        const mergedHints: StoredHint[] = [];
+        const seenUrls = new Set<string>();
+        for (const h of [...(curatedHosters ?? []), ...(indexedHosters ?? []), ...(hinted ?? [])]) {
+          if (!isPlayableHosterCandidate(h.hoster, h.raw_url)) continue;
+          const dk = `${h.quality}|${h.raw_url}`;
+          if (!seenUrls.has(dk)) {
+            seenUrls.add(dk);
+            mergedHints.push(h);
+          }
+        }
+        const promotedDirect = promoteDirectFromHints(mergedHints, direct);
+        results[key] = {
+          direct_candidates: rankByAsn(promotedDirect, item.q, globalStats),
+          client_extract_candidates: rankByAsn(mergedHints, item.q, globalStats),
+          source: direct
+            ? 'direct'
+            : promotedDirect.length > 0
+              ? 'promoted_direct'
+              : indexedHosters
+                ? 'catalog_hosters'
+                : hinted
+                  ? 'hint'
+                  : 'miss',
+        };
+      })
+    );
+
+    return c.json({ status: 'ok', data: results });
+  }
+);
+
+playRoutes.get('/telemetry-summary', rateLimit(30, 60), async (c) => {
+  const hours = Math.min(168, Math.max(1, Number(c.req.query('hours') || '24') || 24));
+  const since = Math.floor(Date.now() / 1000) - hours * 3600;
+  const rdb = readDb(c.env);
+  try {
+    const { results } = await rdb
+      .prepare(
+        `SELECT title, ep, status, resolve_ms, ttff_ms, cache_hit, source, hoster, quality
+         FROM playback_reports
+         WHERE created_at >= ?1
+         ORDER BY created_at DESC
+         LIMIT 500`
+      )
+      .bind(since)
+      .all<{
+        title: string;
+        ep: number;
+        status: string;
+        resolve_ms: number;
+        ttff_ms: number;
+        cache_hit: number;
+        source: string;
+        hoster: string;
+        quality: string;
+      }>();
+
+    const rows = results ?? [];
+    const total = rows.length;
+    const okRows = rows.filter((r) => r.status !== 'failed' && r.ttff_ms > 0);
+    const failedCount = rows.filter((r) => r.status === 'failed').length;
+    const cacheHits = rows.filter((r) => r.cache_hit === 1).length;
+    const ttffs = okRows.map((r) => r.ttff_ms).sort((a, b) => a - b);
+    const pct = (arr: number[], p: number) =>
+      arr.length === 0 ? 0 : arr[Math.min(arr.length - 1, Math.floor(arr.length * p))];
+
+    const slowOrFailed = rows
+      .filter((r) => r.status === 'failed' || r.ttff_ms > 2500)
+      .slice(0, 20)
+      .map((r) => ({
+        title: r.title,
+        ep: r.ep,
+        status: r.status,
+        ttff_ms: r.ttff_ms,
+        resolve_ms: r.resolve_ms,
+        cache_hit: r.cache_hit === 1,
+        source: r.source,
+        hoster: r.hoster,
+      }));
+
+    return c.json({
+      status: 'ok',
+      window_hours: hours,
+      data: {
+        total_reports: total,
+        ok_count: okRows.length,
+        failed_count: failedCount,
+        cache_hit_rate: total > 0 ? Math.round((cacheHits / total) * 1000) / 10 : 0,
+        under_2s_rate: okRows.length > 0 ? Math.round((okRows.filter((r) => r.ttff_ms <= 2000).length / okRows.length) * 1000) / 10 : 0,
+        p50_ttff_ms: pct(ttffs, 0.5),
+        p95_ttff_ms: pct(ttffs, 0.95),
+        top_slow_or_failed: slowOrFailed,
+      },
+    });
+  } catch {
+    return c.json({ status: 'error', message: 'Gagal menyusun ringkasan telemetri.' }, 500);
   }
 });

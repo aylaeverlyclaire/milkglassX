@@ -338,6 +338,35 @@ ingestRoutes.post('/source-domain', zValidator('json', sourceDomainSchema), asyn
   return c.json({ status: 'ok', source, key, base_url: cleanUrl });
 });
 
+async function executeBatchResilient(
+  db: D1Database,
+  stmts: D1PreparedStatement[],
+  chunkSize = 20
+): Promise<{ ok: number; failed: number; lastError: string }> {
+  let ok = 0;
+  let failed = 0;
+  let lastError = '';
+  for (let i = 0; i < stmts.length; i += chunkSize) {
+    const chunk = stmts.slice(i, i + chunkSize);
+    try {
+      await db.batch(chunk);
+      ok += chunk.length;
+    } catch (batchErr: unknown) {
+      lastError = batchErr instanceof Error ? batchErr.message : String(batchErr);
+      for (const stmt of chunk) {
+        try {
+          await stmt.run();
+          ok++;
+        } catch (rowErr: unknown) {
+          failed++;
+          lastError = rowErr instanceof Error ? rowErr.message : String(rowErr);
+        }
+      }
+    }
+  }
+  return { ok, failed, lastError };
+}
+
 function normalizeHosterTitleKey(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ').slice(0, 120);
 }
@@ -398,7 +427,6 @@ const syncHostersSchema = z.object({
 });
 
 ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async (c) => {
-  await ensureCuratedCatalogPatchApplied(c.env.DB);
   const { items, reconcile } = c.req.valid('json');
   const now = Math.floor(Date.now() / 1000);
   let upserted = 0;
@@ -475,9 +503,7 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
     }
   }
 
-  for (let i = 0; i < stmts.length; i += 40) {
-    await c.env.DB.batch(stmts.slice(i, i + 40));
-  }
+  const upsertStats = await executeBatchResilient(c.env.DB, stmts, 20);
 
   if (touchedAnimeIds.size > 0) {
     const flagStmts = Array.from(touchedAnimeIds).map((aid) => {
@@ -494,27 +520,32 @@ ingestRoutes.post('/sync-hosters', zValidator('json', syncHostersSchema), async 
            AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%')`
       ).bind(aid, epTotal, completedFlag, now);
     });
-    for (let i = 0; i < flagStmts.length; i += 80) {
-      await c.env.DB.batch(flagStmts.slice(i, i + 80));
-    }
+    await executeBatchResilient(c.env.DB, flagStmts, 25);
   }
 
   if (reconcile) {
-    await c.env.DB.prepare(
-      `UPDATE animes
-       SET has_live_source = CASE
-         WHEN episodes_total <= ${MAX_ALLOWED_EPISODES}
-          AND (source_urls_json LIKE '%"ylnime"%' OR source_urls_json LIKE '%"otakudesu"%') THEN 1
-         ELSE 0
-       END`
-    ).run();
-    await ensureCuratedCatalogPatchApplied(c.env.DB);
-    await purgeHomeCache(c.req.url);
+    try {
+      await c.env.DB.prepare(
+        `UPDATE animes
+         SET has_live_source = 0
+         WHERE has_live_source != 0
+           AND (episodes_total > ${MAX_ALLOWED_EPISODES}
+             OR source_urls_json IS NULL
+             OR (source_urls_json NOT LIKE '%"ylnime"%' AND source_urls_json NOT LIKE '%"otakudesu"%'))`
+      ).run();
+      await ensureCuratedCatalogPatchApplied(c.env.DB);
+      await purgeHomeCache(c.req.url);
+    } catch (recErr: unknown) {
+      console.error('[sync-hosters:reconcile]', recErr instanceof Error ? recErr.message : String(recErr));
+    }
   }
 
   return c.json({
     status: 'ok',
     upserted_hosters: upserted,
+    batch_ok: upsertStats.ok,
+    batch_failed: upsertStats.failed,
+    ...(upsertStats.lastError ? { warning: upsertStats.lastError.slice(0, 160) } : {}),
     touched_animes: touchedAnimeIds.size,
     skipped_excluded: skippedExcluded,
     reconciled: reconcile,
@@ -562,13 +593,42 @@ const UPSERT_META_SQL = `
 `;
 
 ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSchema), async (c) => {
-  await ensureCuratedCatalogPatchApplied(c.env.DB);
   const { items, scope, prune } = c.req.valid('json');
   const now = Math.floor(Date.now() / 1000);
   const stmts: D1PreparedStatement[] = [];
   let updated = 0;
   let inserted = 0;
   let skipped = 0;
+
+  // Prefetch existing source_urls_json in chunks so merging is pure JS (immune to SQLite json_patch quirks)
+  const existingUrlsMap = new Map<number, Record<string, string>>();
+  const candidateIds = Array.from(
+    new Set(items.map((it) => it.anime_id ?? sourceCatalogStableId(it.title)).filter((id) => Number.isInteger(id) && id > 0))
+  );
+  for (let i = 0; i < candidateIds.length; i += 60) {
+    const sliceIds = candidateIds.slice(i, i + 60);
+    if (sliceIds.length === 0) continue;
+    try {
+      const { results } = await c.env.DB.prepare(
+        `SELECT id, source_urls_json FROM animes WHERE id IN (${sliceIds.join(',')})`
+      ).all<{ id: number; source_urls_json: string | null }>();
+      for (const r of results ?? []) {
+        if (typeof r.source_urls_json === 'string' && r.source_urls_json.trim().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(r.source_urls_json) as Record<string, unknown>;
+            const clean: Record<string, string> = {};
+            for (const [k, v] of Object.entries(parsed)) {
+              const key = k.trim().toLowerCase();
+              if (ALLOWED_CATALOG_PROVIDERS.has(key) && typeof v === 'string' && v.startsWith('https://')) {
+                clean[key] = v.trim();
+              }
+            }
+            if (Object.keys(clean).length > 0) existingUrlsMap.set(r.id, clean);
+          } catch {}
+        }
+      }
+    } catch {}
+  }
 
   for (const item of items) {
     const targetId = item.anime_id ?? sourceCatalogStableId(item.title);
@@ -604,7 +664,8 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
       continue;
     }
 
-    const urlsJson = JSON.stringify(cleanUrls);
+    const mergedUrls = { ...(existingUrlsMap.get(targetId) ?? {}), ...cleanUrls };
+    const urlsJson = JSON.stringify(mergedUrls);
     const titleAlt = item.title_alt?.trim() || item.title;
     const posterUrl = item.poster_url?.trim() || '';
     const score = typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : 0;
@@ -635,15 +696,9 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
            genres_json = CASE WHEN excluded.genres_json != '[]' THEN excluded.genres_json ELSE animes.genres_json END,
            synonyms_json = CASE WHEN excluded.synonyms_json != '[]' THEN excluded.synonyms_json ELSE animes.synonyms_json END,
            episodes_total = CASE WHEN excluded.episodes_total > animes.episodes_total THEN excluded.episodes_total ELSE animes.episodes_total END,
-           source_urls_json = json_patch(CASE WHEN json_valid(animes.source_urls_json) THEN animes.source_urls_json ELSE '{}' END, excluded.source_urls_json),
-           has_live_source = CASE WHEN MAX(animes.episodes_total, excluded.episodes_total) > ${MAX_ALLOWED_EPISODES} THEN 0 ELSE 1 END,
-           updated_at = excluded.updated_at
-         WHERE animes.episodes_total < excluded.episodes_total
-            OR animes.status != excluded.status
-            OR animes.source_urls_json != json_patch(CASE WHEN json_valid(animes.source_urls_json) THEN animes.source_urls_json ELSE '{}' END, excluded.source_urls_json)
-            OR animes.has_live_source != 1
-            OR (excluded.score > 0 AND animes.score = 0)
-            OR (excluded.poster_url != '' AND (animes.poster_url IS NULL OR animes.poster_url = ''))`
+           source_urls_json = excluded.source_urls_json,
+           has_live_source = CASE WHEN excluded.episodes_total > ${MAX_ALLOWED_EPISODES} OR animes.episodes_total > ${MAX_ALLOWED_EPISODES} THEN 0 ELSE 1 END,
+           updated_at = excluded.updated_at`
       ).bind(
         targetId,
         item.mal_id ?? null,
@@ -666,9 +721,7 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
     else inserted++;
   }
 
-  for (let i = 0; i < stmts.length; i += 40) {
-    await c.env.DB.batch(stmts.slice(i, i + 40));
-  }
+  const writeStats = await executeBatchResilient(c.env.DB, stmts, 20);
 
   if (prune) {
     await c.env.DB.prepare(
@@ -694,5 +747,14 @@ ingestRoutes.post('/sync-source-catalog', zValidator('json', syncSourceCatalogSc
   }
 
   await purgeHomeCache(c.req.url);
-  return c.json({ status: 'ok', updated, inserted, skipped, pruned: prune });
+  return c.json({
+    status: 'ok',
+    updated,
+    inserted,
+    skipped,
+    batch_ok: writeStats.ok,
+    batch_failed: writeStats.failed,
+    ...(writeStats.lastError ? { warning: writeStats.lastError.slice(0, 160) } : {}),
+    pruned: prune,
+  });
 });
