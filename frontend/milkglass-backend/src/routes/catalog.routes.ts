@@ -641,7 +641,14 @@ catalogRoutes.get(
       const root = baseUrl.trim().replace(/\/+$/, '');
       if (!root.startsWith('https://')) return [];
       try {
-        const searchPath = sourceId === 'ylnime' ? `/index.php?search=${encodeURIComponent(q)}` : `/?s=${encodeURIComponent(q)}&post_type=anime`;
+        const liveQ = q
+          .normalize('NFKD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[∬²]/g, ' Season 2')
+          .replace(/[^a-zA-Z0-9\u3040-\u30ff\u4e00-\u9fff\s:'-]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim() || q;
+        const searchPath = sourceId === 'ylnime' ? `/index.php?search=${encodeURIComponent(liveQ)}` : `/?s=${encodeURIComponent(liveQ)}&post_type=anime`;
         const resp = await fetch(`${root}${searchPath}`, {
           method: 'GET',
           headers: {
@@ -837,7 +844,7 @@ catalogRoutes.get(
       if (!norm) return '';
       const sm = norm.match(/\bseason\s*(\d+)\b/) || norm.match(/\bs(\d+)\b/) || norm.match(/\b(\d+)(?:st|nd|rd|th)\s+season\b/);
       const roman = str.match(/\b(II|III|IV|V)\b/);
-      const season = sm ? Number(sm[1]) : roman ? ({ II: 2, III: 3, IV: 4, V: 5 }[roman[1]] ?? 1) : 1;
+      const season = sm ? Number(sm[1]) : /[∬²]/.test(str) ? 2 : roman ? ({ II: 2, III: 3, IV: 4, V: 5 }[roman[1]] ?? 1) : 1;
       const pm = norm.match(/\b(?:part|cour)\s*(\d+)\b/);
       const part = pm ? Number(pm[1]) : 0;
       const base = norm
